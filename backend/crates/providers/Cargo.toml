@@ -1,0 +1,17 @@
+[package]
+name = "cream-providers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cream-models = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio = { workspace = true }

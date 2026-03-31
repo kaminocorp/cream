@@ -1,0 +1,20 @@
+{
+  "name": "cream-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cream MCP server — translates MCP tool calls into REST API calls",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}

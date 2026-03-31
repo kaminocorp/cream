@@ -2,11 +2,11 @@
 
 <img src="assets/logo-readme.png" alt="Cream" width="400" />
 
-# Cream
+# C.R.E.A.M.
 
-### C.R.E.A.M. — Cash Rules Everything Around Me
+### The open-source payment control plane for AI agents.
 
-**The open-source payment control plane for AI agents.**
+**Cream is a Rust-based payment control plane with a policy engine, multi-provider routing with circuit breakers, and an append-only audit ledger — exposed as both REST and MCP — designed for AI agents to spend money autonomously within operator-defined guardrails.**
 
 [Architecture](#architecture) | [How It Works](#how-a-payment-flows) | [Tech Stack](#tech-stack) | [Getting Started](#getting-started) | [Roadmap](#roadmap) | [Contributing](#contributing) | [License](#license)
 
