@@ -1,6 +1,53 @@
 # Changelog
 
+- [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
+- [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.2.1 — 2026-03-31
+
+**Post-review formatting fixes for CI compliance**
+
+Caught during Phase 1 & 2 review — `cargo fmt --check` was failing, which would block CI.
+
+### Fixed
+
+- **`lib.rs` module ordering** — `mod` declarations reordered to alphabetical (`agent`, `audit`, `card`, …) to satisfy `rustfmt` default sort; prior order was dependency-logical but non-canonical
+- **`lib.rs` prelude re-export ordering** — `ProviderId` moved before `ProviderHealth` in the `provider` re-export to match `rustfmt` alphabetical expectation
+- **`error.rs` attribute formatting** — multi-line `#[error("justification too short: …")]` collapsed to single line per `rustfmt` preference
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | ✅ Pass |
+| `cargo clippy --workspace -- -D warnings` | ✅ Pass |
+| `cargo test --workspace` | ✅ 27/27 passing |
+
+---
+
+## 0.2.0 — 2026-03-31
+
+**Phase 2: Core Domain Models Crate (`models`)**
+
+Defines every shared domain type, enum, state machine, and typed ID that the rest of the system references. Pure types with zero business logic.
+
+### Added
+
+- **Typed ID system** (`ids.rs`) — `typed_id!` macro generating 7 newtype UUID wrappers (`PaymentId`, `AgentId`, `AgentProfileId`, `PolicyRuleId`, `AuditEntryId`, `VirtualCardId`, `WebhookEndpointId`) with prefixed Display/FromStr/Serde, plus string-based `IdempotencyKey`
+- **Payment state machine** (`payment.rs`) — `PaymentStatus` enum with compile-time-enforced transitions, `Payment` entity with `transition()` method, `Currency` enum (25 fiat + 8 crypto), `RailPreference`, `PaymentRequest`/`PaymentResponse`
+- **Structured justification** (`justification.rs`) — `Justification` struct + `PaymentCategory` controlled vocabulary enum
+- **Recipient model** (`recipient.rs`) — `Recipient` with `RecipientType` (Merchant/Individual/Wallet/BankAccount)
+- **Agent identity** (`agent.rs`) — `Agent`, `AgentProfile` (versioned spending authority), `AgentStatus`, `CountryCode`
+- **Policy types** (`policy.rs`) — `PolicyRule`, recursive `PolicyCondition` tree (All/Any/Not/FieldCheck), `ComparisonOp` (10 operators), `EscalationConfig`/`EscalationChannel`
+- **Provider types** (`provider.rs`) — `ProviderId`, `ProviderHealth`, `CircuitState`, `RoutingCandidate`/`RoutingDecision`
+- **Virtual card types** (`card.rs`) — `VirtualCard`, `CardType`, `CardControls`, `CardStatus`
+- **Audit types** (`audit.rs`) — `AuditEntry`, `PolicyEvaluationRecord`, `ProviderResponseRecord`, `HumanReviewRecord`
+- **Domain errors** (`error.rs`) — `DomainError` enum with 8 variants via `thiserror`
+- **Prelude module** (`lib.rs`) — re-exports all 40+ types for convenient downstream imports
+- **27 unit tests** covering state machine transitions, serde roundtrips, ID parsing, and currency classification
 
 ---
 
