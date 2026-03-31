@@ -1,8 +1,42 @@
 # Changelog
 
+- [0.3.0](#030--2026-03-31) — Database schema and migrations
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.3.0 — 2026-03-31
+
+**Phase 3: Database Schema and Migrations**
+
+Creates the PostgreSQL schema that persists the domain model. 9 tables, 17 indexes, CHECK constraints, and append-only audit enforcement.
+
+### Added
+
+- **9 reversible SQLx migrations** (18 files) creating: `agent_profiles`, `agents`, `policy_rules`, `payments`, `virtual_cards`, `audit_log`, `provider_health`, `webhook_endpoints`, `idempotency_keys`
+- **Append-only audit enforcement** — `BEFORE UPDATE` and `BEFORE DELETE` triggers on `audit_log` that raise exceptions, preventing mutation at the database level
+- **Reusable `set_updated_at()` trigger function** — auto-updates `updated_at` on 4 tables (`agent_profiles`, `agents`, `policy_rules`, `payments`)
+- **CHECK constraints** on `agents.status`, `policy_rules.action`, `virtual_cards.card_type`, `virtual_cards.status`, `provider_health.circuit_state`
+- **GIN index on audit justification category** and **computed B-tree index on audit request amount** for efficient audit queries
+- **Phase 3 implementation plan** (`docs/executing/phase-3-implementation-plan.md`)
+
+### Removed
+
+- `backend/migrations/.gitkeep` — replaced by real migration files
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `sqlx migrate run` (9 migrations) | ✅ All applied |
+| Audit INSERT / UPDATE blocked / DELETE blocked | ✅ Pass |
+| CHECK constraints reject invalid values | ✅ Pass |
+| Full rollback + re-apply | ✅ Pass |
+| `cargo fmt --all -- --check` | ✅ Pass |
+| `cargo clippy --workspace -- -D warnings` | ✅ Pass |
+| `cargo test --workspace` | ✅ 27/27 passing |
 
 ---
 
