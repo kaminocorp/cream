@@ -1,0 +1,30 @@
+# Internal planning & strategy docs (not public)
+.claude/
+docs/vision.md
+docs/background.md
+docs/executing/
+docs/completions/
+docs/archive/
+
+# Build artifacts
+target/
+node_modules/
+.next/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# SQLx offline data is committed, but local overrides are not
+!.sqlx/
