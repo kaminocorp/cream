@@ -16,6 +16,11 @@ use crate::ids::{AgentProfileId, PolicyRuleId};
 pub struct PolicyRule {
     pub id: PolicyRuleId,
     pub profile_id: AgentProfileId,
+    /// Explicit rule type identifier (e.g., "amount_cap", "velocity_limit").
+    /// Used by the PolicyEngine to dispatch to the correct evaluator.
+    /// If None, the engine infers the type from the condition tree (legacy fallback).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_type: Option<String>,
     /// Lower number = higher priority. Rules are evaluated in ascending order.
     pub priority: i32,
     /// The condition tree that determines if this rule fires.

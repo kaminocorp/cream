@@ -33,6 +33,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Redis
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+# Async traits
+async-trait = "0.1"
+# Regex
+regex = "1"
 # Testing
 mockall = "0.13"
 

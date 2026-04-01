@@ -77,6 +77,22 @@ impl PaymentStatus {
                 | PaymentStatus::Rejected
         )
     }
+
+    /// Returns `true` if this payment counts toward spend/velocity limits.
+    ///
+    /// Includes both settled payments and in-flight payments (any state that
+    /// represents real or intended money movement). Excludes only states where
+    /// the payment was definitively cancelled: Failed, Blocked, Rejected.
+    /// TimedOut is excluded because it always transitions to Blocked.
+    pub fn counts_toward_spend(&self) -> bool {
+        !matches!(
+            self,
+            PaymentStatus::Failed
+                | PaymentStatus::Blocked
+                | PaymentStatus::Rejected
+                | PaymentStatus::TimedOut
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +390,23 @@ mod tests {
 
         let result = p.transition(PaymentStatus::Failed);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn counts_toward_spend_includes_settled_and_inflight() {
+        // Settled and in-flight statuses should count
+        assert!(PaymentStatus::Pending.counts_toward_spend());
+        assert!(PaymentStatus::Validating.counts_toward_spend());
+        assert!(PaymentStatus::PendingApproval.counts_toward_spend());
+        assert!(PaymentStatus::Approved.counts_toward_spend());
+        assert!(PaymentStatus::Submitted.counts_toward_spend());
+        assert!(PaymentStatus::Settled.counts_toward_spend());
+
+        // Failed/cancelled statuses should NOT count
+        assert!(!PaymentStatus::Failed.counts_toward_spend());
+        assert!(!PaymentStatus::Blocked.counts_toward_spend());
+        assert!(!PaymentStatus::Rejected.counts_toward_spend());
+        assert!(!PaymentStatus::TimedOut.counts_toward_spend());
     }
 
     #[test]

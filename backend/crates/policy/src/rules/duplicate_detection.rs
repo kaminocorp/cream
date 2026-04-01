@@ -1,0 +1,53 @@
+use chrono::Duration;
+use cream_models::prelude::PolicyRule;
+
+use crate::context::EvaluationContext;
+use crate::evaluator::{RuleEvaluator, RuleResult};
+
+/// Blocks duplicate payments: same amount + same recipient within N minutes.
+///
+/// Default window is 5 minutes. Configurable via FieldCheck value
+/// `{"window_minutes": N}` in the rule condition.
+pub struct DuplicateDetectionEvaluator;
+
+const DEFAULT_WINDOW_MINUTES: i64 = 5;
+
+impl RuleEvaluator for DuplicateDetectionEvaluator {
+    fn evaluate(&self, rule: &PolicyRule, ctx: &EvaluationContext) -> RuleResult {
+        let window_minutes = extract_window(&rule.condition).unwrap_or_else(|| {
+            tracing::debug!(
+                rule_id = %rule.id,
+                default_minutes = DEFAULT_WINDOW_MINUTES,
+                "duplicate_detection using default window"
+            );
+            DEFAULT_WINDOW_MINUTES
+        });
+        let cutoff = ctx.current_time - Duration::minutes(window_minutes);
+
+        let is_duplicate = ctx.recent_payments.iter().any(|p| {
+            p.created_at >= cutoff
+                && p.amount == ctx.request.amount
+                && p.recipient_identifier == ctx.request.recipient.identifier
+        });
+
+        if is_duplicate {
+            RuleResult::Triggered(rule.action)
+        } else {
+            RuleResult::Pass
+        }
+    }
+}
+
+fn extract_window(condition: &cream_models::prelude::PolicyCondition) -> Option<i64> {
+    use cream_models::prelude::PolicyCondition;
+    match condition {
+        PolicyCondition::FieldCheck(check) if check.field == "duplicate" => {
+            check.value.get("window_minutes")?.as_i64()
+        }
+        PolicyCondition::All(children) | PolicyCondition::Any(children) => {
+            children.iter().find_map(extract_window)
+        }
+        PolicyCondition::Not(inner) => extract_window(inner),
+        _ => None,
+    }
+}

@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 cream-models = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rust_decimal = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

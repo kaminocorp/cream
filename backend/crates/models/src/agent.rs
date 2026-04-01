@@ -70,6 +70,11 @@ pub struct AgentProfile {
     /// Transactions above this amount trigger escalation to a human reviewer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalation_threshold: Option<Decimal>,
+    /// IANA timezone identifier (e.g., "Asia/Singapore", "America/New_York").
+    /// Used by the TimeWindowEvaluator to convert UTC to the operator's local
+    /// time when evaluating time-based rules. Defaults to UTC if not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
