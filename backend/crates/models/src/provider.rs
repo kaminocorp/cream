@@ -14,7 +14,7 @@ use crate::payment::RailPreference;
 /// "coinbase_x402" rather than a UUID — providers are configuration, not
 /// user-generated entities.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProviderId(pub String);
+pub struct ProviderId(String);
 
 impl ProviderId {
     pub fn new(id: impl Into<String>) -> Self {
@@ -92,8 +92,14 @@ pub struct RoutingCandidate {
     pub score: f64,
 }
 
+/// Maximum allowed length for `RoutingDecision.reason`.
+pub const MAX_ROUTING_REASON_LEN: usize = 1000;
+
 /// The routing engine's final decision for a payment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` enforces length bounds on `reason` to prevent
+/// audit log bloat (the audit ledger is append-only).
+#[derive(Debug, Clone, Serialize)]
 pub struct RoutingDecision {
     /// All candidates evaluated, ordered by score descending.
     pub candidates: Vec<RoutingCandidate>,
@@ -103,6 +109,38 @@ pub struct RoutingDecision {
     pub selected_rail: RailPreference,
     /// Human-readable explanation of why this provider was chosen.
     pub reason: String,
+}
+
+impl<'de> Deserialize<'de> for RoutingDecision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            candidates: Vec<RoutingCandidate>,
+            selected: ProviderId,
+            selected_rail: RailPreference,
+            reason: String,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if raw.reason.len() > MAX_ROUTING_REASON_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "routing_decision.reason exceeds maximum length of {} characters (got {})",
+                MAX_ROUTING_REASON_LEN,
+                raw.reason.len()
+            )));
+        }
+
+        Ok(RoutingDecision {
+            candidates: raw.candidates,
+            selected: raw.selected,
+            selected_rail: raw.selected_rail,
+            reason: raw.reason,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -2,16 +2,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::payment::MAX_CATEGORY_OTHER_LEN;
 
+/// Maximum allowed length for `Justification.summary`.
+/// Audit log is append-only, so unbounded summaries persist forever.
+pub const MAX_JUSTIFICATION_SUMMARY_LEN: usize = 2000;
+
+/// Maximum allowed length for optional justification string fields
+/// (`task_id`, `expected_value`).
+pub const MAX_JUSTIFICATION_FIELD_LEN: usize = 500;
+
 /// The structured justification an agent must provide with every payment.
 ///
 /// This is the **novel differentiator** — no payment moves without the agent
 /// explaining why. The justification is persisted verbatim in the audit ledger
 /// and can itself be evaluated by policy rules.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` enforces length bounds on all string fields to prevent
+/// audit log bloat (the audit ledger is append-only — oversized fields persist forever).
+#[derive(Debug, Clone, Serialize)]
 pub struct Justification {
     /// Human-readable explanation of why this payment is needed.
-    /// Required. Minimum 10 words (enforced by policy engine, not here —
-    /// models crate is validation-free).
+    /// Required. Minimum 10 words (enforced by policy engine).
+    /// Maximum [`MAX_JUSTIFICATION_SUMMARY_LEN`] characters (enforced here).
     pub summary: String,
 
     /// Optional reference to the task or workflow that triggered this payment.
@@ -25,6 +36,56 @@ pub struct Justification {
     /// Enables proportionality rules (e.g., "block if amount > 10× expected value").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_value: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Justification {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            summary: String,
+            task_id: Option<String>,
+            category: PaymentCategory,
+            expected_value: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if raw.summary.len() > MAX_JUSTIFICATION_SUMMARY_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "justification.summary exceeds maximum length of {} characters (got {})",
+                MAX_JUSTIFICATION_SUMMARY_LEN,
+                raw.summary.len()
+            )));
+        }
+        if let Some(ref s) = raw.task_id {
+            if s.len() > MAX_JUSTIFICATION_FIELD_LEN {
+                return Err(serde::de::Error::custom(format!(
+                    "justification.task_id exceeds maximum length of {} characters (got {})",
+                    MAX_JUSTIFICATION_FIELD_LEN,
+                    s.len()
+                )));
+            }
+        }
+        if let Some(ref s) = raw.expected_value {
+            if s.len() > MAX_JUSTIFICATION_FIELD_LEN {
+                return Err(serde::de::Error::custom(format!(
+                    "justification.expected_value exceeds maximum length of {} characters (got {})",
+                    MAX_JUSTIFICATION_FIELD_LEN,
+                    s.len()
+                )));
+            }
+        }
+
+        Ok(Justification {
+            summary: raw.summary,
+            task_id: raw.task_id,
+            category: raw.category,
+            expected_value: raw.expected_value,
+        })
+    }
 }
 
 /// Controlled vocabulary for payment categories.
@@ -148,5 +209,71 @@ mod tests {
         let json = serde_json::to_string(&cat).unwrap();
         let parsed: PaymentCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, PaymentCategory::Other(exact));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.10: justification string bounds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn justification_summary_within_limit_accepted() {
+        let j = Justification {
+            summary: "a]".repeat(100),
+            task_id: None,
+            category: PaymentCategory::ApiCredits,
+            expected_value: None,
+        };
+        let json = serde_json::to_string(&j).unwrap();
+        let parsed: Justification = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.summary, j.summary);
+    }
+
+    #[test]
+    fn justification_summary_exceeding_limit_rejected() {
+        let long = "x".repeat(MAX_JUSTIFICATION_SUMMARY_LEN + 1);
+        let json = serde_json::json!({
+            "summary": long,
+            "category": "api_credits"
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("summary"));
+    }
+
+    #[test]
+    fn justification_summary_at_exact_limit_accepted() {
+        let exact = "y".repeat(MAX_JUSTIFICATION_SUMMARY_LEN);
+        let json = serde_json::json!({
+            "summary": exact,
+            "category": "api_credits"
+        });
+        let parsed: Justification = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.summary.len(), MAX_JUSTIFICATION_SUMMARY_LEN);
+    }
+
+    #[test]
+    fn justification_task_id_exceeding_limit_rejected() {
+        let long = "t".repeat(MAX_JUSTIFICATION_FIELD_LEN + 1);
+        let json = serde_json::json!({
+            "summary": "valid summary text",
+            "task_id": long,
+            "category": "api_credits"
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("task_id"));
+    }
+
+    #[test]
+    fn justification_expected_value_exceeding_limit_rejected() {
+        let long = "e".repeat(MAX_JUSTIFICATION_FIELD_LEN + 1);
+        let json = serde_json::json!({
+            "summary": "valid summary text",
+            "category": "api_credits",
+            "expected_value": long
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected_value"));
     }
 }

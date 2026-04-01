@@ -22,22 +22,74 @@ use crate::error::AuditError;
 /// entries up to `limit`. The reader translates this into a parameterized
 /// SQL query internally, preventing SQL injection and keeping query logic
 /// centralized in the audit crate.
+///
+/// Fields are private to enforce clamped pagination bounds. Use the builder
+/// methods to construct queries — `limit` is always clamped to 1000 and
+/// `offset` to 100,000 regardless of what the caller requests.
 #[derive(Debug, Clone, Default)]
 pub struct AuditQuery {
-    pub agent_id: Option<AgentId>,
-    pub from: Option<DateTime<Utc>>,
-    pub to: Option<DateTime<Utc>>,
-    pub status: Option<PaymentStatus>,
-    pub category: Option<PaymentCategory>,
-    pub min_amount: Option<Decimal>,
-    pub max_amount: Option<Decimal>,
-    /// Maximum number of entries to return. Default 50, clamped to 1000.
-    pub limit: Option<u32>,
-    /// Offset for pagination.
-    pub offset: Option<u32>,
+    agent_id: Option<AgentId>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    status: Option<PaymentStatus>,
+    category: Option<PaymentCategory>,
+    min_amount: Option<Decimal>,
+    max_amount: Option<Decimal>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 impl AuditQuery {
+    /// Create a new empty query (returns most recent entries, default limit 50).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn agent_id(mut self, id: AgentId) -> Self {
+        self.agent_id = Some(id);
+        self
+    }
+
+    pub fn from(mut self, from: DateTime<Utc>) -> Self {
+        self.from = Some(from);
+        self
+    }
+
+    pub fn to(mut self, to: DateTime<Utc>) -> Self {
+        self.to = Some(to);
+        self
+    }
+
+    pub fn status(mut self, status: PaymentStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    pub fn category(mut self, category: PaymentCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+
+    pub fn min_amount(mut self, amount: Decimal) -> Self {
+        self.min_amount = Some(amount);
+        self
+    }
+
+    pub fn max_amount(mut self, amount: Decimal) -> Self {
+        self.max_amount = Some(amount);
+        self
+    }
+
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
     /// Effective limit, defaulting to 50 and clamped to 1000.
     fn effective_limit(&self) -> i64 {
         self.limit.unwrap_or(50).min(1000) as i64
@@ -441,29 +493,19 @@ mod tests {
 
     #[test]
     fn audit_query_clamps_limit_to_1000() {
-        let q = AuditQuery {
-            limit: Some(5000),
-            ..Default::default()
-        };
+        let q = AuditQuery::new().limit(5000);
         assert_eq!(q.effective_limit(), 1000);
     }
 
     #[test]
     fn audit_query_clamps_offset_to_100k() {
-        let q = AuditQuery {
-            offset: Some(500_000),
-            ..Default::default()
-        };
+        let q = AuditQuery::new().offset(500_000);
         assert_eq!(q.effective_offset(), 100_000);
     }
 
     #[test]
     fn audit_query_respects_custom_limit() {
-        let q = AuditQuery {
-            limit: Some(200),
-            offset: Some(10),
-            ..Default::default()
-        };
+        let q = AuditQuery::new().limit(200).offset(10);
         assert_eq!(q.effective_limit(), 200);
         assert_eq!(q.effective_offset(), 10);
     }

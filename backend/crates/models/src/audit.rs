@@ -84,8 +84,17 @@ pub struct ProviderResponseRecord {
 // Human Review Record
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed length for `HumanReviewRecord.reviewer_id`.
+pub const MAX_REVIEWER_ID_LEN: usize = 255;
+
+/// Maximum allowed length for `HumanReviewRecord.reason`.
+pub const MAX_REVIEW_REASON_LEN: usize = 2000;
+
 /// Captures the result of a human-in-the-loop review.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` enforces length bounds on string fields to prevent
+/// audit log bloat (the audit ledger is append-only).
+#[derive(Debug, Clone, Serialize)]
 pub struct HumanReviewRecord {
     /// Identifier of the human reviewer (email or user ID).
     pub reviewer_id: String,
@@ -96,6 +105,47 @@ pub struct HumanReviewRecord {
     pub reason: Option<String>,
     /// When the decision was made.
     pub decided_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for HumanReviewRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            reviewer_id: String,
+            decision: PolicyAction,
+            reason: Option<String>,
+            decided_at: DateTime<Utc>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if raw.reviewer_id.len() > MAX_REVIEWER_ID_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "reviewer_id exceeds maximum length of {} characters (got {})",
+                MAX_REVIEWER_ID_LEN,
+                raw.reviewer_id.len()
+            )));
+        }
+        if let Some(ref reason) = raw.reason {
+            if reason.len() > MAX_REVIEW_REASON_LEN {
+                return Err(serde::de::Error::custom(format!(
+                    "reason exceeds maximum length of {} characters (got {})",
+                    MAX_REVIEW_REASON_LEN,
+                    reason.len()
+                )));
+            }
+        }
+
+        Ok(HumanReviewRecord {
+            reviewer_id: raw.reviewer_id,
+            decision: raw.decision,
+            reason: raw.reason,
+            decided_at: raw.decided_at,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -1576,3 +1576,139 @@ fn condition_in_non_array_returns_false() {
     // Non-array value for In should return false (fail-safe)
     assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6.10: Boundary tests — exact threshold semantics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn amount_cap_passes_at_exact_limit() {
+    // $500 == max_per_transaction of $500 → should PASS (uses > not >=)
+    let ctx = test_context(Decimal::new(500, 0));
+    let rule = make_rule("amount", serde_json::json!(500), PolicyAction::Block);
+    let result = AmountCapEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn velocity_limit_passes_at_exact_count() {
+    // 4 recent + 1 current = 5, max_count = 5 → should PASS (uses > not >=)
+    let mut ctx = test_context(Decimal::new(10, 0));
+    for i in 0..4 {
+        ctx.recent_payments.push(PaymentSummary {
+            amount: Decimal::new(10, 0),
+            currency: Currency::SGD,
+            recipient_identifier: format!("merchant_{i}"),
+            category: PaymentCategory::ApiCredits,
+            status: PaymentStatus::Submitted,
+            rail: RailPreference::Card,
+            created_at: Utc::now() - Duration::minutes(i as i64 * 10),
+        });
+    }
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("velocity_limit".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "velocity".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"max_count": 5, "window_minutes": 60}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass); // 5 == 5 passes
+}
+
+#[test]
+fn spend_rate_passes_at_exact_daily_limit() {
+    // $500 current + $1500 recent = $2000, daily limit = $2000 → should PASS (uses > not >=)
+    let mut ctx = test_context(Decimal::new(500, 0));
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(1500, 0),
+        currency: Currency::SGD,
+        recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
+        status: PaymentStatus::Submitted,
+        rail: RailPreference::Card,
+        created_at: Utc::now() - Duration::hours(2),
+    });
+    let rule = make_rule("spend_rate", serde_json::json!(true), PolicyAction::Block);
+    let result = SpendRateEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass); // $2000 == $2000 passes
+}
+
+#[test]
+fn spend_rate_triggers_one_cent_over_daily_limit() {
+    // $500.01 current + $1500 recent = $2000.01 > $2000 → should TRIGGER
+    let mut ctx = test_context(Decimal::new(50001, 2));
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(1500, 0),
+        currency: Currency::SGD,
+        recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
+        status: PaymentStatus::Submitted,
+        rail: RailPreference::Card,
+        created_at: Utc::now() - Duration::hours(2),
+    });
+    let rule = make_rule("spend_rate", serde_json::json!(true), PolicyAction::Block);
+    let result = SpendRateEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn time_window_passes_at_start_hour() {
+    // Exactly at 9:00 (start of window 9-17) → should PASS (>= start_hour)
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.current_time = chrono::NaiveDate::from_ymd_opt(2026, 4, 1)
+        .unwrap()
+        .and_hms_opt(9, 0, 0)
+        .unwrap()
+        .and_utc();
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("time_window".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "time_window".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!({"allowed_hours_start": 9, "allowed_hours_end": 17}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass); // in window
+}
+
+#[test]
+fn time_window_blocks_at_end_hour() {
+    // Exactly at 17:00 (end of window 9-17) → should be OUTSIDE (< end_hour, exclusive)
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.current_time = chrono::NaiveDate::from_ymd_opt(2026, 4, 1)
+        .unwrap()
+        .and_hms_opt(17, 0, 0)
+        .unwrap()
+        .and_utc();
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("time_window".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "time_window".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!({"allowed_hours_start": 9, "allowed_hours_end": 17}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block)); // outside window
+}

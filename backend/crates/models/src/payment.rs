@@ -258,7 +258,10 @@ impl<'de> Deserialize<'de> for PaymentMetadata {
 /// The payload an agent submits to initiate a payment.
 ///
 /// Maps directly to `POST /v1/payments` and the MCP `initiate_payment` tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` validates that `amount` is strictly positive — zero
+/// or negative amounts are nonsensical and would bypass the policy engine.
+#[derive(Debug, Clone, Serialize)]
 pub struct PaymentRequest {
     pub agent_id: AgentId,
     pub amount: Decimal,
@@ -269,6 +272,45 @@ pub struct PaymentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<PaymentMetadata>,
     pub idempotency_key: IdempotencyKey,
+}
+
+impl<'de> Deserialize<'de> for PaymentRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            agent_id: AgentId,
+            amount: Decimal,
+            currency: Currency,
+            recipient: Recipient,
+            preferred_rail: RailPreference,
+            justification: Justification,
+            metadata: Option<PaymentMetadata>,
+            idempotency_key: IdempotencyKey,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if raw.amount <= Decimal::ZERO {
+            return Err(serde::de::Error::custom(format!(
+                "amount must be positive, got {}",
+                raw.amount
+            )));
+        }
+
+        Ok(PaymentRequest {
+            agent_id: raw.agent_id,
+            amount: raw.amount,
+            currency: raw.currency,
+            recipient: raw.recipient,
+            preferred_rail: raw.preferred_rail,
+            justification: raw.justification,
+            metadata: raw.metadata,
+            idempotency_key: raw.idempotency_key,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,5 +752,39 @@ mod tests {
         });
         let parsed: PaymentMetadata = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.workflow_id.unwrap().len(), MAX_METADATA_FIELD_LEN);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.10: PaymentRequest amount validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn payment_request_positive_amount_accepted() {
+        let req = sample_request();
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: PaymentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.amount, req.amount);
+    }
+
+    #[test]
+    fn payment_request_zero_amount_rejected() {
+        let mut req = sample_request();
+        req.amount = Decimal::ZERO;
+        let json = serde_json::to_string(&req).unwrap();
+        let result: Result<PaymentRequest, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("amount must be positive"));
+    }
+
+    #[test]
+    fn payment_request_negative_amount_rejected() {
+        let mut req = sample_request();
+        req.amount = Decimal::new(-100, 0);
+        let json = serde_json::to_string(&req).unwrap();
+        let result: Result<PaymentRequest, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("amount must be positive"));
     }
 }
