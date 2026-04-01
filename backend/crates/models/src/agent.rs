@@ -85,18 +85,51 @@ pub struct AgentProfile {
 
 /// ISO 3166-1 alpha-2 country code (e.g., "SG", "US", "JP").
 ///
-/// Stored as a simple 2-character string. Validation is intentionally light
-/// in the models crate — the API layer enforces strict ISO compliance.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Validated on construction: must be exactly 2 ASCII alphabetic characters.
+/// Stored uppercase internally for consistent comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct CountryCode(String);
 
 impl CountryCode {
+    /// Create a new CountryCode. Panics if the code is not exactly 2 ASCII letters.
+    ///
+    /// Use `try_new()` for fallible construction from untrusted input.
     pub fn new(code: impl Into<String>) -> Self {
-        Self(code.into())
+        let code = code.into();
+        Self::validate(&code).unwrap_or_else(|e| panic!("invalid CountryCode: {e}"));
+        Self(code.to_ascii_uppercase())
+    }
+
+    /// Fallible constructor for untrusted input. Returns an error if the code
+    /// is not exactly 2 ASCII alphabetic characters.
+    pub fn try_new(code: impl Into<String>) -> Result<Self, crate::error::DomainError> {
+        let code = code.into();
+        Self::validate(&code)?;
+        Ok(Self(code.to_ascii_uppercase()))
+    }
+
+    fn validate(code: &str) -> Result<(), crate::error::DomainError> {
+        if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(crate::error::DomainError::InvalidIdFormat(format!(
+                "country code must be exactly 2 ASCII letters, got '{code}'"
+            )));
+        }
+        Ok(())
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Custom deserializer that validates the country code format.
+impl<'de> Deserialize<'de> for CountryCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::try_new(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -122,5 +155,42 @@ mod tests {
         let sg = CountryCode::new("SG");
         assert_eq!(sg.to_string(), "SG");
         assert_eq!(sg.as_str(), "SG");
+    }
+
+    #[test]
+    fn country_code_uppercases_on_construction() {
+        let sg = CountryCode::new("sg");
+        assert_eq!(sg.as_str(), "SG");
+    }
+
+    #[test]
+    fn country_code_try_new_rejects_invalid() {
+        assert!(CountryCode::try_new("").is_err());
+        assert!(CountryCode::try_new("A").is_err());
+        assert!(CountryCode::try_new("ABC").is_err());
+        assert!(CountryCode::try_new("12").is_err());
+        assert!(CountryCode::try_new("S1").is_err());
+    }
+
+    #[test]
+    fn country_code_try_new_accepts_valid() {
+        assert!(CountryCode::try_new("SG").is_ok());
+        assert!(CountryCode::try_new("us").is_ok());
+        assert_eq!(CountryCode::try_new("jp").unwrap().as_str(), "JP");
+    }
+
+    #[test]
+    fn country_code_deserialize_validates() {
+        let valid: Result<CountryCode, _> = serde_json::from_str("\"SG\"");
+        assert!(valid.is_ok());
+
+        let invalid: Result<CountryCode, _> = serde_json::from_str("\"GARBAGE\"");
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid CountryCode")]
+    fn country_code_new_panics_on_invalid() {
+        CountryCode::new("INVALID");
     }
 }

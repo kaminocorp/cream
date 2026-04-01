@@ -1,6 +1,7 @@
 pub mod amount_cap;
 pub mod category_check;
 pub mod duplicate_detection;
+pub mod escalation_threshold;
 pub mod first_time_merchant;
 pub mod geographic;
 pub mod justification_quality;

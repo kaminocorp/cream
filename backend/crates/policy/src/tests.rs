@@ -13,6 +13,7 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 use crate::rules::{
     amount_cap::AmountCapEvaluator, category_check::CategoryCheckEvaluator,
     duplicate_detection::DuplicateDetectionEvaluator,
+    escalation_threshold::EscalationThresholdEvaluator,
     first_time_merchant::FirstTimeMerchantEvaluator, geographic::GeographicEvaluator,
     justification_quality::JustificationQualityEvaluator,
     rail_restriction::RailRestrictionEvaluator, spend_rate::SpendRateEvaluator,
@@ -1444,4 +1445,74 @@ fn merchant_check_equals_case_insensitive() {
     // Should trigger despite case difference
     let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
     assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+// ---------------------------------------------------------------------------
+// Escalation threshold tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn escalation_threshold_passes_below_threshold() {
+    // Profile has escalation_threshold = 1000, request amount = 100
+    let ctx = test_context(Decimal::new(100, 0));
+    let rule = make_rule(
+        "escalation_threshold",
+        serde_json::json!(null),
+        PolicyAction::Escalate,
+    );
+    let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn escalation_threshold_triggers_above_threshold() {
+    // Profile has escalation_threshold = 1000, request amount = 1500
+    let ctx = test_context(Decimal::new(1500, 0));
+    let rule = make_rule(
+        "escalation_threshold",
+        serde_json::json!(null),
+        PolicyAction::Escalate,
+    );
+    let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Escalate));
+}
+
+#[test]
+fn escalation_threshold_passes_when_no_threshold_set() {
+    let mut ctx = test_context(Decimal::new(999999, 0)); // huge amount
+    ctx.profile.escalation_threshold = None;
+    let rule = make_rule(
+        "escalation_threshold",
+        serde_json::json!(null),
+        PolicyAction::Escalate,
+    );
+    let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn escalation_threshold_passes_at_exact_threshold() {
+    // At exactly $1000, should pass (> not >=)
+    let ctx = test_context(Decimal::new(1000, 0));
+    let rule = make_rule(
+        "escalation_threshold",
+        serde_json::json!(null),
+        PolicyAction::Escalate,
+    );
+    let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn escalation_threshold_always_escalates_never_blocks() {
+    // Even if the rule's action is Block, the evaluator returns Escalate
+    let ctx = test_context(Decimal::new(1500, 0));
+    let rule = make_rule(
+        "escalation_threshold",
+        serde_json::json!(null),
+        PolicyAction::Block,
+    );
+    let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
+    // The evaluator hardcodes Escalate regardless of rule.action
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Escalate));
 }

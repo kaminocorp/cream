@@ -237,13 +237,17 @@ pub struct PaymentRequest {
 /// - `created_at` must be <= `updated_at`
 /// - `provider_id` and `provider_transaction_id` must not be set for
 ///   pre-submission statuses (Pending, Validating, PendingApproval)
+///
+/// `provider_id` and `provider_transaction_id` are private to enforce the
+/// invariant that provider fields are only set for post-submission statuses.
+/// Use `set_provider()` to set them — it validates the current status.
 #[derive(Debug, Clone, Serialize)]
 pub struct Payment {
     pub id: PaymentId,
     pub request: PaymentRequest,
     status: PaymentStatus,
-    pub provider_id: Option<ProviderId>,
-    pub provider_transaction_id: Option<String>,
+    provider_id: Option<ProviderId>,
+    provider_transaction_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -302,6 +306,45 @@ impl Payment {
         self.status
     }
 
+    /// Returns the provider ID, if set (only after submission).
+    pub fn provider_id(&self) -> Option<&ProviderId> {
+        self.provider_id.as_ref()
+    }
+
+    /// Returns the provider's transaction ID, if set (only after submission).
+    pub fn provider_transaction_id(&self) -> Option<&str> {
+        self.provider_transaction_id.as_deref()
+    }
+
+    /// Set the provider and provider transaction ID.
+    ///
+    /// Only valid when the payment is in `Approved` or `Submitted` status
+    /// (i.e., at or past the point where a provider has been selected).
+    /// Returns an error for pre-submission statuses to enforce the invariant
+    /// that provider fields are not set before routing.
+    pub fn set_provider(
+        &mut self,
+        provider_id: ProviderId,
+        transaction_id: String,
+    ) -> Result<(), DomainError> {
+        let valid = matches!(
+            self.status,
+            PaymentStatus::Approved
+                | PaymentStatus::Submitted
+                | PaymentStatus::Settled
+                | PaymentStatus::Failed
+        );
+        if !valid {
+            return Err(DomainError::PolicyViolation(format!(
+                "cannot set provider on payment in status {}",
+                self.status
+            )));
+        }
+        self.provider_id = Some(provider_id);
+        self.provider_transaction_id = Some(transaction_id);
+        Ok(())
+    }
+
     /// Create a new payment from a request. Starts in `Pending` status.
     pub fn new(request: PaymentRequest) -> Self {
         let now = Utc::now();
@@ -353,8 +396,8 @@ impl From<&Payment> for PaymentResponse {
         Self {
             payment_id: p.id,
             status: p.status(),
-            provider: p.provider_id.clone(),
-            provider_transaction_id: p.provider_transaction_id.clone(),
+            provider: p.provider_id().cloned(),
+            provider_transaction_id: p.provider_transaction_id().map(|s| s.to_owned()),
             created_at: p.created_at,
             updated_at: p.updated_at,
         }
@@ -531,11 +574,30 @@ mod tests {
         p.transition(PaymentStatus::Validating).unwrap();
         p.transition(PaymentStatus::Approved).unwrap();
         p.transition(PaymentStatus::Submitted).unwrap();
-        p.provider_id = Some(ProviderId::new("stripe"));
-        p.provider_transaction_id = Some("ch_123".to_string());
+        p.set_provider(ProviderId::new("stripe"), "ch_123".to_string())
+            .unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let parsed: Payment = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.status(), PaymentStatus::Submitted);
-        assert!(parsed.provider_id.is_some());
+        assert!(parsed.provider_id().is_some());
+    }
+
+    #[test]
+    fn set_provider_rejects_pre_submission_status() {
+        let mut p = Payment::new(sample_request());
+        // Pending — should reject
+        let result = p.set_provider(ProviderId::new("stripe"), "ch_123".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_provider_accepts_approved_status() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        let result = p.set_provider(ProviderId::new("stripe"), "ch_123".to_string());
+        assert!(result.is_ok());
+        assert_eq!(p.provider_id().unwrap().as_str(), "stripe");
+        assert_eq!(p.provider_transaction_id().unwrap(), "ch_123");
     }
 }

@@ -10,6 +10,7 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 use crate::rules::{
     amount_cap::AmountCapEvaluator, category_check::CategoryCheckEvaluator,
     duplicate_detection::DuplicateDetectionEvaluator,
+    escalation_threshold::EscalationThresholdEvaluator,
     first_time_merchant::FirstTimeMerchantEvaluator, geographic::GeographicEvaluator,
     justification_quality::JustificationQualityEvaluator, merchant_check::MerchantCheckEvaluator,
     rail_restriction::RailRestrictionEvaluator, spend_rate::SpendRateEvaluator,
@@ -77,6 +78,10 @@ impl PolicyEngine {
         evaluators.insert(
             "duplicate_detection".into(),
             Box::new(DuplicateDetectionEvaluator),
+        );
+        evaluators.insert(
+            "escalation_threshold".into(),
+            Box::new(EscalationThresholdEvaluator),
         );
         // NOTE: ProportionalityEvaluator is intentionally NOT registered.
         // It is a stub that always passes (requires future LLM integration).
@@ -204,6 +209,7 @@ fn infer_from_condition(condition: &cream_models::prelude::PolicyCondition) -> O
                 "first_time_merchant" => "first_time_merchant",
                 "duplicate" => "duplicate_detection",
                 "proportionality" | "expected_value" => "proportionality",
+                "escalation_threshold" => "escalation_threshold",
                 other => other,
             };
             Some(rule_type.to_string())

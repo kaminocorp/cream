@@ -183,6 +183,7 @@ struct AuditRow {
     provider_response: Option<serde_json::Value>,
     final_status: String,
     human_review: Option<serde_json::Value>,
+    on_chain_tx_hash: Option<String>,
 }
 
 impl AuditRow {
@@ -218,6 +219,7 @@ impl AuditRow {
             provider_response,
             final_status,
             human_review,
+            on_chain_tx_hash: self.on_chain_tx_hash,
         })
     }
 }
@@ -232,7 +234,8 @@ impl AuditReader for PgAuditReader {
         let mut qb = QueryBuilder::new(
             "SELECT id, timestamp, agent_id, agent_profile_id, \
              request, justification, policy_evaluation, \
-             routing_decision, provider_response, final_status, human_review \
+             routing_decision, provider_response, final_status, human_review, \
+             on_chain_tx_hash \
              FROM audit_log WHERE true",
         );
 
@@ -285,6 +288,7 @@ impl AuditReader for PgAuditReader {
                 Option<serde_json::Value>,
                 String,
                 Option<serde_json::Value>,
+                Option<String>,
             ),
         >(&sql);
 
@@ -314,6 +318,7 @@ impl AuditReader for PgAuditReader {
                     provider_response: row.8,
                     final_status: row.9,
                     human_review: row.10,
+                    on_chain_tx_hash: row.11,
                 };
                 audit_row.into_entry()
             })
@@ -336,11 +341,13 @@ impl AuditReader for PgAuditReader {
                 Option<serde_json::Value>,
                 String,
                 Option<serde_json::Value>,
+                Option<String>,
             ),
         >(
             "SELECT id, timestamp, agent_id, agent_profile_id, \
              request, justification, policy_evaluation, \
-             routing_decision, provider_response, final_status, human_review \
+             routing_decision, provider_response, final_status, human_review, \
+             on_chain_tx_hash \
              FROM audit_log WHERE id = $1",
         )
         .bind(*id.as_uuid())
@@ -361,6 +368,7 @@ impl AuditReader for PgAuditReader {
                     provider_response: row.8,
                     final_status: row.9,
                     human_review: row.10,
+                    on_chain_tx_hash: row.11,
                 };
                 Ok(Some(audit_row.into_entry()?))
             }
@@ -384,11 +392,13 @@ impl AuditReader for PgAuditReader {
                 Option<serde_json::Value>,
                 String,
                 Option<serde_json::Value>,
+                Option<String>,
             ),
         >(
             "SELECT id, timestamp, agent_id, agent_profile_id, \
              request, justification, policy_evaluation, \
-             routing_decision, provider_response, final_status, human_review \
+             routing_decision, provider_response, final_status, human_review, \
+             on_chain_tx_hash \
              FROM audit_log WHERE payment_id = $1 ORDER BY timestamp DESC",
         )
         .bind(*payment_id.as_uuid())
@@ -409,6 +419,7 @@ impl AuditReader for PgAuditReader {
                     provider_response: row.8,
                     final_status: row.9,
                     human_review: row.10,
+                    on_chain_tx_hash: row.11,
                 };
                 audit_row.into_entry()
             })
@@ -482,6 +493,7 @@ mod tests {
             provider_response: None,
             final_status: "settled".to_string(),
             human_review: None,
+            on_chain_tx_hash: None,
         };
 
         let entry = row.into_entry().unwrap();
@@ -539,12 +551,14 @@ mod tests {
             provider_response: Some(serde_json::to_value(&provider_resp).unwrap()),
             final_status: "settled".to_string(),
             human_review: Some(serde_json::to_value(&human).unwrap()),
+            on_chain_tx_hash: Some("0xabc123".to_string()),
         };
 
         let entry = row.into_entry().unwrap();
         assert!(entry.routing_decision.is_some());
         assert!(entry.provider_response.is_some());
         assert!(entry.human_review.is_some());
+        assert_eq!(entry.on_chain_tx_hash.as_deref(), Some("0xabc123"));
         assert_eq!(entry.final_status, PaymentStatus::Settled);
     }
 
@@ -569,6 +583,7 @@ mod tests {
             provider_response: None,
             final_status: "invalid_status_xyz".to_string(),
             human_review: None,
+            on_chain_tx_hash: None,
         };
 
         assert!(row.into_entry().is_err());

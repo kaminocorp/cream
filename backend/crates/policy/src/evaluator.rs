@@ -1,6 +1,8 @@
+use std::str::FromStr;
 use std::sync::{LazyLock, Mutex};
 
 use cream_models::prelude::{ComparisonOp, PolicyAction, PolicyCondition, PolicyRule};
+use rust_decimal::Decimal;
 
 use crate::context::EvaluationContext;
 
@@ -100,10 +102,10 @@ fn compare_values(
     match op {
         ComparisonOp::Equals => field == expected,
         ComparisonOp::NotEquals => field != expected,
-        ComparisonOp::GreaterThan => compare_numeric(field, expected, |a, b| a > b),
-        ComparisonOp::LessThan => compare_numeric(field, expected, |a, b| a < b),
-        ComparisonOp::GreaterThanOrEqual => compare_numeric(field, expected, |a, b| a >= b),
-        ComparisonOp::LessThanOrEqual => compare_numeric(field, expected, |a, b| a <= b),
+        ComparisonOp::GreaterThan => compare_decimal(field, expected, |a, b| a > b),
+        ComparisonOp::LessThan => compare_decimal(field, expected, |a, b| a < b),
+        ComparisonOp::GreaterThanOrEqual => compare_decimal(field, expected, |a, b| a >= b),
+        ComparisonOp::LessThanOrEqual => compare_decimal(field, expected, |a, b| a <= b),
         ComparisonOp::In => match expected {
             serde_json::Value::Array(arr) => arr.contains(field),
             _ => false,
@@ -128,20 +130,40 @@ fn compare_values(
     }
 }
 
-/// Compare two JSON values as f64 numbers.
-fn compare_numeric(
+/// Compare two JSON values as `rust_decimal::Decimal` for financial precision.
+///
+/// Handles both numeric JSON values (e.g., `100.05`) and string-serialized
+/// decimals (e.g., `"100.05"` from `serde-with-str`). Using Decimal instead
+/// of f64 eliminates IEEE 754 precision issues in the money path.
+fn compare_decimal(
     a: &serde_json::Value,
     b: &serde_json::Value,
-    cmp: fn(f64, f64) -> bool,
+    cmp: fn(&Decimal, &Decimal) -> bool,
 ) -> bool {
-    match (as_f64(a), as_f64(b)) {
-        (Some(va), Some(vb)) => cmp(va, vb),
+    match (as_decimal(a), as_decimal(b)) {
+        (Some(va), Some(vb)) => cmp(&va, &vb),
         _ => false,
     }
 }
 
-fn as_f64(v: &serde_json::Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_str()?.parse::<f64>().ok())
+fn as_decimal(v: &serde_json::Value) -> Option<Decimal> {
+    // Try string first (rust_decimal serializes as string with serde-with-str),
+    // then try numeric JSON values via their string representation.
+    if let Some(s) = v.as_str() {
+        return Decimal::from_str(s).ok();
+    }
+    if let Some(n) = v.as_u64() {
+        return Some(Decimal::from(n));
+    }
+    if let Some(n) = v.as_i64() {
+        return Some(Decimal::from(n));
+    }
+    // For f64 JSON numbers, convert via string to preserve the displayed value
+    // rather than the binary representation (e.g., 100.05 stays "100.05").
+    if let Some(n) = v.as_f64() {
+        return Decimal::from_str(&n.to_string()).ok();
+    }
+    None
 }
 
 fn regex_matches(text: &str, pattern: &str) -> bool {

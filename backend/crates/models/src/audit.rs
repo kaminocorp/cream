@@ -40,6 +40,10 @@ pub struct AuditEntry {
     /// Human review record (absent if no escalation occurred).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub human_review: Option<HumanReviewRecord>,
+    /// On-chain transaction hash for crypto-rail payments.
+    /// Serves as an independently verifiable cryptographic receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_chain_tx_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

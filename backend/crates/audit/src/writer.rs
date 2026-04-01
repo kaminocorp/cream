@@ -85,9 +85,9 @@ impl AuditWriter for PgAuditWriter {
                 id, timestamp, agent_id, agent_profile_id, payment_id,
                 request, justification, policy_evaluation,
                 routing_decision, provider_response,
-                final_status, human_review
+                final_status, human_review, on_chain_tx_hash
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(*entry.id.as_uuid())
         .bind(entry.timestamp)
@@ -101,6 +101,7 @@ impl AuditWriter for PgAuditWriter {
         .bind(provider_response)
         .bind(&final_status_str)
         .bind(human_review)
+        .bind(&entry.on_chain_tx_hash)
         .execute(&self.pool)
         .await?;
 
@@ -137,6 +138,7 @@ mod tests {
             provider_response: None,
             final_status: PaymentStatus::Approved,
             human_review: None,
+            on_chain_tx_hash: None,
         }
     }
 
