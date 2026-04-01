@@ -22,6 +22,19 @@ impl RuleEvaluator for DuplicateDetectionEvaluator {
             );
             DEFAULT_WINDOW_MINUTES
         });
+
+        // Guard: non-positive window is a misconfiguration that would create
+        // a future cutoff (never matching any past payment), silently disabling
+        // the rule. Log and skip instead of silently passing.
+        if window_minutes <= 0 {
+            tracing::warn!(
+                rule_id = %rule.id,
+                window_minutes,
+                "duplicate_detection window_minutes must be positive, skipping rule"
+            );
+            return RuleResult::Pass;
+        }
+
         let cutoff = ctx.current_time - Duration::minutes(window_minutes);
 
         let is_duplicate = ctx.recent_payments.iter().any(|p| {

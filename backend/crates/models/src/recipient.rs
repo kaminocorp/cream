@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agent::CountryCode;
+
 /// The recipient of a payment.
 ///
 /// Mirrors the vision doc's recipient schema: a type discriminator plus a
@@ -26,7 +28,7 @@ pub struct Recipient {
     /// Used by the routing engine for corridor-based provider selection
     /// and by policy rules for geographic restrictions.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub country: Option<String>,
+    pub country: Option<CountryCode>,
 }
 
 /// The type of payment recipient.
@@ -53,11 +55,12 @@ mod tests {
             recipient_type: RecipientType::Merchant,
             identifier: "stripe_merch_123".to_string(),
             name: Some("Acme Corp".to_string()),
-            country: Some("SG".to_string()),
+            country: Some(CountryCode::new("SG")),
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["type"], "merchant");
         let parsed: Recipient = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.recipient_type, RecipientType::Merchant);
+        assert_eq!(parsed.country.unwrap().as_str(), "SG");
     }
 }

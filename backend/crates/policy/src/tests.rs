@@ -32,7 +32,7 @@ fn test_request(amount: Decimal) -> PaymentRequest {
             recipient_type: RecipientType::Merchant,
             identifier: "stripe_merch_123".to_string(),
             name: Some("Test Merchant".to_string()),
-            country: Some("SG".to_string()),
+            country: Some(CountryCode::new("SG")),
         },
         preferred_rail: RailPreference::Auto,
         justification: Justification {
@@ -761,6 +761,18 @@ fn condition_not_in_operator() {
     assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
 }
 
+#[test]
+fn condition_notin_non_array_fails_safe() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // NotIn with a non-array value should return false (fail safe), not true
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "justification.category".to_string(),
+        op: ComparisonOp::NotIn,
+        value: serde_json::json!("not_an_array"),
+    });
+    assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
 // ---------------------------------------------------------------------------
 // Time Window tests
 // ---------------------------------------------------------------------------
@@ -945,4 +957,339 @@ fn condition_matches_invalid_regex_returns_false() {
     });
     // Invalid regex should return false, not panic
     assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+// ---------------------------------------------------------------------------
+// Misconfiguration guard tests (Phase 6.3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn velocity_limit_skips_on_negative_max_count() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("velocity_limit".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "velocity".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"max_count": -5, "window_minutes": 60}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Negative max_count should cause the rule to be skipped (Pass), not bypass
+    let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn velocity_limit_skips_on_zero_window() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("velocity_limit".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "velocity".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"max_count": 5, "window_minutes": 0}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn time_window_skips_on_out_of_range_hours() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("time_window".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "time_window".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!({
+                "allowed_hours_start": 25,
+                "allowed_hours_end": 50,
+            }),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Out-of-range hours should cause the rule to be skipped (Pass)
+    let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+// ---------------------------------------------------------------------------
+// Merchant Check tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merchant_check_triggers_when_merchant_in_deny_list() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant is "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::In,
+            value: serde_json::json!(["stripe_merch_123", "banned_merchant"]),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn merchant_check_passes_when_merchant_not_in_deny_list() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant is "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::In,
+            value: serde_json::json!(["banned_merchant_a", "banned_merchant_b"]),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn merchant_check_triggers_when_merchant_not_in_allow_list() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.request.recipient.identifier = "unknown_merchant".to_string();
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::NotIn,
+            value: serde_json::json!(["stripe_merch_123", "approved_merchant"]),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn merchant_check_passes_when_merchant_in_allow_list() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant is "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::NotIn,
+            value: serde_json::json!(["stripe_merch_123", "approved_merchant"]),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn merchant_check_non_array_value_fails_safe() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // Misconfigured rule: value is a string instead of array
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::In,
+            value: serde_json::json!("stripe_merch_123"), // string, not array
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Non-array value should fail safe (Pass, not trigger)
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn merchant_check_notin_non_array_value_fails_safe() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // Misconfigured rule: NotIn with non-array value
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::NotIn,
+            value: serde_json::json!("some_string"), // string, not array
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Non-array value should fail safe (Pass, not trigger)
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn merchant_check_equals_operator() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant is "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!("stripe_merch_123"),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6.4: Additional hardening tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_detection_skips_on_negative_window() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    // Add a payment that would match if window were positive
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(100, 0),
+        currency: Currency::SGD,
+        recipient_identifier: "stripe_merch_123".to_string(),
+        status: PaymentStatus::Submitted,
+        rail: RailPreference::Auto,
+        created_at: Utc::now() - Duration::seconds(30),
+    });
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("duplicate_detection".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "duplicate".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"window_minutes": -5}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Negative window should cause the rule to be skipped (Pass), not bypass
+    let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn duplicate_detection_skips_on_zero_window() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("duplicate_detection".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "duplicate".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"window_minutes": 0}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn spend_rate_monthly_calendar_boundary() {
+    // On April 5 at 12:00 UTC, a payment from March 15 should NOT count
+    // toward April's monthly spend (different calendar month).
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.current_time = chrono::NaiveDate::from_ymd_opt(2026, 4, 5)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc();
+
+    // Payment from March 15 — previous calendar month, outside daily/weekly windows
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(29950, 0), // $29,950 — just under $30,000 monthly limit
+        currency: Currency::SGD,
+        recipient_identifier: "stripe_merch_123".to_string(),
+        status: PaymentStatus::Settled,
+        rail: RailPreference::Auto,
+        created_at: chrono::NaiveDate::from_ymd_opt(2026, 3, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc(),
+    });
+
+    let rule = make_rule(
+        "spend_rate",
+        serde_json::json!({"monthly": true}),
+        PolicyAction::Block,
+    );
+    // $29,950 was in March. Current request is $100. Monthly limit is $30,000.
+    // Since March payment shouldn't count for April, April total is just $100 → Pass.
+    let result = SpendRateEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn geographic_evaluator_case_insensitive() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.profile.geographic_restrictions = vec![CountryCode::new("sg")]; // lowercase
+    ctx.request.recipient.country = Some(CountryCode::new("SG")); // uppercase
+    let rule = make_rule(
+        "recipient.country",
+        serde_json::json!(["SG"]),
+        PolicyAction::Block,
+    );
+    // Should match despite case difference
+    let result = GeographicEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
 }

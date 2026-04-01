@@ -24,7 +24,7 @@ impl RuleEvaluator for GeographicEvaluator {
             .profile
             .geographic_restrictions
             .iter()
-            .any(|cc| cc.as_str() == recipient_country);
+            .any(|cc| cc.as_str().eq_ignore_ascii_case(recipient_country.as_str()));
 
         if allowed {
             RuleResult::Pass

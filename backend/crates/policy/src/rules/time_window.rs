@@ -1,4 +1,4 @@
-use chrono::FixedOffset;
+use chrono::{FixedOffset, Timelike};
 use cream_models::prelude::{PolicyCondition, PolicyRule};
 
 use crate::context::EvaluationContext;
@@ -40,11 +40,7 @@ impl RuleEvaluator for TimeWindowEvaluator {
         });
 
         let local_time = ctx.current_time.with_timezone(&offset);
-        let current_hour = local_time
-            .format("%H")
-            .to_string()
-            .parse::<u32>()
-            .unwrap_or(0);
+        let current_hour = local_time.hour();
 
         let in_window = if start_hour <= end_hour {
             // Normal range: e.g., 9..17
@@ -96,6 +92,14 @@ fn extract_hours(condition: &PolicyCondition) -> Option<(u32, u32, Option<i32>)>
         PolicyCondition::FieldCheck(check) if check.field == "time_window" => {
             let start = check.value.get("allowed_hours_start")?.as_u64()? as u32;
             let end = check.value.get("allowed_hours_end")?.as_u64()? as u32;
+            if start > 23 || end > 23 {
+                tracing::warn!(
+                    start,
+                    end,
+                    "time_window hours out of 0-23 range, rule will be skipped"
+                );
+                return None;
+            }
             let offset = check
                 .value
                 .get("utc_offset_hours")

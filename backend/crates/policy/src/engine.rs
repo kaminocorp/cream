@@ -12,9 +12,8 @@ use crate::rules::{
     duplicate_detection::DuplicateDetectionEvaluator,
     first_time_merchant::FirstTimeMerchantEvaluator, geographic::GeographicEvaluator,
     justification_quality::JustificationQualityEvaluator, merchant_check::MerchantCheckEvaluator,
-    proportionality::ProportionalityEvaluator, rail_restriction::RailRestrictionEvaluator,
-    spend_rate::SpendRateEvaluator, time_window::TimeWindowEvaluator,
-    velocity_limit::VelocityLimitEvaluator,
+    rail_restriction::RailRestrictionEvaluator, spend_rate::SpendRateEvaluator,
+    time_window::TimeWindowEvaluator, velocity_limit::VelocityLimitEvaluator,
 };
 
 // ---------------------------------------------------------------------------
@@ -79,7 +78,11 @@ impl PolicyEngine {
             "duplicate_detection".into(),
             Box::new(DuplicateDetectionEvaluator),
         );
-        evaluators.insert("proportionality".into(), Box::new(ProportionalityEvaluator));
+        // NOTE: ProportionalityEvaluator is intentionally NOT registered.
+        // It is a stub that always passes (requires future LLM integration).
+        // Registering it would silently approve all payments matching
+        // proportionality rules. The struct is retained in rules/ for future
+        // implementation — register it here once evaluate() is complete.
 
         Self { evaluators }
     }

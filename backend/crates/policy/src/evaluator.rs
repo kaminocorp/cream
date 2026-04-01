@@ -67,7 +67,7 @@ fn resolve_field(field: &str, ctx: &EvaluationContext) -> serde_json::Value {
             serde_json::Value::String(ctx.request.recipient.identifier.clone())
         }
         "recipient.country" => match &ctx.request.recipient.country {
-            Some(c) => serde_json::Value::String(c.clone()),
+            Some(c) => serde_json::Value::String(c.as_str().to_owned()),
             None => serde_json::Value::Null,
         },
         "agent.status" => serde_json::to_value(ctx.agent.status).unwrap_or_default(),
@@ -100,7 +100,12 @@ fn compare_values(
         },
         ComparisonOp::NotIn => match expected {
             serde_json::Value::Array(arr) => !arr.contains(field),
-            _ => true,
+            _ => {
+                tracing::warn!(
+                    "NotIn condition has non-array value, failing safe (returning false)"
+                );
+                false
+            }
         },
         ComparisonOp::Contains => match (field.as_str(), expected.as_str()) {
             (Some(haystack), Some(needle)) => haystack.contains(needle),

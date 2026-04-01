@@ -225,12 +225,13 @@ pub struct PaymentRequest {
 /// The full payment entity as persisted in the database.
 ///
 /// State transitions are enforced via `transition()` — the only way to
-/// change status. This guarantees illegal states never reach the DB.
+/// change status. The `status` field is private to prevent direct mutation
+/// that would bypass the state machine. Use `status()` to read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: PaymentId,
     pub request: PaymentRequest,
-    pub status: PaymentStatus,
+    status: PaymentStatus,
     pub provider_id: Option<String>,
     pub provider_transaction_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -238,6 +239,11 @@ pub struct Payment {
 }
 
 impl Payment {
+    /// Returns the current payment status.
+    pub fn status(&self) -> PaymentStatus {
+        self.status
+    }
+
     /// Create a new payment from a request. Starts in `Pending` status.
     pub fn new(request: PaymentRequest) -> Self {
         let now = Utc::now();
@@ -288,7 +294,7 @@ impl From<&Payment> for PaymentResponse {
     fn from(p: &Payment) -> Self {
         Self {
             payment_id: p.id,
-            status: p.status,
+            status: p.status(),
             provider: p.provider_id.clone(),
             provider_transaction_id: p.provider_transaction_id.clone(),
             created_at: p.created_at,
@@ -304,6 +310,7 @@ impl From<&Payment> for PaymentResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::CountryCode;
     use crate::justification::PaymentCategory;
     use crate::recipient::RecipientType;
 
@@ -316,7 +323,7 @@ mod tests {
                 recipient_type: RecipientType::Merchant,
                 identifier: "stripe_merch_123".to_string(),
                 name: None,
-                country: Some("SG".to_string()),
+                country: Some(CountryCode::new("SG")),
             },
             preferred_rail: RailPreference::Auto,
             justification: Justification {

@@ -16,5 +16,4 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-mockall = { workspace = true }
 tokio = { workspace = true }

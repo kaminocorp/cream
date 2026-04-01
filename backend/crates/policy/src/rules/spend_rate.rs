@@ -33,17 +33,20 @@ impl RuleEvaluator for SpendRateEvaluator {
             return RuleResult::Triggered(rule.action);
         }
 
-        // Check monthly spend — use calendar month start (1st at 00:00 UTC)
-        let monthly_cutoff = now
+        // Check monthly spend — use calendar month start (1st at 00:00 UTC).
+        //
+        // Chrono's `with_day(1)` succeeds for every valid DateTime (day 1 exists
+        // in all months), so the fallback is unreachable. We keep it purely as
+        // defensive coding, but use a correct calendar-month-length fallback
+        // instead of an arbitrary 30-day window.
+        let month_start_naive = now
+            .date_naive()
             .with_day(1)
-            .and_then(|d| d.date_naive().and_hms_opt(0, 0, 0))
-            .map(|naive| naive.and_utc())
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "failed to compute calendar month start, falling back to 30-day window"
-                );
-                now - Duration::days(30)
-            });
+            .expect("day 1 is valid for every month");
+        let monthly_cutoff = month_start_naive
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 is always valid")
+            .and_utc();
         let monthly_spend = sum_payments_since(ctx, monthly_cutoff) + ctx.request.amount;
         if monthly_spend > ctx.profile.max_monthly_spend {
             return RuleResult::Triggered(rule.action);

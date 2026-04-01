@@ -56,6 +56,14 @@ fn extract_from_condition(
         PolicyCondition::FieldCheck(check) if check.field == "velocity" => {
             let max_count = check.value.get("max_count")?.as_i64()?;
             let window_minutes = check.value.get("window_minutes")?.as_i64()?;
+            if max_count <= 0 || window_minutes <= 0 {
+                tracing::warn!(
+                    max_count,
+                    window_minutes,
+                    "velocity_limit config has non-positive values, rule will be skipped"
+                );
+                return None;
+            }
             Some((max_count, window_minutes))
         }
         PolicyCondition::All(children) | PolicyCondition::Any(children) => {

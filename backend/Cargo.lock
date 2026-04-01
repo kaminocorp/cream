@@ -437,7 +437,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "cream-models",
- "mockall",
  "rust_decimal",
  "serde",
  "serde_json",

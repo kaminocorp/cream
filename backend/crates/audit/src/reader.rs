@@ -43,8 +43,10 @@ impl AuditQuery {
         self.limit.unwrap_or(50).min(1000) as i64
     }
 
+    /// Effective offset, defaulting to 0 and clamped to 100_000 to prevent
+    /// expensive full-table scans from unbounded pagination.
     fn effective_offset(&self) -> i64 {
-        self.offset.unwrap_or(0) as i64
+        self.offset.unwrap_or(0).min(100_000) as i64
     }
 }
 
@@ -148,24 +150,24 @@ impl QueryBuilder {
     }
 }
 
-/// Serialize a serde-able enum to its string representation with logging on failure.
-fn serialize_enum_to_string<T: serde::Serialize>(value: &T, fallback: &str) -> String {
-    match serde_json::to_value(value) {
-        Ok(v) => v
-            .as_str()
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    fallback,
-                    "enum serialized to non-string JSON value, using fallback"
-                );
-                fallback
-            })
-            .to_owned(),
-        Err(e) => {
-            tracing::warn!(error = %e, fallback, "failed to serialize enum for query filter, using fallback");
-            fallback.to_owned()
-        }
-    }
+/// Serialize a serde-able enum to its string representation.
+///
+/// Returns an error instead of silently falling back — silent fallbacks would
+/// cause audit queries to match wrong records (e.g., querying for "unknown"
+/// instead of the intended status).
+fn serialize_enum_to_string<T: serde::Serialize + std::fmt::Debug>(
+    value: &T,
+) -> Result<String, AuditError> {
+    let json_val = serde_json::to_value(value)?;
+    json_val
+        .as_str()
+        .map(|s| s.to_owned())
+        .ok_or_else(|| {
+            <serde_json::Error as serde::ser::Error>::custom(format!(
+                "enum {value:?} serialized to non-string JSON value"
+            ))
+        })
+        .map_err(AuditError::Serialization)
 }
 
 /// Raw row returned by SQLx before we map it to the domain type.
@@ -244,11 +246,11 @@ impl AuditReader for PgAuditReader {
             qb.push_clause("timestamp <=", BindValue::Timestamp(*to));
         }
         if let Some(ref status) = filters.status {
-            let status_str = serialize_enum_to_string(status, "unknown");
+            let status_str = serialize_enum_to_string(status)?;
             qb.push_clause("final_status", BindValue::String(status_str));
         }
         if let Some(ref category) = filters.category {
-            let cat_str = serialize_enum_to_string(category, "other");
+            let cat_str = serialize_enum_to_string(category)?;
             qb.push_clause("justification->>'category'", BindValue::String(cat_str));
         }
         if let Some(ref min_amount) = filters.min_amount {
@@ -433,6 +435,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(q.effective_limit(), 1000);
+    }
+
+    #[test]
+    fn audit_query_clamps_offset_to_100k() {
+        let q = AuditQuery {
+            offset: Some(500_000),
+            ..Default::default()
+        };
+        assert_eq!(q.effective_offset(), 100_000);
     }
 
     #[test]
