@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.6.16](#0616--2026-04-01) — Production readiness review: ProviderId empty-string validation
 - [0.6.15](#0615--2026-04-01) — Production readiness review: HumanReviewRecord rejects Escalate decision, Recipient empty-identifier guard, Justification empty/whitespace-only summary guard
 - [0.6.14](#0614--2026-04-01) — Production sweep: ProviderResponseRecord string bounds, set_provider transaction_id limit, Equals/NotEquals/Contains case-insensitive matching, ProviderHealth error_rate validation
 - [0.6.13](#0613--2026-04-01) — Cross-crate audit: AuditEntry payment_id field, TimedOut terminal status, In/NotIn case-insensitive matching, webhook_endpoints updated_at, down-migration comment
@@ -22,6 +23,32 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.6.16 — 2026-04-01
+
+**Phase 6.16: Production Readiness Review — ProviderId Empty-String Validation**
+
+Full-crate production readiness audit (models, policy, providers, audit, router, api, migrations) targeting one remaining defense-in-depth gap: `ProviderId` accepted empty strings on all construction paths, inconsistent with the validated-ID pattern established by `IdempotencyKey` and `CountryCode`. An empty provider ID could be written to `RoutingDecision.selected` and persisted permanently to the append-only audit ledger. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`ProviderId` accepts empty strings — invalid provider ID persisted to audit ledger (MEDIUM)** — `ProviderId::new("")` succeeded silently and the derived `Deserialize` had no validation, unlike `IdempotencyKey` (empty-string rejection on `new()`, `try_new()`, and custom `Deserialize` since v0.6.12) and `CountryCode` (format validation on all paths since v0.2.0). An empty provider ID in `RoutingDecision.selected` would permanently store an invalid reference in the append-only audit ledger. Added `assert!` in `new()`, fallible `try_new()` constructor, and custom `Deserialize` impl that rejects empty strings — matching the `IdempotencyKey` pattern exactly
+
+### Added
+
+- `ProviderId::try_new()` fallible constructor for untrusted input
+- Custom `Deserialize` for `ProviderId` with empty-string validation
+- 5 new tests: ProviderId rejects empty `new()` (1), `try_new()` rejects empty (1), `try_new()` accepts valid (1), deserialize rejects empty (1), deserialize accepts valid (1)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 225/225 passing (91 models + 14 audit + 103 policy + 17 providers) |
 
 ---
 

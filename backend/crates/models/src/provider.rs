@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::error::DomainError;
 use crate::payment::RailPreference;
 
 // ---------------------------------------------------------------------------
@@ -13,16 +14,49 @@ use crate::payment::RailPreference;
 /// Uses a human-readable string like "stripe_issuing", "airwallex_payouts",
 /// "coinbase_x402" rather than a UUID — providers are configuration, not
 /// user-generated entities.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Validated on all construction paths: must be non-empty. Empty provider IDs
+/// are semantically invalid and would corrupt the append-only audit ledger if
+/// written to `RoutingDecision.selected`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ProviderId(String);
 
 impl ProviderId {
+    /// Create a new ProviderId. Panics if the id is empty.
+    ///
+    /// Use `try_new()` for fallible construction from untrusted input.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        assert!(!id.is_empty(), "ProviderId must not be empty");
+        Self(id)
+    }
+
+    /// Fallible constructor for untrusted input. Returns an error if the id is empty.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, DomainError> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(DomainError::InvalidIdFormat(
+                "ProviderId must not be empty".to_string(),
+            ));
+        }
+        Ok(Self(id))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            return Err(serde::de::Error::custom("provider_id must not be empty"));
+        }
+        Ok(Self(s))
     }
 }
 
@@ -252,5 +286,45 @@ mod tests {
         let result: Result<ProviderHealth, _> = serde_json::from_value(json);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("error_rate_5m"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.16: ProviderId empty-string validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "must not be empty")]
+    fn provider_id_rejects_empty_new() {
+        let _ = ProviderId::new("");
+    }
+
+    #[test]
+    fn provider_id_try_new_rejects_empty() {
+        let result = ProviderId::try_new("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provider_id_try_new_accepts_valid() {
+        let result = ProviderId::try_new("stripe_issuing");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "stripe_issuing");
+    }
+
+    #[test]
+    fn provider_id_deserialize_rejects_empty() {
+        let json = serde_json::json!("");
+        let result: Result<ProviderId, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn provider_id_deserialize_accepts_valid() {
+        let json = serde_json::json!("coinbase_x402");
+        let result: Result<ProviderId, _> = serde_json::from_value(json);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "coinbase_x402");
     }
 }
