@@ -103,12 +103,37 @@ typed_id!(WebhookEndpointId, "whk");
 // IdempotencyKey — String-based, not UUID-based
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct IdempotencyKey(String);
+
+impl<'de> Deserialize<'de> for IdempotencyKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            return Err(serde::de::Error::custom(
+                "idempotency_key must not be empty",
+            ));
+        }
+        Ok(Self(s))
+    }
+}
 
 impl IdempotencyKey {
     pub fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
+        let key = key.into();
+        assert!(!key.is_empty(), "IdempotencyKey must not be empty");
+        Self(key)
+    }
+
+    /// Fallible constructor for untrusted input.
+    pub fn try_new(key: impl Into<String>) -> Result<Self, DomainError> {
+        let key = key.into();
+        if key.is_empty() {
+            return Err(DomainError::InvalidIdFormat(
+                "IdempotencyKey must not be empty".to_string(),
+            ));
+        }
+        Ok(Self(key))
     }
 
     pub fn as_str(&self) -> &str {
@@ -181,5 +206,26 @@ mod tests {
         assert_eq!(key.to_string(), "idem_abc-123");
         let parsed: IdempotencyKey = "idem_abc-123".parse().unwrap();
         assert_eq!(key, parsed);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be empty")]
+    fn idempotency_key_rejects_empty_new() {
+        let _ = IdempotencyKey::new("");
+    }
+
+    #[test]
+    fn idempotency_key_try_new_rejects_empty() {
+        let result = IdempotencyKey::try_new("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn idempotency_key_deserialize_rejects_empty() {
+        let json = serde_json::json!("");
+        let result: Result<IdempotencyKey, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must not be empty"));
     }
 }

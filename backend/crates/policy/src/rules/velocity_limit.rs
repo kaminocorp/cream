@@ -31,7 +31,11 @@ impl RuleEvaluator for VelocityLimitEvaluator {
         let count = ctx
             .recent_payments
             .iter()
-            .filter(|p| p.created_at >= cutoff && p.status.counts_toward_spend())
+            .filter(|p| {
+                p.created_at >= cutoff
+                    && p.status.counts_toward_spend()
+                    && p.currency == ctx.request.currency
+            })
             .count()
             + 1; // +1 for the current request
 

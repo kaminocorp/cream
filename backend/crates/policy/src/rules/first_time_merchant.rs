@@ -11,9 +11,11 @@ pub struct FirstTimeMerchantEvaluator;
 
 impl RuleEvaluator for FirstTimeMerchantEvaluator {
     fn evaluate(&self, rule: &PolicyRule, ctx: &EvaluationContext) -> RuleResult {
+        let id_lower = ctx.request.recipient.identifier.to_ascii_lowercase();
         if ctx
             .known_merchants
-            .contains(&ctx.request.recipient.identifier)
+            .iter()
+            .any(|m| m.to_ascii_lowercase() == id_lower)
         {
             RuleResult::Pass
         } else {

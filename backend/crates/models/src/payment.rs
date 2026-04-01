@@ -409,9 +409,10 @@ impl Payment {
     /// Set the provider and provider transaction ID (write-once).
     ///
     /// Only valid when the payment is in `Approved` or `Submitted` status
-    /// (i.e., at or past the point where a provider has been selected).
-    /// Returns an error for pre-submission statuses to enforce the invariant
-    /// that provider fields are not set before routing.
+    /// (i.e., at or past the point where a provider has been selected but
+    /// before the payment reaches a terminal state). Returns an error for
+    /// pre-submission statuses (not yet routed) and terminal statuses
+    /// (Settled, Failed — immutable once reached).
     ///
     /// This is a write-once operation — calling it again after provider info
     /// is already set returns an error. During failover, the payment should
@@ -430,10 +431,7 @@ impl Payment {
         }
         let valid = matches!(
             self.status,
-            PaymentStatus::Approved
-                | PaymentStatus::Submitted
-                | PaymentStatus::Settled
-                | PaymentStatus::Failed
+            PaymentStatus::Approved | PaymentStatus::Submitted
         );
         if !valid {
             return Err(DomainError::PolicyViolation(format!(
@@ -718,6 +716,29 @@ mod tests {
         assert!(result.is_err());
         // Original provider should be unchanged
         assert_eq!(p.provider_id().unwrap().as_str(), "stripe");
+    }
+
+    #[test]
+    fn set_provider_rejects_settled_status() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        p.transition(PaymentStatus::Settled).unwrap();
+        // Terminal status — should not allow provider mutation
+        let result = p.set_provider(ProviderId::new("stripe"), "ch_123".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_provider_rejects_failed_status() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        p.transition(PaymentStatus::Failed).unwrap();
+        let result = p.set_provider(ProviderId::new("stripe"), "ch_123".to_string());
+        assert!(result.is_err());
     }
 
     #[test]

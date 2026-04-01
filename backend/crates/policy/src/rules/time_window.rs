@@ -103,6 +103,14 @@ fn extract_hours(condition: &PolicyCondition) -> Option<(u32, u32, Option<i32>)>
                 );
                 return None;
             }
+            if start == end {
+                tracing::warn!(
+                    start,
+                    end,
+                    "time_window start == end defines a zero-width window (blocks all hours), skipping as likely misconfiguration"
+                );
+                return None;
+            }
             let offset = check
                 .value
                 .get("utc_offset_hours")

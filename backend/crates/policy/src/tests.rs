@@ -1712,3 +1712,179 @@ fn time_window_blocks_at_end_hour() {
     let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
     assert_eq!(result, RuleResult::Triggered(PolicyAction::Block)); // outside window
 }
+
+// ---------------------------------------------------------------------------
+// Fix: Velocity limit currency-aware filtering (v0.6.11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn velocity_limit_ignores_different_currency_payments() {
+    let mut ctx = test_context(Decimal::new(10, 0));
+    // Add 5 USD payments — different currency, should NOT count toward SGD velocity
+    for i in 0..5 {
+        ctx.recent_payments.push(PaymentSummary {
+            amount: Decimal::new(10, 0),
+            currency: Currency::USD,
+            recipient_identifier: format!("merchant_{i}"),
+            category: PaymentCategory::ApiCredits,
+            status: PaymentStatus::Submitted,
+            rail: RailPreference::Card,
+            created_at: Utc::now() - Duration::minutes(i as i64 * 10),
+        });
+    }
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("velocity_limit".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "velocity".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"max_count": 5, "window_minutes": 60}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
+    // Only 1 SGD (current request), USD payments ignored → 1 <= 5
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn velocity_limit_counts_same_currency_payments() {
+    let mut ctx = test_context(Decimal::new(10, 0));
+    // Add 5 SGD payments — same currency, should count
+    for i in 0..5 {
+        ctx.recent_payments.push(PaymentSummary {
+            amount: Decimal::new(10, 0),
+            currency: Currency::SGD,
+            recipient_identifier: format!("merchant_{i}"),
+            category: PaymentCategory::ApiCredits,
+            status: PaymentStatus::Submitted,
+            rail: RailPreference::Card,
+            created_at: Utc::now() - Duration::minutes(i as i64 * 10),
+        });
+    }
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("velocity_limit".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "velocity".to_string(),
+            op: ComparisonOp::GreaterThan,
+            value: serde_json::json!({"max_count": 5, "window_minutes": 60}),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
+    // 5 SGD + 1 current = 6 > 5
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+// ---------------------------------------------------------------------------
+// Fix: First-time merchant case-insensitive matching (v0.6.11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn first_time_merchant_case_insensitive_match() {
+    // known_merchants has "stripe_merch_123" (lowercase)
+    let mut ctx = test_context(Decimal::new(100, 0));
+    // Request with uppercase variant — should still match as known
+    ctx.request.recipient.identifier = "STRIPE_MERCH_123".to_string();
+    let rule = make_rule(
+        "first_time_merchant",
+        serde_json::json!(true),
+        PolicyAction::Escalate,
+    );
+    let result = FirstTimeMerchantEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass); // recognized as known merchant
+}
+
+#[test]
+fn first_time_merchant_case_insensitive_mixed_case() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.request.recipient.identifier = "Stripe_Merch_123".to_string();
+    let rule = make_rule(
+        "first_time_merchant",
+        serde_json::json!(true),
+        PolicyAction::Escalate,
+    );
+    let result = FirstTimeMerchantEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass); // recognized as known merchant
+}
+
+// ---------------------------------------------------------------------------
+// Fix: Duplicate detection case-insensitive merchant matching (v0.6.12)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_detection_case_insensitive_match() {
+    let now = Utc::now();
+    let mut ctx = test_context(Decimal::new(100, 0));
+    // Prior payment used lowercase merchant
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(100, 0),
+        currency: Currency::SGD,
+        recipient_identifier: "stripe_merch_123".to_string(),
+        created_at: now - Duration::minutes(1),
+        status: PaymentStatus::Settled,
+        category: PaymentCategory::ApiCredits,
+        rail: RailPreference::Card,
+    });
+    // Current request uses UPPERCASE — should still detect as duplicate
+    ctx.request.recipient.identifier = "STRIPE_MERCH_123".to_string();
+    ctx.current_time = now;
+    let rule = make_rule(
+        "duplicate",
+        serde_json::json!({"window_minutes": 5}),
+        PolicyAction::Block,
+    );
+    let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn duplicate_detection_case_insensitive_mixed_case() {
+    let now = Utc::now();
+    let mut ctx = test_context(Decimal::new(200, 0));
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(200, 0),
+        currency: Currency::SGD,
+        recipient_identifier: "Merchant_ABC".to_string(),
+        created_at: now - Duration::minutes(2),
+        status: PaymentStatus::Settled,
+        category: PaymentCategory::ApiCredits,
+        rail: RailPreference::Card,
+    });
+    ctx.request.recipient.identifier = "merchant_abc".to_string();
+    ctx.request.amount = Decimal::new(200, 0);
+    ctx.current_time = now;
+    let rule = make_rule(
+        "duplicate",
+        serde_json::json!({"window_minutes": 5}),
+        PolicyAction::Block,
+    );
+    let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+// ---------------------------------------------------------------------------
+// Fix: Time window start==end rejection (v0.6.12)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn time_window_start_equals_end_skips_rule() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // start == end should be rejected as misconfiguration, rule skips (Pass)
+    let rule = make_rule(
+        "time_window",
+        serde_json::json!({"allowed_hours_start": 9, "allowed_hours_end": 9}),
+        PolicyAction::Block,
+    );
+    let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass); // skipped, not blocking all hours
+}
