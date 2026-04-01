@@ -356,6 +356,7 @@ fn duplicate_detection_triggers_same_amount_recipient() {
         amount: Decimal::new(100, 0),
         currency: Currency::SGD,
         recipient_identifier: "stripe_merch_123".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Submitted,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::minutes(2), // 2 minutes ago
@@ -376,6 +377,7 @@ fn duplicate_detection_passes_outside_window() {
         amount: Decimal::new(100, 0),
         currency: Currency::SGD,
         recipient_identifier: "stripe_merch_123".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Submitted,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::minutes(10), // 10 minutes ago, outside 5-min window
@@ -409,6 +411,7 @@ fn spend_rate_triggers_above_daily_limit() {
         amount: Decimal::new(1600, 0),
         currency: Currency::SGD,
         recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Submitted,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::hours(2),
@@ -426,6 +429,7 @@ fn spend_rate_counts_settled_payments() {
         amount: Decimal::new(1600, 0),
         currency: Currency::SGD,
         recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Settled,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::hours(2),
@@ -444,6 +448,7 @@ fn spend_rate_excludes_failed_payments() {
         amount: Decimal::new(1600, 0),
         currency: Currency::SGD,
         recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Failed,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::hours(2),
@@ -488,6 +493,7 @@ fn velocity_limit_triggers_above_count() {
             amount: Decimal::new(10, 0),
             currency: Currency::SGD,
             recipient_identifier: format!("merchant_{i}"),
+            category: PaymentCategory::ApiCredits,
             status: PaymentStatus::Submitted,
             rail: RailPreference::Card,
             created_at: Utc::now() - Duration::minutes(i as i64 * 10),
@@ -520,6 +526,7 @@ fn velocity_limit_counts_settled_payments() {
             amount: Decimal::new(10, 0),
             currency: Currency::SGD,
             recipient_identifier: format!("merchant_{i}"),
+            category: PaymentCategory::ApiCredits,
             status: PaymentStatus::Settled,
             rail: RailPreference::Card,
             created_at: Utc::now() - Duration::minutes(i as i64 * 10),
@@ -1200,6 +1207,7 @@ fn duplicate_detection_skips_on_negative_window() {
         amount: Decimal::new(100, 0),
         currency: Currency::SGD,
         recipient_identifier: "stripe_merch_123".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Submitted,
         rail: RailPreference::Auto,
         created_at: Utc::now() - Duration::seconds(30),
@@ -1260,6 +1268,7 @@ fn spend_rate_monthly_calendar_boundary() {
         amount: Decimal::new(29950, 0), // $29,950 — just under $30,000 monthly limit
         currency: Currency::SGD,
         recipient_identifier: "stripe_merch_123".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Settled,
         rail: RailPreference::Auto,
         created_at: chrono::NaiveDate::from_ymd_opt(2026, 3, 15)
@@ -1307,6 +1316,7 @@ fn spend_rate_ignores_different_currency_payments() {
         amount: Decimal::new(1600, 0),
         currency: Currency::USD, // Different from request currency (SGD)
         recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Settled,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::hours(2),
@@ -1325,6 +1335,7 @@ fn spend_rate_counts_same_currency_payments() {
         amount: Decimal::new(1600, 0),
         currency: Currency::SGD, // Same as request currency
         recipient_identifier: "merchant_a".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Settled,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::hours(2),
@@ -1343,6 +1354,7 @@ fn duplicate_detection_ignores_different_currency() {
         amount: Decimal::new(100, 0),
         currency: Currency::USD, // Different from request currency (SGD)
         recipient_identifier: "stripe_merch_123".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Settled,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::minutes(1),
@@ -1364,6 +1376,7 @@ fn duplicate_detection_catches_same_currency() {
         amount: Decimal::new(100, 0),
         currency: Currency::SGD, // Same as request currency
         recipient_identifier: "stripe_merch_123".to_string(),
+        category: PaymentCategory::ApiCredits,
         status: PaymentStatus::Settled,
         rail: RailPreference::Card,
         created_at: Utc::now() - Duration::minutes(1),
@@ -1491,8 +1504,9 @@ fn escalation_threshold_passes_when_no_threshold_set() {
 }
 
 #[test]
-fn escalation_threshold_passes_at_exact_threshold() {
-    // At exactly $1000, should pass (> not >=)
+fn escalation_threshold_triggers_at_exact_threshold() {
+    // At exactly $1000, should escalate (>= semantics — operator intent is
+    // "anything at or above this amount needs human approval")
     let ctx = test_context(Decimal::new(1000, 0));
     let rule = make_rule(
         "escalation_threshold",
@@ -1500,7 +1514,7 @@ fn escalation_threshold_passes_at_exact_threshold() {
         PolicyAction::Escalate,
     );
     let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Escalate));
 }
 
 #[test]
@@ -1515,4 +1529,50 @@ fn escalation_threshold_always_escalates_never_blocks() {
     let result = EscalationThresholdEvaluator.evaluate(&rule, &ctx);
     // The evaluator hardcodes Escalate regardless of rule.action
     assert_eq!(result, RuleResult::Triggered(PolicyAction::Escalate));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6.9: metadata field resolution, In operator logging, set_provider
+// ---------------------------------------------------------------------------
+
+#[test]
+fn condition_evaluator_resolves_metadata_workflow_id() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.request.metadata = Some(cream_models::payment::PaymentMetadata {
+        agent_session_id: None,
+        workflow_id: Some("wf_abc".to_string()),
+        operator_ref: None,
+    });
+
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "metadata.workflow_id".to_string(),
+        op: ComparisonOp::Equals,
+        value: serde_json::json!("wf_abc"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_evaluator_metadata_null_when_absent() {
+    let ctx = test_context(Decimal::new(100, 0)); // metadata is None
+
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "metadata.workflow_id".to_string(),
+        op: ComparisonOp::Equals,
+        value: serde_json::Value::Null,
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_in_non_array_returns_false() {
+    let ctx = test_context(Decimal::new(100, 0));
+
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "currency".to_string(),
+        op: ComparisonOp::In,
+        value: serde_json::json!("not_an_array"),
+    });
+    // Non-array value for In should return false (fail-safe)
+    assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
 }

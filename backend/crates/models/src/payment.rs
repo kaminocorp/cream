@@ -192,8 +192,15 @@ pub enum RailPreference {
 // Payment Metadata
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed length for any single metadata field value.
+/// Prevents audit log bloat from unbounded metadata strings.
+pub const MAX_METADATA_FIELD_LEN: usize = 500;
+
 /// Optional metadata the agent can attach to a payment for tracing/correlation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// All string fields are bounded to [`MAX_METADATA_FIELD_LEN`] characters on
+/// deserialization to prevent audit log bloat from malicious or runaway values.
+#[derive(Debug, Clone, Serialize)]
 pub struct PaymentMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
@@ -201,6 +208,47 @@ pub struct PaymentMetadata {
     pub workflow_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operator_ref: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for PaymentMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            agent_session_id: Option<String>,
+            workflow_id: Option<String>,
+            operator_ref: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        fn validate_field<E: serde::de::Error>(
+            field: &Option<String>,
+            name: &str,
+        ) -> Result<(), E> {
+            if let Some(s) = field {
+                if s.len() > MAX_METADATA_FIELD_LEN {
+                    return Err(E::custom(format!(
+                        "metadata.{name} exceeds maximum length of {MAX_METADATA_FIELD_LEN} characters (got {})",
+                        s.len()
+                    )));
+                }
+            }
+            Ok(())
+        }
+
+        validate_field::<D::Error>(&raw.agent_session_id, "agent_session_id")?;
+        validate_field::<D::Error>(&raw.workflow_id, "workflow_id")?;
+        validate_field::<D::Error>(&raw.operator_ref, "operator_ref")?;
+
+        Ok(PaymentMetadata {
+            agent_session_id: raw.agent_session_id,
+            workflow_id: raw.workflow_id,
+            operator_ref: raw.operator_ref,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,17 +364,28 @@ impl Payment {
         self.provider_transaction_id.as_deref()
     }
 
-    /// Set the provider and provider transaction ID.
+    /// Set the provider and provider transaction ID (write-once).
     ///
     /// Only valid when the payment is in `Approved` or `Submitted` status
     /// (i.e., at or past the point where a provider has been selected).
     /// Returns an error for pre-submission statuses to enforce the invariant
     /// that provider fields are not set before routing.
+    ///
+    /// This is a write-once operation — calling it again after provider info
+    /// is already set returns an error. During failover, the payment should
+    /// transition through the state machine (creating a new audit trail entry)
+    /// rather than silently overwriting the provider.
     pub fn set_provider(
         &mut self,
         provider_id: ProviderId,
         transaction_id: String,
     ) -> Result<(), DomainError> {
+        if self.provider_id.is_some() {
+            return Err(DomainError::PolicyViolation(
+                "provider already set on this payment; create a new audit entry for failover"
+                    .to_string(),
+            ));
+        }
         let valid = matches!(
             self.status,
             PaymentStatus::Approved
@@ -599,5 +658,57 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(p.provider_id().unwrap().as_str(), "stripe");
         assert_eq!(p.provider_transaction_id().unwrap(), "ch_123");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.9 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_provider_rejects_second_call() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.set_provider(ProviderId::new("stripe"), "ch_123".to_string())
+            .unwrap();
+        // Second call should fail — write-once semantics
+        let result = p.set_provider(ProviderId::new("airwallex"), "aw_456".to_string());
+        assert!(result.is_err());
+        // Original provider should be unchanged
+        assert_eq!(p.provider_id().unwrap().as_str(), "stripe");
+    }
+
+    #[test]
+    fn metadata_within_limits_deserializes() {
+        let meta = PaymentMetadata {
+            agent_session_id: Some("sess_123".to_string()),
+            workflow_id: Some("wf_abc".to_string()),
+            operator_ref: None,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: PaymentMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.workflow_id.unwrap(), "wf_abc");
+    }
+
+    #[test]
+    fn metadata_exceeding_limit_rejected() {
+        let long = "x".repeat(MAX_METADATA_FIELD_LEN + 1);
+        let json = serde_json::json!({
+            "agent_session_id": long,
+        });
+        let result: Result<PaymentMetadata, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("maximum length"));
+    }
+
+    #[test]
+    fn metadata_at_exact_limit_accepted() {
+        let exact = "y".repeat(MAX_METADATA_FIELD_LEN);
+        let json = serde_json::json!({
+            "workflow_id": exact,
+        });
+        let parsed: PaymentMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.workflow_id.unwrap().len(), MAX_METADATA_FIELD_LEN);
     }
 }

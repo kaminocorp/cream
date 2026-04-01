@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
 use cream_models::prelude::{
-    Agent, AgentProfile, Currency, PaymentRequest, PaymentStatus, RailPreference,
+    Agent, AgentProfile, Currency, PaymentCategory, PaymentRequest, PaymentStatus, RailPreference,
 };
 
 /// The complete data bag passed to every rule during evaluation.
@@ -34,6 +34,7 @@ pub struct PaymentSummary {
     pub amount: Decimal,
     pub currency: Currency,
     pub recipient_identifier: String,
+    pub category: PaymentCategory,
     pub status: PaymentStatus,
     pub rail: RailPreference,
     pub created_at: DateTime<Utc>,

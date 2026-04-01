@@ -83,6 +83,27 @@ fn resolve_field(field: &str, ctx: &EvaluationContext) -> serde_json::Value {
             None => serde_json::Value::Null,
         },
         "agent.status" => serde_json::to_value(ctx.agent.status).unwrap_or_default(),
+        "metadata.agent_session_id" => match &ctx.request.metadata {
+            Some(m) => match &m.agent_session_id {
+                Some(v) => serde_json::Value::String(v.clone()),
+                None => serde_json::Value::Null,
+            },
+            None => serde_json::Value::Null,
+        },
+        "metadata.workflow_id" => match &ctx.request.metadata {
+            Some(m) => match &m.workflow_id {
+                Some(v) => serde_json::Value::String(v.clone()),
+                None => serde_json::Value::Null,
+            },
+            None => serde_json::Value::Null,
+        },
+        "metadata.operator_ref" => match &ctx.request.metadata {
+            Some(m) => match &m.operator_ref {
+                Some(v) => serde_json::Value::String(v.clone()),
+                None => serde_json::Value::Null,
+            },
+            None => serde_json::Value::Null,
+        },
         unknown => {
             tracing::warn!(
                 field = unknown,
@@ -108,7 +129,10 @@ fn compare_values(
         ComparisonOp::LessThanOrEqual => compare_decimal(field, expected, |a, b| a <= b),
         ComparisonOp::In => match expected {
             serde_json::Value::Array(arr) => arr.contains(field),
-            _ => false,
+            _ => {
+                tracing::warn!("In condition has non-array value, returning false");
+                false
+            }
         },
         ComparisonOp::NotIn => match expected {
             serde_json::Value::Array(arr) => !arr.contains(field),
@@ -188,7 +212,11 @@ fn regex_matches(text: &str, pattern: &str) -> bool {
             let result = re.is_match(text);
             if let Ok(mut cache) = REGEX_CACHE.lock() {
                 if cache.len() >= REGEX_CACHE_MAX {
-                    cache.clear();
+                    // Evict the oldest entry (by insertion order via arbitrary key)
+                    // rather than clearing the entire cache, so hot patterns survive.
+                    if let Some(oldest_key) = cache.keys().next().cloned() {
+                        cache.remove(&oldest_key);
+                    }
                 }
                 cache.insert(pattern.to_string(), re);
             }

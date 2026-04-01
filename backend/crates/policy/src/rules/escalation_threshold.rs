@@ -20,7 +20,7 @@ impl RuleEvaluator for EscalationThresholdEvaluator {
             None => return RuleResult::Pass,
         };
 
-        if ctx.request.amount > threshold {
+        if ctx.request.amount >= threshold {
             RuleResult::Triggered(PolicyAction::Escalate)
         } else {
             RuleResult::Pass
