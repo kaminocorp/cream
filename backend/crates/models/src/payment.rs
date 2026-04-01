@@ -8,6 +8,10 @@ use crate::justification::Justification;
 use crate::provider::ProviderId;
 use crate::recipient::Recipient;
 
+/// Maximum allowed length for `PaymentCategory::Other` values.
+/// Prevents audit log bloat from unbounded category strings.
+pub const MAX_CATEGORY_OTHER_LEN: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Payment Status — the state machine
 // ---------------------------------------------------------------------------
@@ -228,7 +232,12 @@ pub struct PaymentRequest {
 /// State transitions are enforced via `transition()` — the only way to
 /// change status. The `status` field is private to prevent direct mutation
 /// that would bypass the state machine. Use `status()` to read.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` validates invariants on load:
+/// - `created_at` must be <= `updated_at`
+/// - `provider_id` and `provider_transaction_id` must not be set for
+///   pre-submission statuses (Pending, Validating, PendingApproval)
+#[derive(Debug, Clone, Serialize)]
 pub struct Payment {
     pub id: PaymentId,
     pub request: PaymentRequest,
@@ -237,6 +246,54 @@ pub struct Payment {
     pub provider_transaction_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Shadow struct used only for deserialization with validation.
+#[derive(Deserialize)]
+struct PaymentRaw {
+    id: PaymentId,
+    request: PaymentRequest,
+    status: PaymentStatus,
+    provider_id: Option<ProviderId>,
+    provider_transaction_id: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for Payment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = PaymentRaw::deserialize(deserializer)?;
+
+        // Invariant: created_at must not be after updated_at
+        if raw.created_at > raw.updated_at {
+            return Err(serde::de::Error::custom("created_at must be <= updated_at"));
+        }
+
+        // Invariant: provider fields should not be set before submission
+        let pre_submission = matches!(
+            raw.status,
+            PaymentStatus::Pending | PaymentStatus::Validating | PaymentStatus::PendingApproval
+        );
+        if pre_submission && (raw.provider_id.is_some() || raw.provider_transaction_id.is_some()) {
+            return Err(serde::de::Error::custom(format!(
+                "provider_id and provider_transaction_id must not be set for status {:?}",
+                raw.status
+            )));
+        }
+
+        Ok(Payment {
+            id: raw.id,
+            request: raw.request,
+            status: raw.status,
+            provider_id: raw.provider_id,
+            provider_transaction_id: raw.provider_transaction_id,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+        })
+    }
 }
 
 impl Payment {
@@ -429,5 +486,56 @@ mod tests {
         let s = PaymentStatus::PendingApproval;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"pending_approval\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // Payment serde validation tests (v0.6.7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn payment_serde_roundtrip_happy_path() {
+        let p = Payment::new(sample_request());
+        let json = serde_json::to_string(&p).unwrap();
+        let parsed: Payment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status(), PaymentStatus::Pending);
+        assert_eq!(parsed.id, p.id);
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_created_after_updated() {
+        let p = Payment::new(sample_request());
+        let mut val = serde_json::to_value(&p).unwrap();
+        // Set created_at far in the future, after updated_at
+        val["created_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        val["updated_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("created_at must be <= updated_at"));
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_provider_id_on_pending() {
+        let p = Payment::new(sample_request());
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::json!("prov_stripe");
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("provider_id"));
+    }
+
+    #[test]
+    fn payment_deserialize_allows_provider_id_on_submitted() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        p.provider_id = Some(ProviderId::new("stripe"));
+        p.provider_transaction_id = Some("ch_123".to_string());
+        let json = serde_json::to_string(&p).unwrap();
+        let parsed: Payment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status(), PaymentStatus::Submitted);
+        assert!(parsed.provider_id.is_some());
     }
 }

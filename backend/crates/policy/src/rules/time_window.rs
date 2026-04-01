@@ -34,10 +34,13 @@ impl RuleEvaluator for TimeWindowEvaluator {
             .or_else(|| parse_timezone_offset(ctx.profile.timezone.as_deref()))
             .unwrap_or(0);
 
-        let offset = FixedOffset::east_opt(utc_offset_secs).unwrap_or_else(|| {
-            tracing::warn!(utc_offset_secs, "invalid UTC offset, falling back to UTC");
-            FixedOffset::east_opt(0).unwrap()
-        });
+        let offset = match FixedOffset::east_opt(utc_offset_secs) {
+            Some(o) => o,
+            None => {
+                tracing::warn!(utc_offset_secs, "invalid UTC offset, falling back to UTC");
+                FixedOffset::east_opt(0).expect("UTC offset 0 is always valid")
+            }
+        };
 
         let local_time = ctx.current_time.with_timezone(&offset);
         let current_hour = local_time.hour();

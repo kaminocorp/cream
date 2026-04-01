@@ -212,4 +212,33 @@ mod tests {
         let provider = MockProvider::success("my_provider");
         assert_eq!(provider.provider_id().as_str(), "my_provider");
     }
+
+    // -----------------------------------------------------------------------
+    // ProviderError retryability tests (v0.6.7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transient_errors_are_retryable() {
+        assert!(ProviderError::RequestFailed("oops".into()).is_retryable());
+        assert!(ProviderError::UnexpectedResponse("bad".into()).is_retryable());
+        assert!(ProviderError::Timeout(5000).is_retryable());
+        assert!(ProviderError::Unavailable("down".into()).is_retryable());
+        assert!(ProviderError::RateLimited {
+            retry_after_ms: 1000
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn permanent_errors_are_not_retryable() {
+        assert!(!ProviderError::NotFound("x".into()).is_retryable());
+        assert!(!ProviderError::CardError("x".into()).is_retryable());
+        assert!(!ProviderError::AuthenticationFailed("x".into()).is_retryable());
+        assert!(!ProviderError::InvalidAmount("x".into()).is_retryable());
+        assert!(!ProviderError::DuplicatePayment.is_retryable());
+        assert!(!ProviderError::InsufficientFunds("x".into()).is_retryable());
+        assert!(!ProviderError::ComplianceBlocked("x".into()).is_retryable());
+        assert!(!ProviderError::UnsupportedCurrency("x".into()).is_retryable());
+        assert!(!ProviderError::UnsupportedCountry("x".into()).is_retryable());
+    }
 }
