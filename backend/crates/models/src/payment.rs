@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::audit::MAX_PROVIDER_TRANSACTION_ID_LEN;
 use crate::error::DomainError;
 use crate::ids::{AgentId, IdempotencyKey, PaymentId};
 use crate::justification::Justification;
@@ -440,6 +441,13 @@ impl Payment {
                 self.status
             )));
         }
+        if transaction_id.len() > MAX_PROVIDER_TRANSACTION_ID_LEN {
+            return Err(DomainError::PolicyViolation(format!(
+                "provider transaction_id exceeds maximum length of {} characters (got {})",
+                MAX_PROVIDER_TRANSACTION_ID_LEN,
+                transaction_id.len()
+            )));
+        }
         self.provider_id = Some(provider_id);
         self.provider_transaction_id = Some(transaction_id);
         Ok(())
@@ -831,5 +839,35 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("amount must be positive"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.14: set_provider transaction_id bounds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_provider_rejects_oversized_transaction_id() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        let long_id = "x".repeat(MAX_PROVIDER_TRANSACTION_ID_LEN + 1);
+        let result = p.set_provider(ProviderId::new("stripe"), long_id);
+        assert!(result.is_err());
+        // Provider should NOT have been set
+        assert!(p.provider_id().is_none());
+    }
+
+    #[test]
+    fn set_provider_accepts_transaction_id_at_limit() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        let exact_id = "t".repeat(MAX_PROVIDER_TRANSACTION_ID_LEN);
+        let result = p.set_provider(ProviderId::new("stripe"), exact_id);
+        assert!(result.is_ok());
+        assert_eq!(
+            p.provider_transaction_id().unwrap().len(),
+            MAX_PROVIDER_TRANSACTION_ID_LEN
+        );
     }
 }

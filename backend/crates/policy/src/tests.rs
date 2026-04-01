@@ -1941,3 +1941,88 @@ fn condition_in_non_string_values_use_exact_match() {
     // amount resolves to a string "100" (Decimal serialization), should match
     assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6.14: Equals/NotEquals/Contains case-insensitive matching
+// ---------------------------------------------------------------------------
+
+#[test]
+fn condition_equals_case_insensitive_string_match() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // recipient.identifier is "stripe_merch_123" — Equals should match regardless of case
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::Equals,
+        value: serde_json::json!("STRIPE_MERCH_123"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_equals_exact_match_still_works() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::Equals,
+        value: serde_json::json!("stripe_merch_123"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_equals_non_string_uses_exact_match() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // Numeric equality — case-insensitivity only applies to strings
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "amount".to_string(),
+        op: ComparisonOp::Equals,
+        value: serde_json::json!("100"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_not_equals_case_insensitive() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // Same identifier, different case — NotEquals should NOT match (they are equal)
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::NotEquals,
+        value: serde_json::json!("STRIPE_MERCH_123"),
+    });
+    assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_not_equals_different_value() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::NotEquals,
+        value: serde_json::json!("different_merchant"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_contains_case_insensitive() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // justification.summary contains "api credits" — Contains should match "API Credits"
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "justification.summary".to_string(),
+        op: ComparisonOp::Contains,
+        value: serde_json::json!("API CREDITS"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_contains_case_insensitive_needle_lowercase() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "justification.summary".to_string(),
+        op: ComparisonOp::Contains,
+        value: serde_json::json!("batch processing"),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}

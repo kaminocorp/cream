@@ -41,7 +41,11 @@ impl std::fmt::Display for ProviderId {
 /// Updated on a rolling 5-minute window. Used by the routing engine to
 /// score providers and by the circuit breaker to decide whether to accept
 /// or reject traffic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` validates that `error_rate_5m` is a finite value
+/// in the range [0.0, 1.0]. NaN, Infinity, negative, or >1.0 values would
+/// poison routing engine scoring calculations.
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderHealth {
     pub provider_id: ProviderId,
     pub is_healthy: bool,
@@ -53,6 +57,43 @@ pub struct ProviderHealth {
     pub p99_latency_ms: u64,
     pub last_checked_at: DateTime<Utc>,
     pub circuit_state: CircuitState,
+}
+
+impl<'de> Deserialize<'de> for ProviderHealth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            provider_id: ProviderId,
+            is_healthy: bool,
+            error_rate_5m: f64,
+            p50_latency_ms: u64,
+            p99_latency_ms: u64,
+            last_checked_at: DateTime<Utc>,
+            circuit_state: CircuitState,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if !raw.error_rate_5m.is_finite() || raw.error_rate_5m < 0.0 || raw.error_rate_5m > 1.0 {
+            return Err(serde::de::Error::custom(format!(
+                "error_rate_5m must be a finite value between 0.0 and 1.0, got {}",
+                raw.error_rate_5m
+            )));
+        }
+
+        Ok(ProviderHealth {
+            provider_id: raw.provider_id,
+            is_healthy: raw.is_healthy,
+            error_rate_5m: raw.error_rate_5m,
+            p50_latency_ms: raw.p50_latency_ms,
+            p99_latency_ms: raw.p99_latency_ms,
+            last_checked_at: raw.last_checked_at,
+            circuit_state: raw.circuit_state,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,5 +199,58 @@ mod tests {
         let state = CircuitState::HalfOpen;
         let json = serde_json::to_string(&state).unwrap();
         assert_eq!(json, "\"half_open\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.14: ProviderHealth validation
+    // -----------------------------------------------------------------------
+
+    fn sample_health_json(error_rate: f64) -> serde_json::Value {
+        serde_json::json!({
+            "provider_id": "stripe_issuing",
+            "is_healthy": true,
+            "error_rate_5m": error_rate,
+            "p50_latency_ms": 120,
+            "p99_latency_ms": 450,
+            "last_checked_at": "2026-04-01T12:00:00Z",
+            "circuit_state": "closed"
+        })
+    }
+
+    #[test]
+    fn provider_health_valid_error_rate() {
+        let json = sample_health_json(0.05);
+        let health: ProviderHealth = serde_json::from_value(json).unwrap();
+        assert!((health.error_rate_5m - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn provider_health_zero_error_rate() {
+        let json = sample_health_json(0.0);
+        let health: ProviderHealth = serde_json::from_value(json).unwrap();
+        assert!((health.error_rate_5m).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn provider_health_max_error_rate() {
+        let json = sample_health_json(1.0);
+        let health: ProviderHealth = serde_json::from_value(json).unwrap();
+        assert!((health.error_rate_5m - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn provider_health_rejects_negative_error_rate() {
+        let json = sample_health_json(-0.1);
+        let result: Result<ProviderHealth, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("error_rate_5m"));
+    }
+
+    #[test]
+    fn provider_health_rejects_error_rate_above_one() {
+        let json = sample_health_json(1.5);
+        let result: Result<ProviderHealth, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("error_rate_5m"));
     }
 }

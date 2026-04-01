@@ -71,8 +71,20 @@ pub struct PolicyEvaluationRecord {
 // Provider Response Record
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed length for `ProviderResponseRecord.transaction_id`.
+/// Provider transaction IDs are external input persisted to the immutable
+/// audit ledger — must be bounded to prevent permanent bloat.
+pub const MAX_PROVIDER_TRANSACTION_ID_LEN: usize = 500;
+
+/// Maximum allowed length for `ProviderResponseRecord.status`.
+pub const MAX_PROVIDER_STATUS_LEN: usize = 255;
+
 /// Captures the result of dispatching a payment to a provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` enforces length bounds on string fields sourced from
+/// external provider APIs. These are written to the append-only audit ledger,
+/// so unbounded values would persist forever.
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderResponseRecord {
     pub provider: ProviderId,
     pub transaction_id: String,
@@ -82,6 +94,49 @@ pub struct ProviderResponseRecord {
     pub currency: Currency,
     /// How long the provider call took, in milliseconds.
     pub latency_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for ProviderResponseRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            provider: ProviderId,
+            transaction_id: String,
+            status: String,
+            amount_settled: Decimal,
+            currency: Currency,
+            latency_ms: u64,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if raw.transaction_id.len() > MAX_PROVIDER_TRANSACTION_ID_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "transaction_id exceeds maximum length of {} characters (got {})",
+                MAX_PROVIDER_TRANSACTION_ID_LEN,
+                raw.transaction_id.len()
+            )));
+        }
+        if raw.status.len() > MAX_PROVIDER_STATUS_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "status exceeds maximum length of {} characters (got {})",
+                MAX_PROVIDER_STATUS_LEN,
+                raw.status.len()
+            )));
+        }
+
+        Ok(ProviderResponseRecord {
+            provider: raw.provider,
+            transaction_id: raw.transaction_id,
+            status: raw.status,
+            amount_settled: raw.amount_settled,
+            currency: raw.currency,
+            latency_ms: raw.latency_ms,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,5 +222,73 @@ mod tests {
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["final_decision"], "APPROVE");
         assert_eq!(json["decision_latency_ms"], 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.14: ProviderResponseRecord bounds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_response_record_within_limits() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "ch_123abc",
+            "status": "succeeded",
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let record: ProviderResponseRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.transaction_id, "ch_123abc");
+        assert_eq!(record.status, "succeeded");
+    }
+
+    #[test]
+    fn provider_response_record_rejects_oversized_transaction_id() {
+        let long_id = "x".repeat(MAX_PROVIDER_TRANSACTION_ID_LEN + 1);
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": long_id,
+            "status": "succeeded",
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("transaction_id"));
+    }
+
+    #[test]
+    fn provider_response_record_rejects_oversized_status() {
+        let long_status = "x".repeat(MAX_PROVIDER_STATUS_LEN + 1);
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "ch_123",
+            "status": long_status,
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("status"));
+    }
+
+    #[test]
+    fn provider_response_record_at_exact_limit() {
+        let exact_id = "t".repeat(MAX_PROVIDER_TRANSACTION_ID_LEN);
+        let exact_status = "s".repeat(MAX_PROVIDER_STATUS_LEN);
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": exact_id,
+            "status": exact_status,
+            "amount_settled": "100.00",
+            "currency": "U_S_D",
+            "latency_ms": 100
+        });
+        let record: ProviderResponseRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.transaction_id.len(), MAX_PROVIDER_TRANSACTION_ID_LEN);
+        assert_eq!(record.status.len(), MAX_PROVIDER_STATUS_LEN);
     }
 }

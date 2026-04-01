@@ -121,8 +121,8 @@ fn compare_values(
     expected: &serde_json::Value,
 ) -> bool {
     match op {
-        ComparisonOp::Equals => field == expected,
-        ComparisonOp::NotEquals => field != expected,
+        ComparisonOp::Equals => case_insensitive_equals(field, expected),
+        ComparisonOp::NotEquals => !case_insensitive_equals(field, expected),
         ComparisonOp::GreaterThan => compare_decimal(field, expected, |a, b| a > b),
         ComparisonOp::LessThan => compare_decimal(field, expected, |a, b| a < b),
         ComparisonOp::GreaterThanOrEqual => compare_decimal(field, expected, |a, b| a >= b),
@@ -144,13 +144,27 @@ fn compare_values(
             }
         },
         ComparisonOp::Contains => match (field.as_str(), expected.as_str()) {
-            (Some(haystack), Some(needle)) => haystack.contains(needle),
+            (Some(haystack), Some(needle)) => haystack
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
             _ => false,
         },
         ComparisonOp::Matches => match (field.as_str(), expected.as_str()) {
             (Some(text), Some(pattern)) => regex_matches(text, pattern),
             _ => false,
         },
+    }
+}
+
+/// Case-insensitive equality check for `Equals`/`NotEquals` operators.
+///
+/// When both values are strings, comparison is case-insensitive (matching the
+/// dedicated rule evaluators like `MerchantCheckEvaluator`). For non-string
+/// values, falls back to exact JSON equality.
+fn case_insensitive_equals(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a.as_str(), b.as_str()) {
+        (Some(sa), Some(sb)) => sa.eq_ignore_ascii_case(sb),
+        _ => a == b,
     }
 }
 

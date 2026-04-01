@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.6.14](#0614--2026-04-01) — Production sweep: ProviderResponseRecord string bounds, set_provider transaction_id limit, Equals/NotEquals/Contains case-insensitive matching, ProviderHealth error_rate validation
 - [0.6.13](#0613--2026-04-01) — Cross-crate audit: AuditEntry payment_id field, TimedOut terminal status, In/NotIn case-insensitive matching, webhook_endpoints updated_at, down-migration comment
 - [0.6.12](#0612--2026-04-01) — Production readiness review: duplicate_detection case-insensitive matching, time_window start==end guard, set_provider terminal status lockdown, IdempotencyKey empty-string validation
 - [0.6.11](#0611--2026-04-01) — Cross-crate consistency review: velocity_limit currency-aware filtering, first_time_merchant case-insensitive matching, amount_cap tracing context
@@ -20,6 +21,37 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.6.14 — 2026-04-01
+
+**Phase 6.14: Production Sweep — Provider Response Bounds, Case-Insensitive Condition Operators & Health Metric Validation**
+
+Cross-crate production readiness review targeting unbounded external-origin strings persisted to the immutable audit ledger, inconsistent case-sensitivity semantics across condition evaluator operators, and unvalidated routing health metrics. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`ProviderResponseRecord.transaction_id` and `.status` unbounded — audit log bloat from provider responses (HIGH)** — These fields are populated from external provider API responses and written to the append-only audit ledger with no length limits. A buggy or malicious provider could return a multi-MB transaction ID or status string, bloating the audit trail permanently. Added custom `Deserialize` with `MAX_PROVIDER_TRANSACTION_ID_LEN` (500 chars) and `MAX_PROVIDER_STATUS_LEN` (255 chars), matching the established bounded-string pattern
+- **`Payment::set_provider()` accepts unbounded `transaction_id` — audit log bloat via method call (HIGH)** — The `set_provider()` method is the programmatic write path for provider transaction IDs onto Payment entities. Unlike deserialization paths, it had no length validation. Added `MAX_PROVIDER_TRANSACTION_ID_LEN` check before accepting the value, returning `DomainError::PolicyViolation` on overflow
+- **Condition evaluator `Equals`/`NotEquals`/`Contains` are case-sensitive while `In`/`NotIn` are case-insensitive — policy bypass vector (HIGH)** — In v0.6.13, `In`/`NotIn` operators were made case-insensitive via `case_insensitive_contains()`. However, `Equals`, `NotEquals`, and `Contains` still used exact JSON equality / exact `String::contains()`. An operator writing `recipient.identifier Equals "stripe_merch_123"` would fail to match `"STRIPE_MERCH_123"`, but the same check via `In ["stripe_merch_123"]` would succeed. Added `case_insensitive_equals()` helper for `Equals`/`NotEquals` and `to_ascii_lowercase()` for `Contains`, making all string comparison operators consistently case-insensitive
+- **`ProviderHealth.error_rate_5m` accepts NaN, Infinity, negative, and >1.0 values — routing engine score corruption (MEDIUM)** — The routing engine uses `error_rate_5m` in provider scoring calculations. `f64::NAN` poisons all comparisons (NaN != NaN, NaN > x is false, etc.), producing undefined ranking behavior. Negative or >1.0 values produce nonsensical scores. Added custom `Deserialize` validating `is_finite()` and range `[0.0, 1.0]`
+
+### Added
+
+- `MAX_PROVIDER_TRANSACTION_ID_LEN` constant (500) and `MAX_PROVIDER_STATUS_LEN` constant (255) in `cream-models`
+- Custom `Deserialize` for `ProviderResponseRecord` with per-field length bounds
+- Custom `Deserialize` for `ProviderHealth` with `error_rate_5m` range validation
+- `case_insensitive_equals()` helper in condition evaluator
+- 18 new tests: ProviderResponseRecord bounds (4), set_provider transaction_id bounds (2), Equals/NotEquals case-insensitive (5), Contains case-insensitive (2), ProviderHealth validation (5)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 214/214 passing (80 models + 14 audit + 103 policy + 17 providers) |
 
 ---
 
