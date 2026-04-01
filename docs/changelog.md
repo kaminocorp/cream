@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.6.13](#0613--2026-04-01) — Cross-crate audit: AuditEntry payment_id field, TimedOut terminal status, In/NotIn case-insensitive matching, webhook_endpoints updated_at, down-migration comment
 - [0.6.12](#0612--2026-04-01) — Production readiness review: duplicate_detection case-insensitive matching, time_window start==end guard, set_provider terminal status lockdown, IdempotencyKey empty-string validation
 - [0.6.11](#0611--2026-04-01) — Cross-crate consistency review: velocity_limit currency-aware filtering, first_time_merchant case-insensitive matching, amount_cap tracing context
 - [0.6.10](#0610--2026-04-01) — Input boundary enforcement: positive-amount validation, string length bounds on all audit-persisted fields, escalation infinite-loop prevention, condition tree depth limit, ProviderId encapsulation, AuditQuery private fields, DB constraints for amount/currency/rail/api_key, boundary tests
@@ -19,6 +20,37 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.6.13 — 2026-04-01
+
+**Phase 6.13: Cross-Crate Production Audit — Audit Ledger Data Gap, Terminal State Semantics, Condition Evaluator Case-Sensitivity & Schema Consistency**
+
+Full-crate review of all completed code (models, policy, providers, audit, api scaffold) and database migrations targeting data model/query mismatches, state machine semantic gaps, case-sensitivity bypass in the generic condition evaluator, and schema inconsistency across mutable tables. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`AuditEntry` missing `payment_id` field — audit reader drops payment linkage (HIGH)** — The `PgAuditWriter` INSERT included `payment_id` as the 5th column, but the `AuditEntry` Rust struct had no `payment_id` field and all three `PgAuditReader` SELECT queries omitted it from the projection. The data existed in the database but was invisible to Rust code — callers of `get_by_payment()` received entries but could not verify which payment they belonged to. Added `payment_id: Option<PaymentId>` to `AuditEntry`, updated all SELECT queries to include `payment_id` in the projection, updated `AuditRow` intermediate struct and all row mappings across `query()`, `get_by_id()`, and `get_by_payment()`
+- **`PaymentStatus::TimedOut` excluded from `is_terminal()` — misleading terminal state check (HIGH)** — `TimedOut` can only transition to `Blocked` (another terminal state). `is_terminal()` returned `false` for `TimedOut`, which is semantically incorrect — no forward progress (settlement) is possible from `TimedOut`. Downstream code checking `is_terminal()` to decide "can this payment still settle?" would incorrectly treat `TimedOut` as active. Added `PaymentStatus::TimedOut` to `is_terminal()`. Note: `counts_toward_spend()` already correctly excluded `TimedOut`, so no policy engine impact
+- **`In`/`NotIn` operators in condition evaluator are case-sensitive for strings — bypass vector (MEDIUM)** — The generic condition tree walker's `In` and `NotIn` used `arr.contains(field)` (JSON value equality, case-sensitive for strings). Operators writing custom `PolicyCondition` trees with string-valued `In`/`NotIn` checks (e.g., merchant identifiers, category names) could be bypassed by submitting values with different casing. Dedicated rule evaluators (MerchantCheck, FirstTimeMerchant, DuplicateDetection) already handled case-insensitivity; the generic evaluator was the gap. Added `case_insensitive_contains()` helper that uses `eq_ignore_ascii_case` for string values and falls back to exact JSON equality for non-strings
+- **`webhook_endpoints` missing `updated_at` column and trigger — schema inconsistency (MEDIUM)** — Every other mutable table (agent_profiles, agents, policy_rules, payments, virtual_cards) has an `updated_at TIMESTAMPTZ` column with the `set_updated_at()` trigger. `webhook_endpoints` was the only mutable table missing both, meaning webhook endpoint modifications had no timestamp trail. Added migration `20260401200007` with `updated_at` column and trigger
+- **Down-migration `20260331200001` `set_updated_at()` drop lacked explanation (LOW)** — Added clarifying comment documenting why the function drop is safe in this position (down migrations execute in reverse chronological order, so this migration runs last after all dependent tables are already dropped)
+
+### Added
+
+- `AuditEntry.payment_id: Option<PaymentId>` field with full reader/writer support
+- `case_insensitive_contains()` helper in condition evaluator
+- Migration `20260401200007_add_webhook_endpoints_updated_at` (column + trigger)
+- 6 new tests: `timed_out_is_terminal` (1), `all_terminal_states_are_terminal` (1), condition evaluator In/NotIn case-insensitive matching (4)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 196/196 passing (69 models + 14 audit + 96 policy + 17 providers) |
 
 ---
 

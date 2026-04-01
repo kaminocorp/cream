@@ -1888,3 +1888,56 @@ fn time_window_start_equals_end_skips_rule() {
     let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
     assert_eq!(result, RuleResult::Pass); // skipped, not blocking all hours
 }
+
+// ---------------------------------------------------------------------------
+// Condition evaluator In/NotIn case-insensitivity tests (v0.6.13)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn condition_in_case_insensitive_string_match() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // The test request's recipient.identifier is "stripe_merch_123".
+    // Check that "In" matches even when the array element uses different casing.
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::In,
+        value: serde_json::json!(["STRIPE_MERCH_123", "other_merchant"]),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_in_exact_case_still_matches() {
+    let ctx = test_context(Decimal::new(100, 0));
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::In,
+        value: serde_json::json!(["stripe_merch_123"]),
+    });
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_not_in_case_insensitive_match() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // The merchant IS in the array (case-insensitive), so NotIn should return false.
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "recipient.identifier".to_string(),
+        op: ComparisonOp::NotIn,
+        value: serde_json::json!(["Stripe_Merch_123", "other_merchant"]),
+    });
+    assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
+}
+
+#[test]
+fn condition_in_non_string_values_use_exact_match() {
+    let ctx = test_context(Decimal::new(100, 0));
+    // Numeric In check — case-insensitivity only applies to strings
+    let condition = PolicyCondition::FieldCheck(FieldCheck {
+        field: "amount".to_string(),
+        op: ComparisonOp::In,
+        value: serde_json::json!(["100"]),
+    });
+    // amount resolves to a string "100" (Decimal serialization), should match
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+}

@@ -123,6 +123,7 @@ mod tests {
             timestamp: Utc::now(),
             agent_id: AgentId::new(),
             agent_profile_id: AgentProfileId::new(),
+            payment_id: None,
             request: serde_json::json!({"amount": "50.00", "currency": "usd"}),
             justification: serde_json::json!({
                 "summary": "Purchasing API credits for testing purposes",

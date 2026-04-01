@@ -228,6 +228,7 @@ struct AuditRow {
     timestamp: DateTime<Utc>,
     agent_id: uuid::Uuid,
     agent_profile_id: uuid::Uuid,
+    payment_id: Option<uuid::Uuid>,
     request: serde_json::Value,
     justification: serde_json::Value,
     policy_evaluation: serde_json::Value,
@@ -264,6 +265,7 @@ impl AuditRow {
             agent_profile_id: cream_models::prelude::AgentProfileId::from_uuid(
                 self.agent_profile_id,
             ),
+            payment_id: self.payment_id.map(PaymentId::from_uuid),
             request: self.request,
             justification: self.justification,
             policy_evaluation,
@@ -284,7 +286,7 @@ impl AuditReader for PgAuditReader {
         // value, preventing the fragile two-phase pattern where clause order
         // and bind order could silently diverge.
         let mut qb = QueryBuilder::new(
-            "SELECT id, timestamp, agent_id, agent_profile_id, \
+            "SELECT id, timestamp, agent_id, agent_profile_id, payment_id, \
              request, justification, policy_evaluation, \
              routing_decision, provider_response, final_status, human_review, \
              on_chain_tx_hash \
@@ -333,6 +335,7 @@ impl AuditReader for PgAuditReader {
                 DateTime<Utc>,
                 uuid::Uuid,
                 uuid::Uuid,
+                Option<uuid::Uuid>,
                 serde_json::Value,
                 serde_json::Value,
                 serde_json::Value,
@@ -363,14 +366,15 @@ impl AuditReader for PgAuditReader {
                     timestamp: row.1,
                     agent_id: row.2,
                     agent_profile_id: row.3,
-                    request: row.4,
-                    justification: row.5,
-                    policy_evaluation: row.6,
-                    routing_decision: row.7,
-                    provider_response: row.8,
-                    final_status: row.9,
-                    human_review: row.10,
-                    on_chain_tx_hash: row.11,
+                    payment_id: row.4,
+                    request: row.5,
+                    justification: row.6,
+                    policy_evaluation: row.7,
+                    routing_decision: row.8,
+                    provider_response: row.9,
+                    final_status: row.10,
+                    human_review: row.11,
+                    on_chain_tx_hash: row.12,
                 };
                 audit_row.into_entry()
             })
@@ -386,6 +390,7 @@ impl AuditReader for PgAuditReader {
                 DateTime<Utc>,
                 uuid::Uuid,
                 uuid::Uuid,
+                Option<uuid::Uuid>,
                 serde_json::Value,
                 serde_json::Value,
                 serde_json::Value,
@@ -396,7 +401,7 @@ impl AuditReader for PgAuditReader {
                 Option<String>,
             ),
         >(
-            "SELECT id, timestamp, agent_id, agent_profile_id, \
+            "SELECT id, timestamp, agent_id, agent_profile_id, payment_id, \
              request, justification, policy_evaluation, \
              routing_decision, provider_response, final_status, human_review, \
              on_chain_tx_hash \
@@ -413,14 +418,15 @@ impl AuditReader for PgAuditReader {
                     timestamp: row.1,
                     agent_id: row.2,
                     agent_profile_id: row.3,
-                    request: row.4,
-                    justification: row.5,
-                    policy_evaluation: row.6,
-                    routing_decision: row.7,
-                    provider_response: row.8,
-                    final_status: row.9,
-                    human_review: row.10,
-                    on_chain_tx_hash: row.11,
+                    payment_id: row.4,
+                    request: row.5,
+                    justification: row.6,
+                    policy_evaluation: row.7,
+                    routing_decision: row.8,
+                    provider_response: row.9,
+                    final_status: row.10,
+                    human_review: row.11,
+                    on_chain_tx_hash: row.12,
                 };
                 Ok(Some(audit_row.into_entry()?))
             }
@@ -437,6 +443,7 @@ impl AuditReader for PgAuditReader {
                 DateTime<Utc>,
                 uuid::Uuid,
                 uuid::Uuid,
+                Option<uuid::Uuid>,
                 serde_json::Value,
                 serde_json::Value,
                 serde_json::Value,
@@ -447,7 +454,7 @@ impl AuditReader for PgAuditReader {
                 Option<String>,
             ),
         >(
-            "SELECT id, timestamp, agent_id, agent_profile_id, \
+            "SELECT id, timestamp, agent_id, agent_profile_id, payment_id, \
              request, justification, policy_evaluation, \
              routing_decision, provider_response, final_status, human_review, \
              on_chain_tx_hash \
@@ -464,14 +471,15 @@ impl AuditReader for PgAuditReader {
                     timestamp: row.1,
                     agent_id: row.2,
                     agent_profile_id: row.3,
-                    request: row.4,
-                    justification: row.5,
-                    policy_evaluation: row.6,
-                    routing_decision: row.7,
-                    provider_response: row.8,
-                    final_status: row.9,
-                    human_review: row.10,
-                    on_chain_tx_hash: row.11,
+                    payment_id: row.4,
+                    request: row.5,
+                    justification: row.6,
+                    policy_evaluation: row.7,
+                    routing_decision: row.8,
+                    provider_response: row.9,
+                    final_status: row.10,
+                    human_review: row.11,
+                    on_chain_tx_hash: row.12,
                 };
                 audit_row.into_entry()
             })
@@ -528,6 +536,7 @@ mod tests {
             timestamp: Utc::now(),
             agent_id,
             agent_profile_id: profile_id,
+            payment_id: None,
             request: serde_json::json!({"amount": "100.00", "currency": "sgd"}),
             justification: serde_json::json!({"summary": "test purchase", "category": "api_credits"}),
             policy_evaluation: serde_json::to_value(&policy_eval).unwrap(),
@@ -581,11 +590,13 @@ mod tests {
             decided_at: Utc::now(),
         };
 
+        let payment_uuid = uuid::Uuid::now_v7();
         let row = AuditRow {
             id: uuid::Uuid::now_v7(),
             timestamp: Utc::now(),
             agent_id: uuid::Uuid::now_v7(),
             agent_profile_id: uuid::Uuid::now_v7(),
+            payment_id: Some(payment_uuid),
             request: serde_json::json!({"amount": "149.99"}),
             justification: serde_json::json!({"summary": "booking flight"}),
             policy_evaluation: serde_json::to_value(&policy_eval).unwrap(),
@@ -602,6 +613,10 @@ mod tests {
         assert!(entry.human_review.is_some());
         assert_eq!(entry.on_chain_tx_hash.as_deref(), Some("0xabc123"));
         assert_eq!(entry.final_status, PaymentStatus::Settled);
+        assert_eq!(
+            entry.payment_id.unwrap(),
+            PaymentId::from_uuid(payment_uuid)
+        );
     }
 
     #[test]
@@ -618,6 +633,7 @@ mod tests {
             timestamp: Utc::now(),
             agent_id: uuid::Uuid::now_v7(),
             agent_profile_id: uuid::Uuid::now_v7(),
+            payment_id: None,
             request: serde_json::json!({}),
             justification: serde_json::json!({}),
             policy_evaluation: serde_json::to_value(&policy_eval).unwrap(),

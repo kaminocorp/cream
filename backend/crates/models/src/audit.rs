@@ -23,6 +23,10 @@ pub struct AuditEntry {
     pub timestamp: DateTime<Utc>,
     pub agent_id: AgentId,
     pub agent_profile_id: AgentProfileId,
+    /// The payment this audit entry is linked to (written to the DB but not part
+    /// of the entry's own identity — populated by the reader from the join column).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_id: Option<crate::ids::PaymentId>,
     /// The full normalized payment request, stored as JSON for schema flexibility.
     pub request: serde_json::Value,
     /// The verbatim agent-provided justification, stored as JSON.

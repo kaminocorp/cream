@@ -128,14 +128,14 @@ fn compare_values(
         ComparisonOp::GreaterThanOrEqual => compare_decimal(field, expected, |a, b| a >= b),
         ComparisonOp::LessThanOrEqual => compare_decimal(field, expected, |a, b| a <= b),
         ComparisonOp::In => match expected {
-            serde_json::Value::Array(arr) => arr.contains(field),
+            serde_json::Value::Array(arr) => case_insensitive_contains(arr, field),
             _ => {
                 tracing::warn!("In condition has non-array value, returning false");
                 false
             }
         },
         ComparisonOp::NotIn => match expected {
-            serde_json::Value::Array(arr) => !arr.contains(field),
+            serde_json::Value::Array(arr) => !case_insensitive_contains(arr, field),
             _ => {
                 tracing::warn!(
                     "NotIn condition has non-array value, failing safe (returning false)"
@@ -151,6 +151,22 @@ fn compare_values(
             (Some(text), Some(pattern)) => regex_matches(text, pattern),
             _ => false,
         },
+    }
+}
+
+/// Case-insensitive membership check for `In`/`NotIn` operators.
+///
+/// When both the field and array elements are strings, comparison is
+/// case-insensitive (matching the dedicated rule evaluators like
+/// `MerchantCheckEvaluator`). For non-string values, falls back to exact
+/// JSON equality.
+fn case_insensitive_contains(arr: &[serde_json::Value], field: &serde_json::Value) -> bool {
+    match field.as_str() {
+        Some(field_str) => arr.iter().any(|v| match v.as_str() {
+            Some(s) => s.eq_ignore_ascii_case(field_str),
+            None => v == field,
+        }),
+        None => arr.contains(field),
     }
 }
 

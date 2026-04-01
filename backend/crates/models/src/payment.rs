@@ -80,6 +80,7 @@ impl PaymentStatus {
                 | PaymentStatus::Failed
                 | PaymentStatus::Blocked
                 | PaymentStatus::Rejected
+                | PaymentStatus::TimedOut
         )
     }
 
@@ -614,6 +615,29 @@ mod tests {
         assert!(!PaymentStatus::Blocked.counts_toward_spend());
         assert!(!PaymentStatus::Rejected.counts_toward_spend());
         assert!(!PaymentStatus::TimedOut.counts_toward_spend());
+    }
+
+    #[test]
+    fn timed_out_is_terminal() {
+        // TimedOut can only transition to Blocked — it is effectively terminal
+        // and should be reported as such by is_terminal().
+        assert!(PaymentStatus::TimedOut.is_terminal());
+    }
+
+    #[test]
+    fn all_terminal_states_are_terminal() {
+        assert!(PaymentStatus::Settled.is_terminal());
+        assert!(PaymentStatus::Failed.is_terminal());
+        assert!(PaymentStatus::Blocked.is_terminal());
+        assert!(PaymentStatus::Rejected.is_terminal());
+        assert!(PaymentStatus::TimedOut.is_terminal());
+
+        // Non-terminal states
+        assert!(!PaymentStatus::Pending.is_terminal());
+        assert!(!PaymentStatus::Validating.is_terminal());
+        assert!(!PaymentStatus::PendingApproval.is_terminal());
+        assert!(!PaymentStatus::Approved.is_terminal());
+        assert!(!PaymentStatus::Submitted.is_terminal());
     }
 
     #[test]
