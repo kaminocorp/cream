@@ -53,6 +53,11 @@ impl<'de> Deserialize<'de> for Justification {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        if raw.summary.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "justification.summary must not be empty or whitespace-only",
+            ));
+        }
         if raw.summary.len() > MAX_JUSTIFICATION_SUMMARY_LEN {
             return Err(serde::de::Error::custom(format!(
                 "justification.summary exceeds maximum length of {} characters (got {})",
@@ -209,6 +214,32 @@ mod tests {
         let json = serde_json::to_string(&cat).unwrap();
         let parsed: PaymentCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, PaymentCategory::Other(exact));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.15: empty/whitespace summary rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn justification_empty_summary_rejected() {
+        let json = serde_json::json!({
+            "summary": "",
+            "category": "api_credits"
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn justification_whitespace_only_summary_rejected() {
+        let json = serde_json::json!({
+            "summary": "   \t\n  ",
+            "category": "api_credits"
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
     }
 
     // -----------------------------------------------------------------------

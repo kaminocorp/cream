@@ -56,6 +56,11 @@ impl<'de> Deserialize<'de> for Recipient {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        if raw.identifier.is_empty() {
+            return Err(serde::de::Error::custom(
+                "recipient.identifier must not be empty",
+            ));
+        }
         if raw.identifier.len() > MAX_RECIPIENT_IDENTIFIER_LEN {
             return Err(serde::de::Error::custom(format!(
                 "recipient.identifier exceeds maximum length of {} characters (got {})",
@@ -113,6 +118,25 @@ mod tests {
         let parsed: Recipient = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.recipient_type, RecipientType::Merchant);
         assert_eq!(parsed.country.unwrap().as_str(), "SG");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.10: recipient string bounds
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Phase 6.15: empty identifier rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recipient_empty_identifier_rejected() {
+        let json = serde_json::json!({
+            "type": "merchant",
+            "identifier": "",
+        });
+        let result: Result<Recipient, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("identifier"));
     }
 
     // -----------------------------------------------------------------------

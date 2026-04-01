@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.6.15](#0615--2026-04-01) — Production readiness review: HumanReviewRecord rejects Escalate decision, Recipient empty-identifier guard, Justification empty/whitespace-only summary guard
 - [0.6.14](#0614--2026-04-01) — Production sweep: ProviderResponseRecord string bounds, set_provider transaction_id limit, Equals/NotEquals/Contains case-insensitive matching, ProviderHealth error_rate validation
 - [0.6.13](#0613--2026-04-01) — Cross-crate audit: AuditEntry payment_id field, TimedOut terminal status, In/NotIn case-insensitive matching, webhook_endpoints updated_at, down-migration comment
 - [0.6.12](#0612--2026-04-01) — Production readiness review: duplicate_detection case-insensitive matching, time_window start==end guard, set_provider terminal status lockdown, IdempotencyKey empty-string validation
@@ -21,6 +22,32 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.6.15 — 2026-04-01
+
+**Phase 6.15: Production Readiness Review — Escalation Loop via Human Review, Empty Recipient Identifier & Hollow Justification**
+
+Full-crate production readiness audit (models, policy, providers, audit, router, api, migrations) targeting three remaining defense-in-depth gaps in deserialization validation: a human review decision that could re-escalate an already-escalated payment, an empty recipient identifier that would route a payment to nobody, and an empty/whitespace-only justification summary that would permanently store a meaningless entry in the append-only audit ledger. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`HumanReviewRecord.decision` accepts `Escalate` — escalation loop vector (MEDIUM)** — `EscalationConfig::on_timeout` already rejects `Escalate` (v0.6.10) to prevent infinite timeout→escalate→timeout cycles. However, `HumanReviewRecord.decision` had no equivalent guard — a human reviewer could submit `decision: ESCALATE`, re-queuing an already-escalated payment into another escalation cycle. Added validation in custom `Deserialize` that rejects `PolicyAction::Escalate` with a clear error message, consistent with the `EscalationConfig` invariant
+- **`Recipient.identifier` accepts empty string — payment to nobody (MEDIUM)** — The `Recipient` custom `Deserialize` validates maximum length (500 chars, added in v0.6.10) but allowed `""` through. An empty identifier is semantically invalid — no provider can route a payment to an empty merchant ID, wallet address, or bank account. Added empty-string check before the max-length check
+- **`Justification.summary` accepts empty/whitespace-only string — hollow justification persisted to audit ledger (MEDIUM)** — The `Justification` custom `Deserialize` validates maximum length (2000 chars, added in v0.6.10) but allowed `""` and `"   "` through. The product's core differentiator is structured agent justification — an empty summary defeats the purpose and would permanently store a meaningless entry in the append-only audit ledger. The policy engine's `JustificationQuality` rule catches this downstream, but defense-in-depth at the model boundary prevents invalid data from ever entering the domain. Added `trim().is_empty()` check before the max-length check
+
+### Added
+
+- 6 new tests: HumanReviewRecord rejects Escalate (1), HumanReviewRecord accepts Approve (1), HumanReviewRecord accepts Block (1), Recipient empty identifier rejection (1), Justification empty summary rejection (1), Justification whitespace-only summary rejection (1)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 220/220 passing (86 models + 14 audit + 103 policy + 17 providers) |
 
 ---
 

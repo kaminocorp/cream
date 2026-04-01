@@ -181,6 +181,17 @@ impl<'de> Deserialize<'de> for HumanReviewRecord {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        // A human review decision must be Approve or Block — never Escalate.
+        // Escalating an already-escalated payment would create an infinite
+        // escalation loop, matching the invariant enforced on
+        // EscalationConfig::on_timeout (see policy.rs).
+        if raw.decision == PolicyAction::Escalate {
+            return Err(serde::de::Error::custom(
+                "human review decision must not be ESCALATE — \
+                 re-escalating an already-escalated payment would create an infinite loop",
+            ));
+        }
+
         if raw.reviewer_id.len() > MAX_REVIEWER_ID_LEN {
             return Err(serde::de::Error::custom(format!(
                 "reviewer_id exceeds maximum length of {} characters (got {})",
@@ -222,6 +233,52 @@ mod tests {
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["final_decision"], "APPROVE");
         assert_eq!(json["decision_latency_ms"], 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6.14: ProviderResponseRecord bounds
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Phase 6.15: HumanReviewRecord rejects Escalate decision
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn human_review_rejects_escalate_decision() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "ESCALATE",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let result: Result<HumanReviewRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ESCALATE"));
+        assert!(err.contains("infinite loop"));
+    }
+
+    #[test]
+    fn human_review_accepts_approve_decision() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "APPROVE",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let record: HumanReviewRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.decision, PolicyAction::Approve);
+    }
+
+    #[test]
+    fn human_review_accepts_block_decision() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "BLOCK",
+            "reason": "Suspicious transaction",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let record: HumanReviewRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.decision, PolicyAction::Block);
+        assert_eq!(record.reason.unwrap(), "Suspicious transaction");
     }
 
     // -----------------------------------------------------------------------
