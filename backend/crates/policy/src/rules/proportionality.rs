@@ -9,7 +9,8 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 /// understanding of the `expected_value` field (e.g., "is $5,000 proportional
 /// to 'Complete onboarding batch'?"). This will be implemented post-scaffold
 /// with an LLM-based background check, similar to justification quality.
-pub struct ProportionalityEvaluator;
+#[allow(dead_code)] // Stub retained for future LLM-based implementation
+pub(crate) struct ProportionalityEvaluator;
 
 impl RuleEvaluator for ProportionalityEvaluator {
     fn evaluate(&self, rule: &PolicyRule, _ctx: &EvaluationContext) -> RuleResult {

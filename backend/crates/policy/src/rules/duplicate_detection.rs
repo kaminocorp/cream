@@ -40,6 +40,7 @@ impl RuleEvaluator for DuplicateDetectionEvaluator {
         let is_duplicate = ctx.recent_payments.iter().any(|p| {
             p.created_at >= cutoff
                 && p.amount == ctx.request.amount
+                && p.currency == ctx.request.currency
                 && p.recipient_identifier == ctx.request.recipient.identifier
         });
 

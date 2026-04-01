@@ -1,6 +1,16 @@
+use std::sync::{LazyLock, Mutex};
+
 use cream_models::prelude::{ComparisonOp, PolicyAction, PolicyCondition, PolicyRule};
 
 use crate::context::EvaluationContext;
+
+/// Cache for compiled regex patterns. Avoids re-compiling the same pattern on
+/// every `Matches` evaluation. Bounded to prevent unbounded memory growth from
+/// operator-defined patterns — evicts all entries when the limit is reached.
+static REGEX_CACHE: LazyLock<Mutex<std::collections::HashMap<String, regex::Regex>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+const REGEX_CACHE_MAX: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Rule result
@@ -135,8 +145,33 @@ fn as_f64(v: &serde_json::Value) -> Option<f64> {
 }
 
 fn regex_matches(text: &str, pattern: &str) -> bool {
+    let cache = match REGEX_CACHE.lock() {
+        Ok(c) => c,
+        Err(_) => {
+            // Poisoned mutex — fall back to uncached compilation
+            return regex::Regex::new(pattern)
+                .map(|re| re.is_match(text))
+                .unwrap_or(false);
+        }
+    };
+
+    if let Some(re) = cache.get(pattern) {
+        return re.is_match(text);
+    }
+    // Drop the read lock before compiling
+    drop(cache);
+
     match regex::Regex::new(pattern) {
-        Ok(re) => re.is_match(text),
+        Ok(re) => {
+            let result = re.is_match(text);
+            if let Ok(mut cache) = REGEX_CACHE.lock() {
+                if cache.len() >= REGEX_CACHE_MAX {
+                    cache.clear();
+                }
+                cache.insert(pattern.to_string(), re);
+            }
+            result
+        }
         Err(e) => {
             tracing::warn!(pattern, error = %e, "invalid regex pattern in Matches condition, returning false");
             false

@@ -26,12 +26,15 @@ fn has_merchant_match(condition: &PolicyCondition, merchant_id: &str) -> bool {
     match condition {
         PolicyCondition::FieldCheck(check) if check.field == "recipient.identifier" => {
             use cream_models::prelude::ComparisonOp;
-            let merchant_val = serde_json::Value::String(merchant_id.to_string());
+            let merchant_lower = merchant_id.to_ascii_lowercase();
             match check.op {
                 // "In" means merchant IS in the blocked list → trigger
                 ComparisonOp::In => {
                     if let serde_json::Value::Array(arr) = &check.value {
-                        arr.contains(&merchant_val)
+                        arr.iter().any(|v| match v.as_str() {
+                            Some(s) => s.eq_ignore_ascii_case(&merchant_lower),
+                            None => false,
+                        })
                     } else {
                         false
                     }
@@ -39,12 +42,18 @@ fn has_merchant_match(condition: &PolicyCondition, merchant_id: &str) -> bool {
                 // "NotIn" means merchant is NOT in the allowed list → trigger
                 ComparisonOp::NotIn => {
                     if let serde_json::Value::Array(arr) = &check.value {
-                        !arr.contains(&merchant_val)
+                        !arr.iter().any(|v| match v.as_str() {
+                            Some(s) => s.eq_ignore_ascii_case(&merchant_lower),
+                            None => false,
+                        })
                     } else {
                         false
                     }
                 }
-                ComparisonOp::Equals => check.value == merchant_val,
+                ComparisonOp::Equals => match check.value.as_str() {
+                    Some(s) => s.eq_ignore_ascii_case(merchant_id),
+                    None => false,
+                },
                 _ => false,
             }
         }

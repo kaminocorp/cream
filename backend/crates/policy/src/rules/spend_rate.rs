@@ -59,7 +59,11 @@ impl RuleEvaluator for SpendRateEvaluator {
 fn sum_payments_since(ctx: &EvaluationContext, cutoff: chrono::DateTime<chrono::Utc>) -> Decimal {
     ctx.recent_payments
         .iter()
-        .filter(|p| p.created_at >= cutoff && p.status.counts_toward_spend())
+        .filter(|p| {
+            p.created_at >= cutoff
+                && p.status.counts_toward_spend()
+                && p.currency == ctx.request.currency
+        })
         .map(|p| p.amount)
         .sum()
 }

@@ -1293,3 +1293,155 @@ fn geographic_evaluator_case_insensitive() {
     let result = GeographicEvaluator.evaluate(&rule, &ctx);
     assert_eq!(result, RuleResult::Pass);
 }
+
+// ---------------------------------------------------------------------------
+// Fix #1: Currency filtering in spend_rate and duplicate_detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn spend_rate_ignores_different_currency_payments() {
+    let mut ctx = test_context(Decimal::new(500, 0)); // requesting $500 SGD
+                                                      // Add $1600 in USD payments — different currency, should NOT count toward SGD limit
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(1600, 0),
+        currency: Currency::USD, // Different from request currency (SGD)
+        recipient_identifier: "merchant_a".to_string(),
+        status: PaymentStatus::Settled,
+        rail: RailPreference::Card,
+        created_at: Utc::now() - Duration::hours(2),
+    });
+    let rule = make_rule("spend_rate", serde_json::json!(true), PolicyAction::Block);
+    let result = SpendRateEvaluator.evaluate(&rule, &ctx);
+    // Only $500 SGD current (USD doesn't count) < $2000 daily limit
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn spend_rate_counts_same_currency_payments() {
+    let mut ctx = test_context(Decimal::new(500, 0)); // requesting $500 SGD
+                                                      // Add $1600 in SGD payments — same currency, should count
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(1600, 0),
+        currency: Currency::SGD, // Same as request currency
+        recipient_identifier: "merchant_a".to_string(),
+        status: PaymentStatus::Settled,
+        rail: RailPreference::Card,
+        created_at: Utc::now() - Duration::hours(2),
+    });
+    let rule = make_rule("spend_rate", serde_json::json!(true), PolicyAction::Block);
+    let result = SpendRateEvaluator.evaluate(&rule, &ctx);
+    // $1600 SGD + $500 SGD = $2100 > $2000 daily limit
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn duplicate_detection_ignores_different_currency() {
+    let mut ctx = test_context(Decimal::new(100, 0)); // $100 SGD
+                                                      // Add a recent $100 USD payment to same merchant — should NOT be flagged as duplicate
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(100, 0),
+        currency: Currency::USD, // Different from request currency (SGD)
+        recipient_identifier: "stripe_merch_123".to_string(),
+        status: PaymentStatus::Settled,
+        rail: RailPreference::Card,
+        created_at: Utc::now() - Duration::minutes(1),
+    });
+    let rule = make_rule(
+        "duplicate",
+        serde_json::json!({"window_minutes": 5}),
+        PolicyAction::Block,
+    );
+    let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn duplicate_detection_catches_same_currency() {
+    let mut ctx = test_context(Decimal::new(100, 0)); // $100 SGD
+                                                      // Add a recent $100 SGD payment to same merchant — IS a duplicate
+    ctx.recent_payments.push(PaymentSummary {
+        amount: Decimal::new(100, 0),
+        currency: Currency::SGD, // Same as request currency
+        recipient_identifier: "stripe_merch_123".to_string(),
+        status: PaymentStatus::Settled,
+        rail: RailPreference::Card,
+        created_at: Utc::now() - Duration::minutes(1),
+    });
+    let rule = make_rule(
+        "duplicate",
+        serde_json::json!({"window_minutes": 5}),
+        PolicyAction::Block,
+    );
+    let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+// ---------------------------------------------------------------------------
+// Fix #2: Case-insensitive merchant identifier matching
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merchant_check_deny_list_case_insensitive() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant = "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::In,
+            value: serde_json::json!(["STRIPE_MERCH_123"]), // uppercase in deny list
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Should trigger despite case difference
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn merchant_check_allow_list_case_insensitive() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant = "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::NotIn,
+            value: serde_json::json!(["STRIPE_MERCH_123"]), // uppercase in allow list
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Merchant IS in the allow list (case-insensitive) → should NOT trigger
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn merchant_check_equals_case_insensitive() {
+    let ctx = test_context(Decimal::new(100, 0)); // merchant = "stripe_merch_123"
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("merchant_check".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "recipient.identifier".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!("STRIPE_MERCH_123"), // uppercase
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Should trigger despite case difference
+    let result = crate::rules::merchant_check::MerchantCheckEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}

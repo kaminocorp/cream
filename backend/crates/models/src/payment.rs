@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::DomainError;
 use crate::ids::{AgentId, IdempotencyKey, PaymentId};
 use crate::justification::Justification;
+use crate::provider::ProviderId;
 use crate::recipient::Recipient;
 
 // ---------------------------------------------------------------------------
@@ -232,7 +233,7 @@ pub struct Payment {
     pub id: PaymentId,
     pub request: PaymentRequest,
     status: PaymentStatus,
-    pub provider_id: Option<String>,
+    pub provider_id: Option<ProviderId>,
     pub provider_transaction_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -283,7 +284,7 @@ pub struct PaymentResponse {
     pub payment_id: PaymentId,
     pub status: PaymentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub provider: Option<ProviderId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_transaction_id: Option<String>,
     pub created_at: DateTime<Utc>,
