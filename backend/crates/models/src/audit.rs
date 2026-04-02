@@ -137,6 +137,12 @@ impl<'de> Deserialize<'de> for ProviderResponseRecord {
                 raw.status.len()
             )));
         }
+        if raw.amount_settled <= Decimal::ZERO {
+            return Err(serde::de::Error::custom(format!(
+                "amount_settled must be positive, got {}",
+                raw.amount_settled
+            )));
+        }
 
         Ok(ProviderResponseRecord {
             provider: raw.provider,
@@ -446,6 +452,44 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("status"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.3: ProviderResponseRecord amount_settled positive validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_response_record_rejects_zero_amount_settled() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "ch_123abc",
+            "status": "succeeded",
+            "amount_settled": "0.00",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("amount_settled"));
+        assert!(err.contains("positive"));
+    }
+
+    #[test]
+    fn provider_response_record_rejects_negative_amount_settled() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "ch_123abc",
+            "status": "succeeded",
+            "amount_settled": "-5.00",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("amount_settled"));
+        assert!(err.contains("positive"));
     }
 
     #[test]

@@ -128,6 +128,20 @@ pub struct IdempotencyConfig {
     pub lock_ttl_secs: u64,
 }
 
+impl IdempotencyConfig {
+    /// Validate that the configuration is well-formed.
+    pub fn validate(&self) -> Result<(), RoutingError> {
+        if self.lock_ttl_secs == 0 {
+            return Err(RoutingError::Config(
+                "lock_ttl_secs must be > 0 — a zero TTL would either never expire \
+                 (permanent payment block) or expire instantly (no idempotency protection)"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for IdempotencyConfig {
     fn default() -> Self {
         Self { lock_ttl_secs: 300 }
@@ -198,5 +212,25 @@ mod tests {
             ..Default::default()
         };
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn default_idempotency_config() {
+        let c = IdempotencyConfig::default();
+        assert_eq!(c.lock_ttl_secs, 300);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn idempotency_config_rejects_zero_ttl() {
+        let c = IdempotencyConfig { lock_ttl_secs: 0 };
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("lock_ttl_secs"));
+    }
+
+    #[test]
+    fn idempotency_config_accepts_nonzero_ttl() {
+        let c = IdempotencyConfig { lock_ttl_secs: 1 };
+        assert!(c.validate().is_ok());
     }
 }

@@ -115,7 +115,7 @@ impl RouteSelector {
 
 /// Build a human-readable reason string for the routing decision.
 fn build_reason(candidates: &[RoutingCandidate]) -> String {
-    if candidates.len() == 1 {
+    if candidates.len() < 2 {
         return "only_viable_provider".to_string();
     }
 

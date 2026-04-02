@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.3](#073--2026-04-02) — Cross-crate audit: ProviderResponseRecord positive settlement validation, RoutingCandidate score/fee guards, ProviderHealth latency invariant, IdempotencyConfig validation, selector bounds hardening
 - [0.7.2](#072--2026-04-02) — Production readiness review: ProviderResponseRecord whitespace guards, router config validation enforcement, MerchantCheckEvaluator doc correction
 - [0.7.1](#071--2026-04-02) — Cross-crate consistency review: empty-string guards on audit-bound fields, positive-value validation on spending limits, regex cache comment correction
 - [0.7.0](#070--2026-04-01) — Routing engine crate: provider scorer, circuit breakers, idempotency guard, route selector
@@ -26,6 +27,41 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.3 — 2026-04-02
+
+**Phase 7.3: Cross-Crate Audit — Settlement Amount Validation, Routing Candidate Guards, Latency Invariant, Idempotency Config Validation, Selector Bounds Hardening**
+
+Full-crate production readiness audit (models, router) targeting six remaining consistency gaps found during a systematic review of all Phases 1–7 code. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`ProviderResponseRecord.amount_settled` accepts zero/negative values — corrupted settlement records (HIGH)** — The custom `Deserialize` validated string field lengths and whitespace (v0.7.2) but had no check on the financial amount. A buggy provider returning `amount_settled: -5.00` or `0.00` would permanently store an invalid settlement in the append-only audit ledger, breaking reconciliation downstream. Added `> Decimal::ZERO` check, matching the established pattern from `PaymentRequest.amount` (v0.6.10)
+- **`IdempotencyConfig.lock_ttl_secs` has no validation — zero TTL silently breaks idempotency (HIGH)** — `ScoringWeights` and `CircuitBreakerConfig` both have `validate()` methods called at construction time (v0.7.2), but `IdempotencyConfig` had no equivalent. A `lock_ttl_secs = 0` would create locks with zero TTL — either never expiring (permanent payment block) or expiring instantly (no double-payment protection), depending on the store implementation. Added `validate()` method and changed `IdempotencyGuard::new()` to return `Result<Self, RoutingError>` with validation at construction time, matching the `ProviderScorer::new()` and `CircuitBreaker::new()` pattern
+- **`RoutingCandidate.score` accepts NaN/Infinity — breaks comparison-based sorting (MEDIUM)** — Used derived `Deserialize` with no validation. NaN breaks `f64` comparisons (NaN != NaN, NaN < x is always false), which would silently corrupt the scorer's ranking. `ProviderHealth.error_rate_5m` already validates `is_finite()` (v0.6.8) — this field was missed. Added custom `Deserialize` with `is_finite()` check
+- **`RoutingCandidate.estimated_fee` accepts negative values — inverts cost optimization (MEDIUM)** — Negative fees would reverse the direction of cost-based scoring (a provider with fee `-$10` would appear cheapest when it should be invalid). Added `>= Decimal::ZERO` check in the same custom `Deserialize` impl
+- **`ProviderHealth` accepts `p50_latency_ms > p99_latency_ms` — statistically impossible values (MEDIUM)** — The 99th percentile latency must always be >= the 50th percentile by definition. Invalid data from an external health source would corrupt scoring calculations. Added `p50_latency_ms <= p99_latency_ms` validation in the existing custom `Deserialize`
+- **`build_reason()` in selector uses `== 1` check instead of `< 2` — fragile bounds logic (LOW)** — The function checked `candidates.len() == 1` before accessing `candidates[1]`. While functionally correct (the caller guarantees non-empty), the safety depended on code ordering rather than an explicit bounds check. Changed to `candidates.len() < 2` so the guard directly protects the index access regardless of upstream changes
+
+### Added
+
+- `> Decimal::ZERO` validation for `ProviderResponseRecord.amount_settled` in custom `Deserialize`
+- Custom `Deserialize` for `RoutingCandidate` with `score.is_finite()` and `estimated_fee >= Decimal::ZERO` checks
+- `p50_latency_ms <= p99_latency_ms` validation in `ProviderHealth` custom `Deserialize`
+- `IdempotencyConfig::validate()` method with `lock_ttl_secs > 0` check
+- `IdempotencyGuard::new()` returns `Result<Self, RoutingError>` with config validation at construction time
+- `Debug` impl for `IdempotencyGuard` (required by `Result::unwrap_err()` in tests)
+- 12 new tests: ProviderResponseRecord zero/negative amount_settled (2), RoutingCandidate NaN score + negative fee + zero fee + valid (4), ProviderHealth p50 > p99 + p50 == p99 (2), IdempotencyConfig zero TTL + nonzero TTL + default (3), IdempotencyGuard rejects zero TTL (1)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 305/305 passing (121 models + 14 audit + 103 policy + 17 providers + 50 router) |
 
 ---
 

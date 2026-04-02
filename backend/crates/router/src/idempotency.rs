@@ -61,9 +61,21 @@ pub struct IdempotencyGuard {
     config: IdempotencyConfig,
 }
 
+impl std::fmt::Debug for IdempotencyGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdempotencyGuard")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 impl IdempotencyGuard {
-    pub fn new(store: Box<dyn IdempotencyStore>, config: IdempotencyConfig) -> Self {
-        Self { store, config }
+    pub fn new(
+        store: Box<dyn IdempotencyStore>,
+        config: IdempotencyConfig,
+    ) -> Result<Self, RoutingError> {
+        config.validate()?;
+        Ok(Self { store, config })
     }
 
     /// Attempt to acquire the idempotency lock.
@@ -190,6 +202,7 @@ mod tests {
             Box::new(InMemoryIdempotencyStore::new()),
             IdempotencyConfig { lock_ttl_secs: 300 },
         )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -245,6 +258,21 @@ mod tests {
         let pid2 = PaymentId::new();
         let result = guard.acquire(&key, &pid2).await.unwrap();
         assert_eq!(result, IdempotencyOutcome::Existing(pid));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.3: IdempotencyGuard rejects invalid config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn idempotency_guard_rejects_zero_ttl() {
+        let result = IdempotencyGuard::new(
+            Box::new(InMemoryIdempotencyStore::new()),
+            IdempotencyConfig { lock_ttl_secs: 0 },
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("lock_ttl_secs"));
     }
 
     #[tokio::test]
