@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.0](#070--2026-04-01) — Routing engine crate: provider scorer, circuit breakers, idempotency guard, route selector
 - [0.6.16](#0616--2026-04-01) — Production readiness review: ProviderId empty-string validation
 - [0.6.15](#0615--2026-04-01) — Production readiness review: HumanReviewRecord rejects Escalate decision, Recipient empty-identifier guard, Justification empty/whitespace-only summary guard
 - [0.6.14](#0614--2026-04-01) — Production sweep: ProviderResponseRecord string bounds, set_provider transaction_id limit, Equals/NotEquals/Contains case-insensitive matching, ProviderHealth error_rate validation
@@ -23,6 +24,34 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.0 — 2026-04-01
+
+**Phase 7: Routing Engine Crate — Provider Scoring, Circuit Breakers, Idempotency Guards**
+
+Implements the `cream-router` crate — the provider selection engine that scores viable providers based on cost, speed, health, and rail preference, enforces per-provider circuit breakers with automatic demotion, and provides cross-provider idempotency guards to prevent double-payments during failover.
+
+### Added
+
+- **`ProviderScorer`** — multi-factor ranking algorithm with configurable weights (cost 0.3, speed 0.2, health 0.3, preference 0.2). Binary filters exclude circuit-broken providers, unsupported currencies, and restricted rails before scoring
+- **`CircuitBreaker`** — per-provider Closed → Open → HalfOpen state machine. Trips when error rate exceeds configurable threshold (default 50% over 5-min window). Auto-recovers via HalfOpen testing after cooldown (default 60s). `CircuitBreakerStore` trait enables in-memory unit tests without Redis
+- **`IdempotencyGuard`** — distributed lock preventing double-payments across provider failovers. `acquire()` / `release()` / `complete()` semantics with NX+EX Redis lock pattern. `IdempotencyStore` trait enables in-memory unit tests
+- **`RouteSelector`** — orchestrates health loading, scoring, and selection. Returns `RoutingDecision` with ranked candidates. `HealthSource` trait decouples health data retrieval
+- **`ProviderCapabilities`** — static provider metadata (supported rails, currencies, fee schedule). Scaffold placeholder for Phases 12-14 real provider data
+- **`RouterConfig`** — validated configuration for scoring weights, circuit breaker thresholds, and idempotency TTL
+- **`RoutingError`** — 7-variant error enum covering no viable provider, all exhausted, idempotency conflict, Redis errors, provider errors, and config errors
+- **`StaticHealthSource`** and **`InMemoryCircuitBreakerStore`** / **`InMemoryIdempotencyStore`** — test doubles for Redis-dependent components
+- 42 new tests across all modules
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 267/267 passing (91 models + 14 audit + 103 policy + 17 providers + 42 router) |
 
 ---
 
