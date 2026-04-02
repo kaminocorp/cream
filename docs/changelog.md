@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.1](#071--2026-04-02) — Cross-crate consistency review: empty-string guards on audit-bound fields, positive-value validation on spending limits, regex cache comment correction
 - [0.7.0](#070--2026-04-01) — Routing engine crate: provider scorer, circuit breakers, idempotency guard, route selector
 - [0.6.16](#0616--2026-04-01) — Production readiness review: ProviderId empty-string validation
 - [0.6.15](#0615--2026-04-01) — Production readiness review: HumanReviewRecord rejects Escalate decision, Recipient empty-identifier guard, Justification empty/whitespace-only summary guard
@@ -24,6 +25,37 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.1 — 2026-04-02
+
+**Phase 7.1: Cross-Crate Consistency Review — Empty-String Guards on Audit-Bound Fields, Positive-Value Validation on Spending Limits**
+
+Full-crate production readiness review (models, policy) targeting six remaining consistency gaps where the established validation pattern — empty-string rejection on audit-persisted fields (v0.6.10–v0.6.16) and positive-amount enforcement on financial values (v0.6.10) — was not applied uniformly. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`HumanReviewRecord.reviewer_id` accepts empty/whitespace-only string — anonymous audit entry (MEDIUM)** — The `reviewer_id` field identifies who made the human approval/rejection decision. The custom `Deserialize` validated max length (255 chars, v0.6.10) but allowed `""` and `"   "` through, undermining audit trail accountability. Added `trim().is_empty()` check before the max-length check, matching the pattern established by `Justification.summary` (v0.6.15) and `Recipient.identifier` (v0.6.15)
+- **`RoutingDecision.reason` accepts empty/whitespace-only string — meaningless audit entry (MEDIUM)** — The `reason` field is the human-readable explanation of provider selection, persisted permanently to the append-only audit ledger. The custom `Deserialize` validated max length (1000 chars, v0.6.14) but allowed empty strings. Added `trim().is_empty()` check before the max-length check
+- **`Payment::set_provider()` accepts empty/whitespace-only `transaction_id` — provider reference without identity (MEDIUM)** — The `set_provider()` method validated max length (500 chars, v0.6.14) but allowed `""` and `"   "`. At the point this method is called, the payment has been dispatched to a provider and should always have a real transaction identifier. Added `trim().is_empty()` check before the max-length check
+- **`AgentProfile` spending limits accept zero/negative values — nonsensical limits (MEDIUM)** — `max_per_transaction`, `max_daily_spend`, `max_weekly_spend`, `max_monthly_spend` are `Decimal` fields with no validation. Zero limits would silently block all payments; negative limits are semantically invalid. The database has CHECK constraints (`>= 0` from v0.6.10 migrations), but the Rust model allowed negative values through — breaking the defense-in-depth pattern established for `PaymentRequest.amount` (positive check since v0.6.10). Added custom `Deserialize` with `> Decimal::ZERO` validation on all four limits and `escalation_threshold` when present
+- **`CardControls` spending limits accept zero/negative values when present — invalid card limits (LOW)** — `max_per_transaction` and `max_per_cycle` are `Option<Decimal>` with no validation when `Some`. Added custom `Deserialize` with `> Decimal::ZERO` validation when the value is present
+- **Regex cache eviction comment claims FIFO but HashMap gives arbitrary order (LOW)** — The comment on the regex cache eviction in the condition evaluator said "oldest entry (by insertion order)" but `HashMap` does not guarantee insertion order — `keys().next()` returns an arbitrary key. Updated the comment to accurately describe the behavior as arbitrary eviction. Functional impact: none (the cache still works correctly; evicted patterns are re-compiled on next use)
+
+### Added
+
+- Custom `Deserialize` for `AgentProfile` with positive-value validation on all spending limits and optional `escalation_threshold`
+- Custom `Deserialize` for `CardControls` with positive-value validation on optional spending limits
+- 18 new tests: HumanReviewRecord empty/whitespace reviewer_id (2), RoutingDecision empty/whitespace/valid reason (3), set_provider empty/whitespace transaction_id (2), AgentProfile zero/negative limits on 4 fields + escalation_threshold + valid + none-threshold (7), CardControls zero/negative limits + valid + none (4)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 285/285 passing (109 models + 14 audit + 103 policy + 17 providers + 42 router) |
 
 ---
 

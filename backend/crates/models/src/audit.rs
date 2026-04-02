@@ -192,6 +192,11 @@ impl<'de> Deserialize<'de> for HumanReviewRecord {
             ));
         }
 
+        if raw.reviewer_id.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "reviewer_id must not be empty — audit trail requires reviewer identity",
+            ));
+        }
         if raw.reviewer_id.len() > MAX_REVIEWER_ID_LEN {
             return Err(serde::de::Error::custom(format!(
                 "reviewer_id exceeds maximum length of {} characters (got {})",
@@ -330,6 +335,37 @@ mod tests {
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("status"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.1: HumanReviewRecord empty reviewer_id guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn human_review_rejects_empty_reviewer_id() {
+        let json = serde_json::json!({
+            "reviewer_id": "",
+            "decision": "APPROVE",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let result: Result<HumanReviewRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("reviewer_id"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn human_review_rejects_whitespace_only_reviewer_id() {
+        let json = serde_json::json!({
+            "reviewer_id": "   ",
+            "decision": "APPROVE",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let result: Result<HumanReviewRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("reviewer_id"));
     }
 
     #[test]

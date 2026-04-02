@@ -441,6 +441,11 @@ impl Payment {
                 self.status
             )));
         }
+        if transaction_id.trim().is_empty() {
+            return Err(DomainError::PolicyViolation(
+                "provider transaction_id must not be empty".to_string(),
+            ));
+        }
         if transaction_id.len() > MAX_PROVIDER_TRANSACTION_ID_LEN {
             return Err(DomainError::PolicyViolation(format!(
                 "provider transaction_id exceeds maximum length of {} characters (got {})",
@@ -844,6 +849,31 @@ mod tests {
     // -----------------------------------------------------------------------
     // Phase 6.14: set_provider transaction_id bounds
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Phase 7.1: set_provider empty transaction_id guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_provider_rejects_empty_transaction_id() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        let result = p.set_provider(ProviderId::new("stripe"), String::new());
+        assert!(result.is_err());
+        // Provider should NOT have been set
+        assert!(p.provider_id().is_none());
+    }
+
+    #[test]
+    fn set_provider_rejects_whitespace_only_transaction_id() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        let result = p.set_provider(ProviderId::new("stripe"), "   ".to_string());
+        assert!(result.is_err());
+        assert!(p.provider_id().is_none());
+    }
 
     #[test]
     fn set_provider_rejects_oversized_transaction_id() {

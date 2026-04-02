@@ -201,6 +201,11 @@ impl<'de> Deserialize<'de> for RoutingDecision {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        if raw.reason.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "routing_decision.reason must not be empty — audit trail requires provider selection rationale",
+            ));
+        }
         if raw.reason.len() > MAX_ROUTING_REASON_LEN {
             return Err(serde::de::Error::custom(format!(
                 "routing_decision.reason exceeds maximum length of {} characters (got {})",
@@ -326,5 +331,45 @@ mod tests {
         let result: Result<ProviderId, _> = serde_json::from_value(json);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_str(), "coinbase_x402");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.1: RoutingDecision.reason empty-string guard
+    // -----------------------------------------------------------------------
+
+    fn sample_routing_decision_json(reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "candidates": [],
+            "selected": "stripe_issuing",
+            "selected_rail": "card",
+            "reason": reason
+        })
+    }
+
+    #[test]
+    fn routing_decision_rejects_empty_reason() {
+        let json = sample_routing_decision_json("");
+        let result: Result<RoutingDecision, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("reason"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn routing_decision_rejects_whitespace_only_reason() {
+        let json = sample_routing_decision_json("   ");
+        let result: Result<RoutingDecision, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("reason"));
+    }
+
+    #[test]
+    fn routing_decision_accepts_valid_reason() {
+        let json = sample_routing_decision_json("lowest_fee_approved_corridor");
+        let result: Result<RoutingDecision, _> = serde_json::from_value(json);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().reason, "lowest_fee_approved_corridor");
     }
 }

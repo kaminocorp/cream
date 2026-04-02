@@ -42,7 +42,10 @@ pub enum CardType {
 }
 
 /// Spending controls enforced at the card level by the issuing provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` validates that spending limits, when present, are
+/// strictly positive. Zero or negative card limits are semantically invalid.
+#[derive(Debug, Clone, Serialize)]
 pub struct CardControls {
     /// Max amount per individual transaction.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +58,45 @@ pub struct CardControls {
     pub allowed_mcc_codes: Vec<String>,
     /// The currency this card transacts in.
     pub currency: Currency,
+}
+
+impl<'de> Deserialize<'de> for CardControls {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            max_per_transaction: Option<Decimal>,
+            max_per_cycle: Option<Decimal>,
+            allowed_mcc_codes: Vec<String>,
+            currency: Currency,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if let Some(ref v) = raw.max_per_transaction {
+            if *v <= Decimal::ZERO {
+                return Err(serde::de::Error::custom(format!(
+                    "card max_per_transaction must be positive when set, got {v}"
+                )));
+            }
+        }
+        if let Some(ref v) = raw.max_per_cycle {
+            if *v <= Decimal::ZERO {
+                return Err(serde::de::Error::custom(format!(
+                    "card max_per_cycle must be positive when set, got {v}"
+                )));
+            }
+        }
+
+        Ok(CardControls {
+            max_per_transaction: raw.max_per_transaction,
+            max_per_cycle: raw.max_per_cycle,
+            allowed_mcc_codes: raw.allowed_mcc_codes,
+            currency: raw.currency,
+        })
+    }
 }
 
 /// The lifecycle status of a virtual card.
@@ -83,5 +125,59 @@ mod tests {
         let t = CardType::SingleUse;
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(json, "\"single_use\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.1: CardControls spending limit validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn card_controls_valid_limits_accepted() {
+        let json = serde_json::json!({
+            "max_per_transaction": "100.00",
+            "max_per_cycle": "1000.00",
+            "allowed_mcc_codes": ["5411"],
+            "currency": "S_G_D"
+        });
+        let controls: CardControls = serde_json::from_value(json).unwrap();
+        assert!(controls.max_per_transaction.is_some());
+    }
+
+    #[test]
+    fn card_controls_none_limits_accepted() {
+        let json = serde_json::json!({
+            "allowed_mcc_codes": [],
+            "currency": "U_S_D"
+        });
+        let controls: CardControls = serde_json::from_value(json).unwrap();
+        assert!(controls.max_per_transaction.is_none());
+        assert!(controls.max_per_cycle.is_none());
+    }
+
+    #[test]
+    fn card_controls_rejects_zero_max_per_transaction() {
+        let json = serde_json::json!({
+            "max_per_transaction": "0",
+            "allowed_mcc_codes": [],
+            "currency": "U_S_D"
+        });
+        let result: Result<CardControls, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("max_per_transaction"));
+    }
+
+    #[test]
+    fn card_controls_rejects_negative_max_per_cycle() {
+        let json = serde_json::json!({
+            "max_per_cycle": "-50.00",
+            "allowed_mcc_codes": [],
+            "currency": "U_S_D"
+        });
+        let result: Result<CardControls, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("max_per_cycle"));
     }
 }

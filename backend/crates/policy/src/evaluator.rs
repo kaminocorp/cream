@@ -242,10 +242,12 @@ fn regex_matches(text: &str, pattern: &str) -> bool {
             let result = re.is_match(text);
             if let Ok(mut cache) = REGEX_CACHE.lock() {
                 if cache.len() >= REGEX_CACHE_MAX {
-                    // Evict the oldest entry (by insertion order via arbitrary key)
-                    // rather than clearing the entire cache, so hot patterns survive.
-                    if let Some(oldest_key) = cache.keys().next().cloned() {
-                        cache.remove(&oldest_key);
+                    // Evict an arbitrary entry rather than clearing the entire
+                    // cache, so most hot patterns survive. HashMap iteration
+                    // order is non-deterministic — this is acceptable because
+                    // evicted patterns are simply re-compiled on next use.
+                    if let Some(evict_key) = cache.keys().next().cloned() {
+                        cache.remove(&evict_key);
                     }
                 }
                 cache.insert(pattern.to_string(), re);
