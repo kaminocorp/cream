@@ -15,29 +15,45 @@ use crate::payment::RailPreference;
 /// "coinbase_x402" rather than a UUID — providers are configuration, not
 /// user-generated entities.
 ///
-/// Validated on all construction paths: must be non-empty. Empty provider IDs
-/// are semantically invalid and would corrupt the append-only audit ledger if
-/// written to `RoutingDecision.selected`.
+/// Validated on all construction paths: must be non-empty and within
+/// [`MAX_PROVIDER_ID_LEN`]. Provider IDs are persisted to the append-only
+/// audit ledger via `RoutingDecision.selected`, so unbounded values would
+/// cause permanent bloat.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ProviderId(String);
 
+/// Maximum allowed length for provider IDs.
+pub const MAX_PROVIDER_ID_LEN: usize = 255;
+
 impl ProviderId {
-    /// Create a new ProviderId. Panics if the id is empty.
+    /// Create a new ProviderId. Panics if the id is empty or exceeds
+    /// [`MAX_PROVIDER_ID_LEN`].
     ///
     /// Use `try_new()` for fallible construction from untrusted input.
     pub fn new(id: impl Into<String>) -> Self {
         let id = id.into();
         assert!(!id.is_empty(), "ProviderId must not be empty");
+        assert!(
+            id.len() <= MAX_PROVIDER_ID_LEN,
+            "ProviderId exceeds maximum length of {MAX_PROVIDER_ID_LEN}"
+        );
         Self(id)
     }
 
-    /// Fallible constructor for untrusted input. Returns an error if the id is empty.
+    /// Fallible constructor for untrusted input. Returns an error if the id
+    /// is empty or exceeds [`MAX_PROVIDER_ID_LEN`].
     pub fn try_new(id: impl Into<String>) -> Result<Self, DomainError> {
         let id = id.into();
         if id.is_empty() {
             return Err(DomainError::InvalidIdFormat(
                 "ProviderId must not be empty".to_string(),
             ));
+        }
+        if id.len() > MAX_PROVIDER_ID_LEN {
+            return Err(DomainError::InvalidIdFormat(format!(
+                "ProviderId exceeds maximum length of {MAX_PROVIDER_ID_LEN} (got {})",
+                id.len()
+            )));
         }
         Ok(Self(id))
     }
@@ -55,6 +71,12 @@ impl<'de> Deserialize<'de> for ProviderId {
         let s = String::deserialize(deserializer)?;
         if s.is_empty() {
             return Err(serde::de::Error::custom("provider_id must not be empty"));
+        }
+        if s.len() > MAX_PROVIDER_ID_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "provider_id exceeds maximum length of {MAX_PROVIDER_ID_LEN} (got {})",
+                s.len()
+            )));
         }
         Ok(Self(s))
     }
@@ -472,6 +494,41 @@ mod tests {
         let result: Result<ProviderId, _> = serde_json::from_value(json);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_str(), "coinbase_x402");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.5: ProviderId max length validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_id_try_new_rejects_oversized() {
+        let long = "x".repeat(MAX_PROVIDER_ID_LEN + 1);
+        let result = ProviderId::try_new(long);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
+    }
+
+    #[test]
+    fn provider_id_try_new_accepts_at_limit() {
+        let exact = "y".repeat(MAX_PROVIDER_ID_LEN);
+        let result = ProviderId::try_new(exact);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn provider_id_deserialize_rejects_oversized() {
+        let long = "z".repeat(MAX_PROVIDER_ID_LEN + 1);
+        let json = serde_json::json!(long);
+        let result: Result<ProviderId, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum length")]
+    fn provider_id_new_panics_on_oversized() {
+        let long = "a".repeat(MAX_PROVIDER_ID_LEN + 1);
+        let _ = ProviderId::new(long);
     }
 
     // -----------------------------------------------------------------------

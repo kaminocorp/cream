@@ -153,7 +153,7 @@ impl ProviderScorer {
                     1.0 - (p.health.p50_latency_ms as f64 / max_latency as f64)
                 };
 
-                let health_score = 1.0 - p.health.error_rate_5m;
+                let health_score = (1.0 - p.health.error_rate_5m).max(0.0);
 
                 let preference_score = if request.preferred_rail == RailPreference::Auto
                     || p.capabilities
@@ -230,9 +230,10 @@ fn select_rail(
 
 /// Convert a `Decimal` to `f64` for scoring purposes only.
 /// Scores are non-financial, so f64 precision is acceptable.
+/// Uses `rust_decimal`'s native `to_f64()` instead of string round-tripping.
 fn decimal_to_f64(d: Decimal) -> f64 {
-    use std::str::FromStr;
-    f64::from_str(&d.to_string()).unwrap_or(0.0)
+    use rust_decimal::prelude::ToPrimitive;
+    d.to_f64().unwrap_or(0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -598,27 +599,16 @@ mod tests {
     }
 
     #[test]
-    fn all_zero_weights_still_returns_candidates() {
+    fn all_zero_weights_rejected_by_scorer() {
         let weights = ScoringWeights {
             cost: 0.0,
             speed: 0.0,
             health: 0.0,
             preference: 0.0,
         };
-        let scorer = ProviderScorer::new(weights).unwrap();
-        let providers = vec![make_input(
-            make_caps(
-                "stripe",
-                vec![RailPreference::Card],
-                vec![Currency::SGD],
-                "0.029",
-            ),
-            make_health("stripe", 0.01, 100),
-        )];
-
-        let result = scorer.score_candidates(&providers, &sample_request(), &sample_profile());
-        assert_eq!(result.len(), 1);
-        assert!((result[0].score - 0.0).abs() < f64::EPSILON);
+        let result = ProviderScorer::new(weights);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-zero"));
     }
 
     #[test]

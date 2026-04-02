@@ -28,6 +28,8 @@ pub struct VirtualCard {
     pub controls: CardControls,
     pub status: CardStatus,
     pub created_at: DateTime<Utc>,
+    /// When this card was last updated (status change, control modification).
+    pub updated_at: DateTime<Utc>,
     /// When this card expires. `None` for cards that don't auto-expire.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,

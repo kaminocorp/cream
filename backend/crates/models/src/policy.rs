@@ -201,6 +201,12 @@ impl<'de> Deserialize<'de> for EscalationConfig {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        if raw.timeout_minutes == 0 {
+            return Err(serde::de::Error::custom(
+                "escalation timeout_minutes must be > 0 — \
+                 zero timeout means instant expiry with no human review window",
+            ));
+        }
         if raw.on_timeout == PolicyAction::Escalate {
             return Err(serde::de::Error::custom(
                 "escalation on_timeout must not be ESCALATE — \
@@ -294,6 +300,19 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("infinite escalation loop"));
+    }
+
+    #[test]
+    fn escalation_zero_timeout_rejected() {
+        let json = serde_json::json!({
+            "channel": "slack",
+            "timeout_minutes": 0,
+            "on_timeout": "BLOCK"
+        });
+        let result: Result<EscalationConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timeout_minutes"));
     }
 
     #[test]

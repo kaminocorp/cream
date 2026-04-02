@@ -66,6 +66,11 @@ impl<'de> Deserialize<'de> for Justification {
             )));
         }
         if let Some(ref s) = raw.task_id {
+            if s.trim().is_empty() {
+                return Err(serde::de::Error::custom(
+                    "justification.task_id must not be empty or whitespace-only when present",
+                ));
+            }
             if s.len() > MAX_JUSTIFICATION_FIELD_LEN {
                 return Err(serde::de::Error::custom(format!(
                     "justification.task_id exceeds maximum length of {} characters (got {})",
@@ -75,6 +80,11 @@ impl<'de> Deserialize<'de> for Justification {
             }
         }
         if let Some(ref s) = raw.expected_value {
+            if s.trim().is_empty() {
+                return Err(serde::de::Error::custom(
+                    "justification.expected_value must not be empty or whitespace-only when present",
+                ));
+            }
             if s.len() > MAX_JUSTIFICATION_FIELD_LEN {
                 return Err(serde::de::Error::custom(format!(
                     "justification.expected_value exceeds maximum length of {} characters (got {})",
@@ -302,6 +312,58 @@ mod tests {
             "summary": "valid summary text",
             "category": "api_credits",
             "expected_value": long
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected_value"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.5: empty/whitespace optional string fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn justification_empty_task_id_rejected() {
+        let json = serde_json::json!({
+            "summary": "valid summary text",
+            "task_id": "",
+            "category": "api_credits"
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("task_id"));
+    }
+
+    #[test]
+    fn justification_whitespace_task_id_rejected() {
+        let json = serde_json::json!({
+            "summary": "valid summary text",
+            "task_id": "   ",
+            "category": "api_credits"
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("task_id"));
+    }
+
+    #[test]
+    fn justification_empty_expected_value_rejected() {
+        let json = serde_json::json!({
+            "summary": "valid summary text",
+            "category": "api_credits",
+            "expected_value": ""
+        });
+        let result: Result<Justification, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected_value"));
+    }
+
+    #[test]
+    fn justification_whitespace_expected_value_rejected() {
+        let json = serde_json::json!({
+            "summary": "valid summary text",
+            "category": "api_credits",
+            "expected_value": "  \t  "
         });
         let result: Result<Justification, _> = serde_json::from_value(json);
         assert!(result.is_err());

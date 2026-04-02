@@ -113,6 +113,7 @@ impl PaymentProvider for MockProvider {
             controls: config.controls.clone(),
             status: CardStatus::Active,
             created_at: Utc::now(),
+            updated_at: Utc::now(),
             expires_at: config.expires_at,
         })
     }

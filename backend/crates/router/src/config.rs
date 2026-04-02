@@ -49,6 +49,11 @@ impl ScoringWeights {
                 )));
             }
         }
+        if self.cost + self.speed + self.health + self.preference == 0.0 {
+            return Err(RoutingError::Config(
+                "at least one scoring weight must be non-zero".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -232,5 +237,21 @@ mod tests {
     fn idempotency_config_accepts_nonzero_ttl() {
         let c = IdempotencyConfig { lock_ttl_secs: 1 };
         assert!(c.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.5: all-zero scoring weights rejected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scoring_weights_rejects_all_zero() {
+        let w = ScoringWeights {
+            cost: 0.0,
+            speed: 0.0,
+            health: 0.0,
+            preference: 0.0,
+        };
+        let err = w.validate().unwrap_err();
+        assert!(err.to_string().contains("non-zero"));
     }
 }

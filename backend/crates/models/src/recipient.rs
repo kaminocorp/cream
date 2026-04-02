@@ -69,6 +69,11 @@ impl<'de> Deserialize<'de> for Recipient {
             )));
         }
         if let Some(ref name) = raw.name {
+            if name.trim().is_empty() {
+                return Err(serde::de::Error::custom(
+                    "recipient.name must not be empty or whitespace-only when present",
+                ));
+            }
             if name.len() > MAX_RECIPIENT_NAME_LEN {
                 return Err(serde::de::Error::custom(format!(
                     "recipient.name exceeds maximum length of {} characters (got {})",
@@ -162,6 +167,34 @@ mod tests {
             "type": "merchant",
             "identifier": "valid_id",
             "name": long,
+        });
+        let result: Result<Recipient, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("name"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.5: empty/whitespace recipient name rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recipient_empty_name_rejected() {
+        let json = serde_json::json!({
+            "type": "merchant",
+            "identifier": "valid_id",
+            "name": "",
+        });
+        let result: Result<Recipient, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("name"));
+    }
+
+    #[test]
+    fn recipient_whitespace_name_rejected() {
+        let json = serde_json::json!({
+            "type": "merchant",
+            "identifier": "valid_id",
+            "name": "   ",
         });
         let result: Result<Recipient, _> = serde_json::from_value(json);
         assert!(result.is_err());

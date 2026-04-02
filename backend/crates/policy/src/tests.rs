@@ -676,6 +676,44 @@ fn engine_records_latency() {
     assert!(decision.latency_ms < 100);
 }
 
+// -----------------------------------------------------------------------
+// Phase 7.5: Unknown rule_type fail-safe (blocks instead of skipping)
+// -----------------------------------------------------------------------
+
+#[test]
+fn engine_unknown_rule_type_blocks_when_action_is_block() {
+    let engine = PolicyEngine::new();
+    let ctx = test_context(Decimal::new(100, 0));
+    let mut rule = make_rule("amount", serde_json::json!(500), PolicyAction::Block);
+    rule.rule_type = Some("amonut_cap".to_string()); // typo
+    let decision = engine.evaluate(&[rule], &ctx).unwrap();
+    assert_eq!(decision.action, PolicyAction::Block);
+    assert_eq!(decision.matching_rules.len(), 1);
+}
+
+#[test]
+fn engine_unknown_rule_type_escalates_when_action_is_escalate() {
+    let engine = PolicyEngine::new();
+    let ctx = test_context(Decimal::new(100, 0));
+    let mut rule = make_rule("amount", serde_json::json!(500), PolicyAction::Escalate);
+    rule.rule_type = Some("unknown_type".to_string());
+    let decision = engine.evaluate(&[rule], &ctx).unwrap();
+    assert_eq!(decision.action, PolicyAction::Escalate);
+    assert_eq!(decision.matching_rules.len(), 1);
+}
+
+#[test]
+fn engine_unknown_rule_type_approve_action_continues() {
+    let engine = PolicyEngine::new();
+    let ctx = test_context(Decimal::new(100, 0));
+    let mut rule = make_rule("amount", serde_json::json!(500), PolicyAction::Approve);
+    rule.rule_type = Some("nonexistent".to_string());
+    let decision = engine.evaluate(&[rule], &ctx).unwrap();
+    // Approve action from unknown rule doesn't force block/escalate
+    assert_eq!(decision.action, PolicyAction::Approve);
+    assert_eq!(decision.matching_rules.len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Condition evaluator tests
 // ---------------------------------------------------------------------------

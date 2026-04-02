@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.5](#075--2026-04-02) — Production hardening: unknown rule_type fail-safe, IdempotencyKey FromStr fix, scorer health clamp, VirtualCard schema alignment, scoring all-zero rejection, optional string empty guards, escalation zero-timeout guard, ProviderId max length
 - [0.7.4](#074--2026-04-02) — Production hardening: fail-safe on misconfigured policy rules, Agent/AgentProfile name validation, invalid regex fail-safe, settled_currency constraint, provider_id index
 - [0.7.3](#073--2026-04-02) — Cross-crate audit: ProviderResponseRecord positive settlement validation, RoutingCandidate score/fee guards, ProviderHealth latency invariant, IdempotencyConfig validation, selector bounds hardening
 - [0.7.2](#072--2026-04-02) — Production readiness review: ProviderResponseRecord whitespace guards, router config validation enforcement, MerchantCheckEvaluator doc correction
@@ -28,6 +29,47 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.5 — 2026-04-02
+
+**Phase 7.5: Production Hardening — Unknown Rule Type Fail-Safe, IdempotencyKey Fix, Scorer Clamp, Schema Alignment, Validation Gaps**
+
+Systematic production readiness review targeting nine findings across models, policy, and router crates. The central theme: closing the remaining gaps in the established validation patterns — fail-safe behavior on unregistered rule types, empty-string guards on optional audit-persisted fields, and defensive clamping in the scoring algorithm. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **Unregistered `rule_type` in policy engine silently skipped — policy bypass via typo (HIGH)** — When a rule referenced an unregistered `rule_type` (e.g., `"amonut_cap"` instead of `"amount_cap"`), the engine logged a warning and skipped the rule entirely, allowing the payment through. v0.7.4 fixed this for misconfigured *parameters* within registered evaluators, but unregistered rule *types* still failed open. Changed to return `RuleResult::Triggered(rule.action)` for unknown types — fail-safe (deny/escalate per the rule's configured action) instead of fail-open (skip). Log level upgraded from `warn` to `error`
+- **`IdempotencyKey::from_str("idem_")` returns empty key — deduplication bypass (HIGH)** — The `FromStr` implementation stripped the `"idem_"` prefix but did not validate that the remaining key was non-empty. `"idem_".parse::<IdempotencyKey>()` returned `Ok(IdempotencyKey(""))`, bypassing the empty-check present in both `new()` and the `Deserialize` impl. Added `key.is_empty()` check after `strip_prefix`
+- **Scorer health score can go negative — inverts provider ranking (MEDIUM)** — `1.0 - error_rate_5m` produced a negative health score when `error_rate_5m > 1.0` (possible transiently from timing). Negative scores inverted ranking logic. Added `.max(0.0)` clamp
+- **Scorer `decimal_to_f64()` silently returns 0.0 on parse failure — cheapest-provider illusion (MEDIUM)** — The string-based conversion `f64::from_str(&d.to_string()).unwrap_or(0.0)` would silently produce 0.0 if parsing failed, making a broken provider appear cheapest. Replaced with `rust_decimal::prelude::ToPrimitive::to_f64()` which handles the conversion natively without string round-tripping
+- **`VirtualCard` struct missing `updated_at` field — schema/model mismatch (MEDIUM)** — Migration `20260401200003` added `updated_at` to the `virtual_cards` table, but the Rust `VirtualCard` struct did not include the field. Any `sqlx::FromRow` query or full-struct deserialization would fail at runtime. Added `pub updated_at: DateTime<Utc>` field and updated mock provider
+- **`ScoringWeights::validate()` allows all-zero weights — non-deterministic ranking (LOW-MEDIUM)** — All four weights at 0.0 produced identical scores for every provider, making selection dependent on input order (non-deterministic). Added `sum == 0.0` rejection to `validate()`
+- **`Justification.task_id` and `.expected_value` accept empty strings when present (LOW)** — These optional string fields checked max length but not emptiness when `Some`. An empty string `""` is semantically meaningless and should be `None` or rejected. Added `trim().is_empty()` checks matching the pattern established for `summary` (v0.6.15)
+- **`Recipient.name` accepts empty/whitespace string when present (LOW)** — Same gap: max length validated but not emptiness. Added `trim().is_empty()` check matching the pattern for `identifier` (v0.6.15)
+- **`EscalationConfig.timeout_minutes` allows zero — no human review window (LOW)** — Zero timeout means instant expiry, defeating the purpose of escalation. The `on_timeout` action fires immediately with no human review window. Added `timeout_minutes > 0` validation
+- **`ProviderId` has no maximum length — unbounded audit log bloat (LOW)** — Every other audit-persisted string field has a `MAX_*_LEN` constant (established pattern since v0.6.10). Provider IDs were unbounded. Added `MAX_PROVIDER_ID_LEN = 255` with validation in `new()`, `try_new()`, and `Deserialize`
+
+### Added
+
+- `MAX_PROVIDER_ID_LEN` constant (255) for provider ID length validation
+- Max-length validation on `ProviderId::new()` (panic), `try_new()` (Result), and `Deserialize`
+- `trim().is_empty()` checks for `Justification.task_id` and `Justification.expected_value`
+- `trim().is_empty()` check for `Recipient.name`
+- `timeout_minutes > 0` validation in `EscalationConfig` custom `Deserialize`
+- `sum > 0` validation in `ScoringWeights::validate()`
+- Health score clamp `(1.0 - error_rate).max(0.0)` in `ProviderScorer`
+- `VirtualCard.updated_at` field with mock provider update
+- 17 new tests: IdempotencyKey FromStr prefix-only + valid (2), Justification empty/whitespace task_id + expected_value (4), Recipient empty/whitespace name (2), EscalationConfig zero timeout (1), ProviderId oversized try_new/at-limit/deserialize/panic (4), ScoringWeights all-zero (1), engine unknown rule_type block/escalate/approve (3)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 330/330 passing (142 models + 14 audit + 106 policy + 17 providers + 51 router) |
 
 ---
 

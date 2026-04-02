@@ -154,6 +154,11 @@ impl FromStr for IdempotencyKey {
         let key = s.strip_prefix("idem_").ok_or_else(|| {
             DomainError::InvalidIdFormat(format!("expected prefix 'idem_' but got '{}'", s))
         })?;
+        if key.is_empty() {
+            return Err(DomainError::InvalidIdFormat(
+                "IdempotencyKey must not be empty after prefix".to_string(),
+            ));
+        }
         Ok(Self(key.to_owned()))
     }
 }
@@ -227,5 +232,24 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("must not be empty"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.5: IdempotencyKey FromStr rejects empty after prefix strip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn idempotency_key_from_str_rejects_prefix_only() {
+        let result: Result<IdempotencyKey, _> = "idem_".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn idempotency_key_from_str_accepts_valid() {
+        let result: Result<IdempotencyKey, _> = "idem_abc-123".parse();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "abc-123");
     }
 }

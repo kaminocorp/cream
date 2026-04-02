@@ -130,8 +130,32 @@ impl PolicyEngine {
             let evaluator = match self.evaluators.get(&rule_type) {
                 Some(e) => e,
                 None => {
-                    tracing::warn!(rule_id = %rule.id, rule_type = %rule_type, "unknown rule type, skipping");
+                    // Fail-safe: unknown/unregistered rule types are treated as
+                    // triggered with the rule's configured action. A typo in
+                    // rule_type (e.g. "amonut_cap") must NOT silently disable
+                    // the rule — that would be a policy bypass.
+                    tracing::error!(
+                        rule_id = %rule.id,
+                        rule_type = %rule_type,
+                        action = ?rule.action,
+                        "unknown rule type — fail-safe: treating as triggered"
+                    );
                     rules_evaluated.push(rule.id);
+                    matching_rules.push(rule.id);
+                    match rule.action {
+                        PolicyAction::Block => {
+                            return Ok(PolicyDecision {
+                                action: PolicyAction::Block,
+                                rules_evaluated,
+                                matching_rules,
+                                latency_ms: start.elapsed().as_millis() as u64,
+                            });
+                        }
+                        PolicyAction::Escalate => {
+                            has_escalate = true;
+                        }
+                        PolicyAction::Approve => {}
+                    }
                     continue;
                 }
             };
