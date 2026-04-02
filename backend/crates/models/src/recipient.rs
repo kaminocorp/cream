@@ -56,9 +56,9 @@ impl<'de> Deserialize<'de> for Recipient {
 
         let raw = Raw::deserialize(deserializer)?;
 
-        if raw.identifier.is_empty() {
+        if raw.identifier.trim().is_empty() {
             return Err(serde::de::Error::custom(
-                "recipient.identifier must not be empty",
+                "recipient.identifier must not be empty or whitespace-only",
             ));
         }
         if raw.identifier.len() > MAX_RECIPIENT_IDENTIFIER_LEN {
@@ -138,6 +138,17 @@ mod tests {
         let json = serde_json::json!({
             "type": "merchant",
             "identifier": "",
+        });
+        let result: Result<Recipient, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("identifier"));
+    }
+
+    #[test]
+    fn recipient_whitespace_identifier_rejected() {
+        let json = serde_json::json!({
+            "type": "merchant",
+            "identifier": "   ",
         });
         let result: Result<Recipient, _> = serde_json::from_value(json);
         assert!(result.is_err());

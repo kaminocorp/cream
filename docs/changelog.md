@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.7](#077--2026-04-02) — Recipient.identifier whitespace-only guard
 - [0.7.6](#076--2026-04-02) — Final empty-string guard sweep: HumanReviewRecord.reason and PaymentMetadata optional fields
 - [0.7.5](#075--2026-04-02) — Production hardening: unknown rule_type fail-safe, IdempotencyKey FromStr fix, scorer health clamp, VirtualCard schema alignment, scoring all-zero rejection, optional string empty guards, escalation zero-timeout guard, ProviderId max length
 - [0.7.4](#074--2026-04-02) — Production hardening: fail-safe on misconfigured policy rules, Agent/AgentProfile name validation, invalid regex fail-safe, settled_currency constraint, provider_id index
@@ -30,6 +31,31 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.7 — 2026-04-02
+
+**Phase 7.7: Recipient Identifier Whitespace Guard**
+
+Production readiness review (models) closing the last remaining gap in the established `trim().is_empty()` validation pattern. The `Recipient.identifier` field — the only required, audit-persisted string field still using bare `is_empty()` — now rejects whitespace-only values, matching the pattern applied to every other string field across the models crate. The change is additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`Recipient.identifier` accepts whitespace-only strings — meaningless audit records (HIGH)** — The `identifier` field holds the payment target (merchant ID, email, wallet address, bank account reference). The custom `Deserialize` rejected empty strings (`""`) but allowed whitespace-only values (`"   "`) through. Every other audit-persisted string field in the models crate validates with `trim().is_empty()` — `Justification.summary` (v0.6.15), `ProviderResponseRecord.transaction_id` (v0.7.2), `HumanReviewRecord.reviewer_id` (v0.7.1), `Recipient.name` (v0.7.5), etc. A whitespace-only identifier would be permanently stored in the append-only audit ledger as a formally valid but meaningless payment target. Changed `is_empty()` to `trim().is_empty()`, matching the established pattern
+
+### Added
+
+- `trim().is_empty()` check for `Recipient.identifier` in custom `Deserialize`
+- 1 new test: whitespace-only identifier rejected
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 340/340 passing (152 models + 14 audit + 106 policy + 17 providers + 51 router) |
 
 ---
 
