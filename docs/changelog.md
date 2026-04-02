@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.6](#076--2026-04-02) — Final empty-string guard sweep: HumanReviewRecord.reason and PaymentMetadata optional fields
 - [0.7.5](#075--2026-04-02) — Production hardening: unknown rule_type fail-safe, IdempotencyKey FromStr fix, scorer health clamp, VirtualCard schema alignment, scoring all-zero rejection, optional string empty guards, escalation zero-timeout guard, ProviderId max length
 - [0.7.4](#074--2026-04-02) — Production hardening: fail-safe on misconfigured policy rules, Agent/AgentProfile name validation, invalid regex fail-safe, settled_currency constraint, provider_id index
 - [0.7.3](#073--2026-04-02) — Cross-crate audit: ProviderResponseRecord positive settlement validation, RoutingCandidate score/fee guards, ProviderHealth latency invariant, IdempotencyConfig validation, selector bounds hardening
@@ -29,6 +30,33 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.6 — 2026-04-02
+
+**Phase 7.6: Final Empty-String Guard Sweep — HumanReviewRecord.reason and PaymentMetadata Optional Fields**
+
+Cross-crate production readiness review (models) closing the last two gaps in the established empty-string guard pattern for optional audit-persisted fields. The pattern — `trim().is_empty()` rejection when `Some`, with `None` remaining valid — was applied to `Justification.task_id`, `Justification.expected_value`, and `Recipient.name` in v0.7.5 but missed `HumanReviewRecord.reason` and the three `PaymentMetadata` fields. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`HumanReviewRecord.reason` accepts empty/whitespace-only string when `Some` — unexplained human decision in audit trail (LOW-MEDIUM)** — The `reason` field captures why a human reviewer approved or rejected an escalated payment. The custom `Deserialize` validated max length (`MAX_REVIEW_REASON_LEN`, v0.6.10) but allowed `Some("")` and `Some("   ")` through. A reviewer submitting an empty reason creates an audit entry where the decision rationale is formally present but meaningless — undermining audit trail accountability. `None` (no reason provided) is valid; `Some("")` is not. Added `trim().is_empty()` check before the max-length check, matching the pattern from `Justification.task_id` (v0.7.5)
+- **`PaymentMetadata.agent_session_id`, `.workflow_id`, `.operator_ref` accept empty/whitespace-only strings when `Some` — meaningless audit metadata (LOW)** — All three optional metadata fields validated max length (`MAX_METADATA_FIELD_LEN`, v0.6.9) but not emptiness when present. An agent submitting `"agent_session_id": ""` creates a metadata record that is formally populated but carries no information — polluting audit log queries that filter on metadata presence. Added `trim().is_empty()` check inside `validate_field()` before the max-length check, covering all three fields in one fix
+
+### Added
+
+- `trim().is_empty()` check for `HumanReviewRecord.reason` when `Some` in custom `Deserialize`
+- `trim().is_empty()` check in `PaymentMetadata::validate_field()` covering all three optional fields
+- 9 new tests: HumanReviewRecord empty/whitespace reason + None reason + valid reason (4), PaymentMetadata empty agent_session_id + whitespace workflow_id + empty operator_ref + None fields + valid fields (5)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 339/339 passing (151 models + 14 audit + 106 policy + 17 providers + 51 router) |
 
 ---
 

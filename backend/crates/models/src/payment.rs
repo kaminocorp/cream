@@ -231,6 +231,12 @@ impl<'de> Deserialize<'de> for PaymentMetadata {
             name: &str,
         ) -> Result<(), E> {
             if let Some(s) = field {
+                if s.trim().is_empty() {
+                    return Err(E::custom(format!(
+                        "metadata.{name} must not be empty or whitespace-only when provided — \
+                         use None instead of an empty string"
+                    )));
+                }
                 if s.len() > MAX_METADATA_FIELD_LEN {
                     return Err(E::custom(format!(
                         "metadata.{name} exceeds maximum length of {MAX_METADATA_FIELD_LEN} characters (got {})",
@@ -899,5 +905,65 @@ mod tests {
             p.provider_transaction_id().unwrap().len(),
             MAX_PROVIDER_TRANSACTION_ID_LEN
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.6: PaymentMetadata empty/whitespace guards
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn metadata_rejects_empty_agent_session_id() {
+        let json = serde_json::json!({
+            "agent_session_id": ""
+        });
+        let result: Result<PaymentMetadata, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("agent_session_id"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn metadata_rejects_whitespace_only_workflow_id() {
+        let json = serde_json::json!({
+            "workflow_id": "   "
+        });
+        let result: Result<PaymentMetadata, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("workflow_id"));
+    }
+
+    #[test]
+    fn metadata_rejects_empty_operator_ref() {
+        let json = serde_json::json!({
+            "operator_ref": ""
+        });
+        let result: Result<PaymentMetadata, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("operator_ref"));
+    }
+
+    #[test]
+    fn metadata_accepts_none_fields() {
+        let json = serde_json::json!({});
+        let meta: PaymentMetadata = serde_json::from_value(json).unwrap();
+        assert!(meta.agent_session_id.is_none());
+        assert!(meta.workflow_id.is_none());
+        assert!(meta.operator_ref.is_none());
+    }
+
+    #[test]
+    fn metadata_accepts_valid_fields() {
+        let json = serde_json::json!({
+            "agent_session_id": "sess_123",
+            "workflow_id": "wf_456",
+            "operator_ref": "ref_789"
+        });
+        let meta: PaymentMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.agent_session_id.unwrap(), "sess_123");
+        assert_eq!(meta.workflow_id.unwrap(), "wf_456");
+        assert_eq!(meta.operator_ref.unwrap(), "ref_789");
     }
 }

@@ -221,6 +221,12 @@ impl<'de> Deserialize<'de> for HumanReviewRecord {
             )));
         }
         if let Some(ref reason) = raw.reason {
+            if reason.trim().is_empty() {
+                return Err(serde::de::Error::custom(
+                    "reason must not be empty or whitespace-only when provided — \
+                     use None instead of an empty string",
+                ));
+            }
             if reason.len() > MAX_REVIEW_REASON_LEN {
                 return Err(serde::de::Error::custom(format!(
                     "reason exceeds maximum length of {} characters (got {})",
@@ -382,6 +388,62 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("reviewer_id"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.6: HumanReviewRecord reason empty/whitespace guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn human_review_rejects_empty_reason() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "APPROVE",
+            "reason": "",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let result: Result<HumanReviewRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("reason"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn human_review_rejects_whitespace_only_reason() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "BLOCK",
+            "reason": "   ",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let result: Result<HumanReviewRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("reason"));
+    }
+
+    #[test]
+    fn human_review_accepts_none_reason() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "APPROVE",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let record: HumanReviewRecord = serde_json::from_value(json).unwrap();
+        assert!(record.reason.is_none());
+    }
+
+    #[test]
+    fn human_review_accepts_valid_reason() {
+        let json = serde_json::json!({
+            "reviewer_id": "admin@example.com",
+            "decision": "APPROVE",
+            "reason": "Verified with vendor directly",
+            "decided_at": "2026-04-01T12:00:00Z"
+        });
+        let record: HumanReviewRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.reason.unwrap(), "Verified with vendor directly");
     }
 
     // -----------------------------------------------------------------------
