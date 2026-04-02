@@ -105,9 +105,11 @@ fn resolve_field(field: &str, ctx: &EvaluationContext) -> serde_json::Value {
             None => serde_json::Value::Null,
         },
         unknown => {
-            tracing::warn!(
+            tracing::error!(
                 field = unknown,
-                "unrecognized field in condition, resolving to null"
+                "unrecognized field in condition, resolving to null — \
+                 this likely means a typo in the policy rule configuration, \
+                 which may cause the rule to silently fail to match"
             );
             serde_json::Value::Null
         }
@@ -223,11 +225,17 @@ fn as_decimal(v: &serde_json::Value) -> Option<Decimal> {
 fn regex_matches(text: &str, pattern: &str) -> bool {
     let cache = match REGEX_CACHE.lock() {
         Ok(c) => c,
-        Err(_) => {
-            // Poisoned mutex — fall back to uncached compilation
+        Err(e) => {
+            tracing::error!(error = %e, "REGEX_CACHE mutex poisoned, falling back to uncached compilation");
             return regex::Regex::new(pattern)
                 .map(|re| re.is_match(text))
-                .unwrap_or(false);
+                .unwrap_or_else(|_| {
+                    tracing::error!(
+                        pattern,
+                        "invalid regex in poisoned-mutex fallback — failing safe (true)"
+                    );
+                    true
+                });
         }
     };
 
@@ -255,8 +263,13 @@ fn regex_matches(text: &str, pattern: &str) -> bool {
             result
         }
         Err(e) => {
-            tracing::warn!(pattern, error = %e, "invalid regex pattern in Matches condition, returning false");
-            false
+            tracing::error!(
+                pattern,
+                error = %e,
+                "invalid regex pattern in Matches condition — failing safe (returning true) \
+                 to prevent policy bypass from misconfigured patterns"
+            );
+            true
         }
     }
 }

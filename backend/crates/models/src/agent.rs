@@ -10,11 +10,19 @@ use crate::payment::RailPreference;
 // Agent
 // ---------------------------------------------------------------------------
 
+/// Maximum length for agent and profile name fields. These names are persisted
+/// to the append-only audit ledger (via `AuditEntry.agent_id` resolution) and
+/// must be bounded to prevent unbounded log bloat.
+const MAX_NAME_LEN: usize = 255;
+
 /// An AI agent registered on the platform.
 ///
 /// Each agent has an identity, belongs to a policy profile, and can be
 /// independently suspended or revoked without affecting other agents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Custom `Deserialize` validates that `name` is non-empty and bounded to
+/// `MAX_NAME_LEN` characters, consistent with all other audit-persisted
+/// string fields.
+#[derive(Debug, Clone, Serialize)]
 pub struct Agent {
     pub id: AgentId,
     pub profile_id: AgentProfileId,
@@ -22,6 +30,43 @@ pub struct Agent {
     pub status: AgentStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for Agent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: AgentId,
+            profile_id: AgentProfileId,
+            name: String,
+            status: AgentStatus,
+            created_at: DateTime<Utc>,
+            updated_at: DateTime<Utc>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if raw.name.trim().is_empty() {
+            return Err(serde::de::Error::custom("agent name must not be empty"));
+        }
+        if raw.name.len() > MAX_NAME_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "agent name exceeds maximum length of {MAX_NAME_LEN} characters"
+            )));
+        }
+
+        Ok(Agent {
+            id: raw.id,
+            profile_id: raw.profile_id,
+            name: raw.name,
+            status: raw.status,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+        })
+    }
 }
 
 /// The operational status of an agent.
@@ -106,6 +151,17 @@ impl<'de> Deserialize<'de> for AgentProfile {
         }
 
         let raw = Raw::deserialize(deserializer)?;
+
+        if raw.name.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "agent profile name must not be empty",
+            ));
+        }
+        if raw.name.len() > MAX_NAME_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "agent profile name exceeds maximum length of {MAX_NAME_LEN} characters"
+            )));
+        }
 
         fn validate_positive<E: serde::de::Error>(value: &Decimal, name: &str) -> Result<(), E> {
             if *value <= Decimal::ZERO {
@@ -349,5 +405,91 @@ mod tests {
         let json = sample_profile_json(); // no escalation_threshold field
         let profile: AgentProfile = serde_json::from_value(json).unwrap();
         assert!(profile.escalation_threshold.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.4: Agent and AgentProfile name validation
+    // -----------------------------------------------------------------------
+
+    fn sample_agent_json() -> serde_json::Value {
+        let id = AgentId::new();
+        let profile_id = AgentProfileId::new();
+        serde_json::json!({
+            "id": id.to_string(),
+            "profile_id": profile_id.to_string(),
+            "name": "test_agent",
+            "status": "active",
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-01T00:00:00Z"
+        })
+    }
+
+    #[test]
+    fn agent_valid_name_accepted() {
+        let json = sample_agent_json();
+        let result: Result<Agent, _> = serde_json::from_value(json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn agent_rejects_empty_name() {
+        let mut json = sample_agent_json();
+        json["name"] = serde_json::json!("");
+        let result: Result<Agent, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn agent_rejects_whitespace_only_name() {
+        let mut json = sample_agent_json();
+        json["name"] = serde_json::json!("   ");
+        let result: Result<Agent, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn agent_rejects_oversized_name() {
+        let mut json = sample_agent_json();
+        json["name"] = serde_json::json!("x".repeat(256));
+        let result: Result<Agent, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
+    }
+
+    #[test]
+    fn agent_accepts_max_length_name() {
+        let mut json = sample_agent_json();
+        json["name"] = serde_json::json!("x".repeat(255));
+        let result: Result<Agent, _> = serde_json::from_value(json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn agent_profile_rejects_empty_name() {
+        let mut json = sample_profile_json();
+        json["name"] = serde_json::json!("");
+        let result: Result<AgentProfile, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn agent_profile_rejects_whitespace_only_name() {
+        let mut json = sample_profile_json();
+        json["name"] = serde_json::json!("   ");
+        let result: Result<AgentProfile, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn agent_profile_rejects_oversized_name() {
+        let mut json = sample_profile_json();
+        json["name"] = serde_json::json!("x".repeat(256));
+        let result: Result<AgentProfile, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
     }
 }

@@ -10,6 +10,14 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 /// Uses the profile's daily/weekly/monthly limits. Sums all payments that
 /// count toward spend (settled + in-flight), excluding failed/blocked/rejected.
 ///
+/// **Currency isolation (by design):** Spend totals are computed *per currency*.
+/// A 10,000 SGD daily limit is enforced against SGD payments only — USD payments
+/// are tracked against the USD total independently. This is intentional: summing
+/// across currencies without FX conversion would produce meaningless totals, and
+/// embedding a live FX rate into the policy hot path would add latency, external
+/// dependencies, and non-determinism. Operators who need aggregate cross-currency
+/// limits should set per-currency limits calibrated to their FX expectations.
+///
 /// Monthly window uses calendar month start (1st of current month at 00:00 UTC)
 /// rather than a rolling 30-day window, aligning with how financial reporting
 /// typically works.

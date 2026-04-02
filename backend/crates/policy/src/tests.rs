@@ -956,15 +956,16 @@ fn condition_matches_with_regex() {
 }
 
 #[test]
-fn condition_matches_invalid_regex_returns_false() {
+fn condition_matches_invalid_regex_fails_safe() {
     let ctx = test_context(Decimal::new(100, 0));
     let condition = PolicyCondition::FieldCheck(FieldCheck {
         field: "justification.summary".to_string(),
         op: ComparisonOp::Matches,
         value: serde_json::json!(r"[invalid(regex"),
     });
-    // Invalid regex should return false, not panic
-    assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
+    // Invalid regex should fail safe (return true = match) to prevent
+    // policy bypass from misconfigured patterns, not return false.
+    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
 }
 
 // ---------------------------------------------------------------------------
@@ -972,7 +973,7 @@ fn condition_matches_invalid_regex_returns_false() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn velocity_limit_skips_on_negative_max_count() {
+fn velocity_limit_fails_safe_on_negative_max_count() {
     let ctx = test_context(Decimal::new(100, 0));
     let rule = PolicyRule {
         id: PolicyRuleId::new(),
@@ -988,13 +989,14 @@ fn velocity_limit_skips_on_negative_max_count() {
         escalation: None,
         enabled: true,
     };
-    // Negative max_count should cause the rule to be skipped (Pass), not bypass
+    // Negative max_count = misconfiguration → fail safe by triggering the
+    // rule's action, preventing a silent policy bypass.
     let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
 }
 
 #[test]
-fn velocity_limit_skips_on_zero_window() {
+fn velocity_limit_fails_safe_on_zero_window() {
     let ctx = test_context(Decimal::new(100, 0));
     let rule = PolicyRule {
         id: PolicyRuleId::new(),
@@ -1010,12 +1012,13 @@ fn velocity_limit_skips_on_zero_window() {
         escalation: None,
         enabled: true,
     };
+    // Zero window = misconfiguration → fail safe
     let result = VelocityLimitEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
 }
 
 #[test]
-fn time_window_skips_on_out_of_range_hours() {
+fn time_window_fails_safe_on_out_of_range_hours() {
     let ctx = test_context(Decimal::new(100, 0));
     let rule = PolicyRule {
         id: PolicyRuleId::new(),
@@ -1034,9 +1037,9 @@ fn time_window_skips_on_out_of_range_hours() {
         escalation: None,
         enabled: true,
     };
-    // Out-of-range hours should cause the rule to be skipped (Pass)
+    // Out-of-range hours = misconfiguration → fail safe by triggering
     let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,7 +1203,7 @@ fn merchant_check_equals_operator() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn duplicate_detection_skips_on_negative_window() {
+fn duplicate_detection_fails_safe_on_negative_window() {
     let mut ctx = test_context(Decimal::new(100, 0));
     // Add a payment that would match if window were positive
     ctx.recent_payments.push(PaymentSummary {
@@ -1226,13 +1229,13 @@ fn duplicate_detection_skips_on_negative_window() {
         escalation: None,
         enabled: true,
     };
-    // Negative window should cause the rule to be skipped (Pass), not bypass
+    // Negative window = misconfiguration → fail safe by triggering
     let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
 }
 
 #[test]
-fn duplicate_detection_skips_on_zero_window() {
+fn duplicate_detection_fails_safe_on_zero_window() {
     let ctx = test_context(Decimal::new(100, 0));
     let rule = PolicyRule {
         id: PolicyRuleId::new(),
@@ -1248,8 +1251,9 @@ fn duplicate_detection_skips_on_zero_window() {
         escalation: None,
         enabled: true,
     };
+    // Zero window = misconfiguration → fail safe
     let result = DuplicateDetectionEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
 }
 
 #[test]
@@ -1877,16 +1881,16 @@ fn duplicate_detection_case_insensitive_mixed_case() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn time_window_start_equals_end_skips_rule() {
+fn time_window_start_equals_end_fails_safe() {
     let ctx = test_context(Decimal::new(100, 0));
-    // start == end should be rejected as misconfiguration, rule skips (Pass)
+    // start == end = zero-width window = misconfiguration → fail safe
     let rule = make_rule(
         "time_window",
         serde_json::json!({"allowed_hours_start": 9, "allowed_hours_end": 9}),
         PolicyAction::Block,
     );
     let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
-    assert_eq!(result, RuleResult::Pass); // skipped, not blocking all hours
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
 }
 
 // ---------------------------------------------------------------------------

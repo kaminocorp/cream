@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.4](#074--2026-04-02) — Production hardening: fail-safe on misconfigured policy rules, Agent/AgentProfile name validation, invalid regex fail-safe, settled_currency constraint, provider_id index
 - [0.7.3](#073--2026-04-02) — Cross-crate audit: ProviderResponseRecord positive settlement validation, RoutingCandidate score/fee guards, ProviderHealth latency invariant, IdempotencyConfig validation, selector bounds hardening
 - [0.7.2](#072--2026-04-02) — Production readiness review: ProviderResponseRecord whitespace guards, router config validation enforcement, MerchantCheckEvaluator doc correction
 - [0.7.1](#071--2026-04-02) — Cross-crate consistency review: empty-string guards on audit-bound fields, positive-value validation on spending limits, regex cache comment correction
@@ -27,6 +28,44 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.4 — 2026-04-02
+
+**Phase 7.4: Production Hardening — Fail-Safe Policy Enforcement, Name Validation, Regex Safety, Schema Constraints**
+
+Full-crate production hardening (models, policy, migrations) targeting seven findings from a systematic cross-crate review. The central theme: the policy engine's behavior on misconfigured rules was "fail-open" (skip the rule, let the payment through), which is the opposite of what a financial control plane requires. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **Misconfigured velocity_limit/time_window/duplicate_detection rules silently pass — policy bypass via typo (HIGH)** — When a rule's condition tree was missing required parameters (e.g., typo `"max_cnt"` instead of `"max_count"`), the evaluator logged a warning and returned `RuleResult::Pass`, silently disabling the rule. A single configuration typo could remove a velocity limit, time window, or duplicate guard entirely. Changed all three evaluators to return `RuleResult::Triggered(rule.action)` on misconfiguration — fail-safe (deny) instead of fail-open (allow). Log level upgraded from `warn` to `error` for visibility
+- **Invalid regex pattern in `Matches` condition silently passes — deny-list bypass (MEDIUM)** — A malformed regex (e.g., `[unclosed`) in a `Matches` condition logged a warning and returned `false` (non-match), meaning the associated rule would never fire. For deny-list patterns, this is a silent bypass. Changed `regex_matches()` to return `true` (fail-safe: assume match) on invalid patterns, ensuring the rule triggers. Also added explicit error logging for the poisoned-mutex fallback path
+- **`Agent.name` and `AgentProfile.name` have no length validation — unbounded audit log bloat (MEDIUM)** — Every other string field persisted to the append-only audit ledger has a `MAX_*_LEN` constant and validation in its custom `Deserialize` (established pattern since v0.6.10). These two fields were unbounded, allowing multi-megabyte names that would permanently inflate the audit log. Added custom `Deserialize` for `Agent` with `trim().is_empty()` and `len() > 255` checks; added equivalent name validation to the existing `AgentProfile` deserializer
+- **Unrecognized field names in conditions log at `warn` level — operator misconfigurations not surfaced (LOW)** — A typo in a condition field name (e.g., `"recipient.idenifier"`) resolved to `null`, causing comparisons to silently return `false` and the rule to never fire. While the resolution behavior is kept (changing it would risk false blocks in complex condition trees), the log level is upgraded from `warn` to `error` to ensure misconfigured rules are visible in monitoring and alerting
+- **`settled_currency` column has no CHECK constraint — invalid currency permanently stored (MEDIUM)** — The `currency` column has `chk_payments_currency` (v0.6.10) constraining it to the Rust `Currency` enum values, but `settled_currency` had no equivalent constraint. A buggy provider returning an invalid settlement currency would permanently store invalid data. Added CHECK constraint matching the currency enum, allowing NULL (settlement currency is optional until provider confirms)
+- **Missing index on `payments.provider_id` — sequential scan on reconciliation queries (LOW)** — The payments table had indexes on `agent_id`, `status`, and `created_at` but not `provider_id`. Per-provider reconciliation and settlement queries would full-scan. Added `idx_payments_provider_id`
+
+### Documented
+
+- **Currency-isolated spend/velocity/duplicate limits are by design** — Added explicit doc comments to `SpendRateEvaluator`, `VelocityLimitEvaluator`, and `DuplicateDetectionEvaluator` explaining that per-currency filtering is intentional: summing across currencies without FX conversion would produce meaningless totals, and embedding live FX rates in the policy hot path would add latency, external dependencies, and non-determinism
+
+### Added
+
+- Custom `Deserialize` for `Agent` with `name.trim().is_empty()` and `len() > MAX_NAME_LEN` (255) validation
+- `AgentProfile` deserializer extended with equivalent name validation
+- `MAX_NAME_LEN` constant (255) for agent and profile name fields
+- Migration `20260402200001`: `chk_payments_settled_currency` CHECK constraint + `idx_payments_provider_id` index
+- 8 new tests: Agent empty/whitespace/oversized/max-length name (4), AgentProfile empty/whitespace/oversized name (3), Agent valid name (1)
+- 7 existing tests updated to assert new fail-safe behavior (Triggered instead of Pass)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 313/313 passing (129 models + 14 audit + 103 policy + 17 providers + 50 router) |
 
 ---
 

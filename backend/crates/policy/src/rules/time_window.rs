@@ -20,11 +20,12 @@ impl RuleEvaluator for TimeWindowEvaluator {
         let (start_hour, end_hour, offset_override) = match extract_hours(&rule.condition) {
             Some(h) => h,
             None => {
-                tracing::warn!(
+                tracing::error!(
                     rule_id = %rule.id,
-                    "time_window rule has missing or invalid config (expected allowed_hours_start + allowed_hours_end), skipping"
+                    "time_window rule has missing or invalid config (expected allowed_hours_start + allowed_hours_end), \
+                     failing safe — treating as triggered to prevent policy bypass"
                 );
-                return RuleResult::Pass;
+                return RuleResult::Triggered(rule.action);
             }
         };
 

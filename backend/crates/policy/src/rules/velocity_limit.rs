@@ -10,6 +10,9 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 /// `max_count` (integer) and `window_minutes` (integer). The evaluator counts
 /// all payments that count toward spend (settled + in-flight) within the window,
 /// excluding failed/blocked/rejected.
+///
+/// **Currency isolation (by design):** Transaction counts are computed per
+/// currency. See `SpendRateEvaluator` for rationale.
 pub struct VelocityLimitEvaluator;
 
 impl RuleEvaluator for VelocityLimitEvaluator {
@@ -19,11 +22,12 @@ impl RuleEvaluator for VelocityLimitEvaluator {
         let (max_count, window_minutes) = match extract_params(rule) {
             Some(params) => params,
             None => {
-                tracing::warn!(
+                tracing::error!(
                     rule_id = %rule.id,
-                    "velocity_limit rule has missing or invalid config (expected max_count + window_minutes), skipping"
+                    "velocity_limit rule has missing or invalid config (expected max_count + window_minutes), \
+                     failing safe — treating as triggered to prevent policy bypass"
                 );
-                return RuleResult::Pass;
+                return RuleResult::Triggered(rule.action);
             }
         };
 

@@ -4,10 +4,16 @@ use cream_models::prelude::PolicyRule;
 use crate::context::EvaluationContext;
 use crate::evaluator::{RuleEvaluator, RuleResult};
 
-/// Blocks duplicate payments: same amount + same recipient within N minutes.
+/// Blocks duplicate payments: same amount + same recipient + same currency
+/// within N minutes.
 ///
 /// Default window is 5 minutes. Configurable via FieldCheck value
 /// `{"window_minutes": N}` in the rule condition.
+///
+/// **Currency isolation (by design):** Duplicates must match on currency as
+/// well as amount and recipient. A $100 USD payment and a $100 SGD payment
+/// to the same recipient are not duplicates. See `SpendRateEvaluator` for
+/// rationale on per-currency filtering.
 pub struct DuplicateDetectionEvaluator;
 
 const DEFAULT_WINDOW_MINUTES: i64 = 5;
@@ -27,12 +33,13 @@ impl RuleEvaluator for DuplicateDetectionEvaluator {
         // a future cutoff (never matching any past payment), silently disabling
         // the rule. Log and skip instead of silently passing.
         if window_minutes <= 0 {
-            tracing::warn!(
+            tracing::error!(
                 rule_id = %rule.id,
                 window_minutes,
-                "duplicate_detection window_minutes must be positive, skipping rule"
+                "duplicate_detection window_minutes must be positive, \
+                 failing safe — treating as triggered to prevent policy bypass"
             );
-            return RuleResult::Pass;
+            return RuleResult::Triggered(rule.action);
         }
 
         let cutoff = ctx.current_time - Duration::minutes(window_minutes);
