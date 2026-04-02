@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.2](#072--2026-04-02) — Production readiness review: ProviderResponseRecord whitespace guards, router config validation enforcement, MerchantCheckEvaluator doc correction
 - [0.7.1](#071--2026-04-02) — Cross-crate consistency review: empty-string guards on audit-bound fields, positive-value validation on spending limits, regex cache comment correction
 - [0.7.0](#070--2026-04-01) — Routing engine crate: provider scorer, circuit breakers, idempotency guard, route selector
 - [0.6.16](#0616--2026-04-01) — Production readiness review: ProviderId empty-string validation
@@ -25,6 +26,36 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.2 — 2026-04-02
+
+**Phase 7.2: Production Readiness Review — ProviderResponseRecord Whitespace Guards, Router Config Validation Enforcement, MerchantCheckEvaluator Doc Correction**
+
+Full-crate production readiness review (models, policy, router) targeting three remaining consistency gaps: a deserialization path that accepted empty/whitespace-only strings for audit-persisted provider response fields, router config validation methods that existed but were never called at construction time, and a doc comment that directed operators to the wrong field name. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`ProviderResponseRecord.transaction_id` and `.status` accept empty/whitespace-only strings — meaningless audit entries (MEDIUM)** — The custom `Deserialize` validated max length (500 / 255 chars, v0.6.14) but allowed `""` and `"   "` through. The programmatic write path `Payment::set_provider()` already validates `transaction_id.trim().is_empty()` (v0.7.1), but the deserialization path — the boundary for data coming back from provider APIs — had no equivalent guard. A buggy or malicious provider returning whitespace-only values would permanently store meaningless references in the append-only audit ledger. Added `trim().is_empty()` checks for both `transaction_id` and `status` before the max-length checks, matching the pattern established by `HumanReviewRecord.reviewer_id` (v0.7.1) and `RoutingDecision.reason` (v0.7.1)
+- **`ProviderScorer::new()` and `CircuitBreaker::new()` accept invalid config — silent scoring/breaker corruption (MEDIUM)** — `ScoringWeights::validate()` and `CircuitBreakerConfig::validate()` contain proper checks for NaN, negative values, zero windows, and out-of-range thresholds, but neither `ProviderScorer::new()` nor `CircuitBreaker::new()` called them. Invalid configs (NaN weights, zero error rate windows) would silently corrupt provider scoring or circuit breaker behavior. Changed both constructors to return `Result<Self, RoutingError>` and call `validate()` at construction time. Relaxed `cooldown_secs == 0` rejection — zero cooldown is semantically valid (instant retry on next request)
+- **`MerchantCheckEvaluator` doc comment says field `"merchant"` but code matches `"recipient.identifier"` — operator misconfiguration vector (LOW)** — The doc comment directed operators to use `field: "merchant"` in condition trees, but the implementation matches `field == "recipient.identifier"`. An operator following the docs would create rules that silently fail to match — a policy bypass via misconfiguration. Updated doc comment to match implementation and corrected allow-list/deny-list semantics description
+
+### Added
+
+- `trim().is_empty()` whitespace validation for `ProviderResponseRecord.transaction_id` and `.status` in custom `Deserialize`
+- `ProviderScorer::new()` returns `Result<Self, RoutingError>` with `ScoringWeights::validate()` call
+- `CircuitBreaker::new()` returns `Result<Self, RoutingError>` with `CircuitBreakerConfig::validate()` call
+- `Debug` impl for `ProviderScorer` and `CircuitBreaker` (required by `Result::unwrap_err()` in tests)
+- 8 new tests: ProviderResponseRecord empty/whitespace transaction_id (2), empty/whitespace status (2), ProviderScorer rejects NaN/negative weights (2), CircuitBreaker rejects zero window/invalid threshold (2)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 293/293 passing (113 models + 14 audit + 103 policy + 17 providers + 46 router) |
 
 ---
 

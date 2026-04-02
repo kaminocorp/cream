@@ -6,6 +6,7 @@ use cream_models::prelude::{
 };
 
 use crate::config::ScoringWeights;
+use crate::error::RoutingError;
 
 // ---------------------------------------------------------------------------
 // Provider capabilities (scaffold — hardcoded in production phases 12-14)
@@ -45,13 +46,15 @@ pub struct ScoredProviderInput {
 /// Each provider is assigned a composite score based on cost, speed, health,
 /// and rail preference match. Binary filters (circuit breaker, currency,
 /// rail policy) exclude non-viable providers before scoring.
+#[derive(Debug)]
 pub struct ProviderScorer {
     weights: ScoringWeights,
 }
 
 impl ProviderScorer {
-    pub fn new(weights: ScoringWeights) -> Self {
-        Self { weights }
+    pub fn new(weights: ScoringWeights) -> Result<Self, RoutingError> {
+        weights.validate()?;
+        Ok(Self { weights })
     }
 
     /// Score all viable providers and return ranked candidates (highest score first).
@@ -321,7 +324,7 @@ mod tests {
 
     #[test]
     fn single_provider_returns_candidate() {
-        let scorer = ProviderScorer::new(ScoringWeights::default());
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
         let providers = vec![make_input(
             make_caps(
                 "stripe",
@@ -346,7 +349,7 @@ mod tests {
             health: 0.0,
             preference: 0.0,
         };
-        let scorer = ProviderScorer::new(weights);
+        let scorer = ProviderScorer::new(weights).unwrap();
         let providers = vec![
             make_input(
                 make_caps(
@@ -380,7 +383,7 @@ mod tests {
             health: 0.0,
             preference: 0.0,
         };
-        let scorer = ProviderScorer::new(weights);
+        let scorer = ProviderScorer::new(weights).unwrap();
         let providers = vec![
             make_input(
                 make_caps(
@@ -414,7 +417,7 @@ mod tests {
             health: 1.0,
             preference: 0.0,
         };
-        let scorer = ProviderScorer::new(weights);
+        let scorer = ProviderScorer::new(weights).unwrap();
         let providers = vec![
             make_input(
                 make_caps(
@@ -442,7 +445,7 @@ mod tests {
 
     #[test]
     fn open_circuit_excluded() {
-        let scorer = ProviderScorer::new(ScoringWeights::default());
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
         let mut health = make_health("broken", 0.9, 100);
         health.circuit_state = CircuitState::Open;
 
@@ -462,7 +465,7 @@ mod tests {
 
     #[test]
     fn unsupported_currency_excluded() {
-        let scorer = ProviderScorer::new(ScoringWeights::default());
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
         let providers = vec![make_input(
             make_caps(
                 "usd_only",
@@ -480,7 +483,7 @@ mod tests {
 
     #[test]
     fn rail_restriction_filters_providers() {
-        let scorer = ProviderScorer::new(ScoringWeights::default());
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
         let providers = vec![
             make_input(
                 make_caps(
@@ -519,7 +522,7 @@ mod tests {
             health: 0.0,
             preference: 1.0,
         };
-        let scorer = ProviderScorer::new(weights);
+        let scorer = ProviderScorer::new(weights).unwrap();
 
         let providers = vec![
             make_input(
@@ -557,7 +560,7 @@ mod tests {
             health: 0.0,
             preference: 1.0,
         };
-        let scorer = ProviderScorer::new(weights);
+        let scorer = ProviderScorer::new(weights).unwrap();
 
         let providers = vec![
             make_input(
@@ -589,7 +592,7 @@ mod tests {
 
     #[test]
     fn empty_providers_returns_empty() {
-        let scorer = ProviderScorer::new(ScoringWeights::default());
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
         let result = scorer.score_candidates(&[], &sample_request(), &sample_profile());
         assert!(result.is_empty());
     }
@@ -602,7 +605,7 @@ mod tests {
             health: 0.0,
             preference: 0.0,
         };
-        let scorer = ProviderScorer::new(weights);
+        let scorer = ProviderScorer::new(weights).unwrap();
         let providers = vec![make_input(
             make_caps(
                 "stripe",
@@ -620,7 +623,7 @@ mod tests {
 
     #[test]
     fn half_open_circuit_not_excluded() {
-        let scorer = ProviderScorer::new(ScoringWeights::default());
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
         let mut health = make_health("recovering", 0.3, 200);
         health.circuit_state = CircuitState::HalfOpen;
 
@@ -636,5 +639,31 @@ mod tests {
 
         let result = scorer.score_candidates(&providers, &sample_request(), &sample_profile());
         assert_eq!(result.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.2: ProviderScorer rejects invalid config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scorer_rejects_nan_weight() {
+        let weights = ScoringWeights {
+            cost: f64::NAN,
+            ..Default::default()
+        };
+        let result = ProviderScorer::new(weights);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cost"));
+    }
+
+    #[test]
+    fn scorer_rejects_negative_weight() {
+        let weights = ScoringWeights {
+            speed: -0.1,
+            ..Default::default()
+        };
+        let result = ProviderScorer::new(weights);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("speed"));
     }
 }

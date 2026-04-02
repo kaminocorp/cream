@@ -96,11 +96,7 @@ impl CircuitBreakerConfig {
         if self.window_secs == 0 {
             return Err(RoutingError::Config("window_secs must be > 0".to_string()));
         }
-        if self.cooldown_secs == 0 {
-            return Err(RoutingError::Config(
-                "cooldown_secs must be > 0".to_string(),
-            ));
-        }
+        // cooldown_secs == 0 is valid: means "retry on next request" (instant HalfOpen)
         if self.half_open_max_requests == 0 {
             return Err(RoutingError::Config(
                 "half_open_max_requests must be > 0".to_string(),

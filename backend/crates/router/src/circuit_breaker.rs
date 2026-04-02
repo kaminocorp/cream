@@ -85,9 +85,21 @@ pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
 }
 
+impl std::fmt::Debug for CircuitBreaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitBreaker")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CircuitBreaker {
-    pub fn new(store: Box<dyn CircuitBreakerStore>, config: CircuitBreakerConfig) -> Self {
-        Self { store, config }
+    pub fn new(
+        store: Box<dyn CircuitBreakerStore>,
+        config: CircuitBreakerConfig,
+    ) -> Result<Self, RoutingError> {
+        config.validate()?;
+        Ok(Self { store, config })
     }
 
     /// Record a successful provider call.
@@ -378,7 +390,10 @@ mod tests {
             half_open_max_requests: 3,
         };
         let provider = ProviderId::new("test_provider");
-        (CircuitBreaker::new(Box::new(store), config), provider)
+        (
+            CircuitBreaker::new(Box::new(store), config).unwrap(),
+            provider,
+        )
     }
 
     #[tokio::test]
@@ -424,7 +439,7 @@ mod tests {
             ..Default::default()
         };
         let pid = ProviderId::new("test");
-        let breaker = CircuitBreaker::new(Box::new(store), config);
+        let breaker = CircuitBreaker::new(Box::new(store), config).unwrap();
 
         // Trip the breaker
         for _ in 0..5 {
@@ -447,7 +462,7 @@ mod tests {
             ..Default::default()
         };
         let pid = ProviderId::new("test");
-        let breaker = CircuitBreaker::new(Box::new(store), config);
+        let breaker = CircuitBreaker::new(Box::new(store), config).unwrap();
 
         // Trip → HalfOpen
         for _ in 0..5 {
@@ -470,7 +485,7 @@ mod tests {
             ..Default::default()
         };
         let pid = ProviderId::new("test");
-        let breaker = CircuitBreaker::new(Box::new(store), config);
+        let breaker = CircuitBreaker::new(Box::new(store), config).unwrap();
 
         // Trip → HalfOpen
         for _ in 0..5 {
@@ -493,20 +508,48 @@ mod tests {
         let store = InMemoryCircuitBreakerStore::new();
         let config = CircuitBreakerConfig {
             error_threshold: 0.5,
-            cooldown_secs: 0,
+            cooldown_secs: 0, // Immediate cooldown for testing
             half_open_max_requests: 2,
             ..Default::default()
         };
         let pid = ProviderId::new("test");
-        let breaker = CircuitBreaker::new(Box::new(store), config);
+        let breaker = CircuitBreaker::new(Box::new(store), config).unwrap();
 
-        // Trip → HalfOpen
+        // Trip → HalfOpen (cooldown=0 → instant transition)
         for _ in 0..5 {
             breaker.record_failure(&pid).await.unwrap();
         }
         assert!(breaker.is_allowed(&pid).await.unwrap()); // count=1
         assert!(breaker.is_allowed(&pid).await.unwrap()); // count=2
         assert!(!breaker.is_allowed(&pid).await.unwrap()); // count=2 >= max=2 → blocked
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.2: CircuitBreaker rejects invalid config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn circuit_breaker_rejects_zero_window() {
+        let store = InMemoryCircuitBreakerStore::new();
+        let config = CircuitBreakerConfig {
+            window_secs: 0,
+            ..Default::default()
+        };
+        let result = CircuitBreaker::new(Box::new(store), config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("window_secs"));
+    }
+
+    #[test]
+    fn circuit_breaker_rejects_threshold_above_one() {
+        let store = InMemoryCircuitBreakerStore::new();
+        let config = CircuitBreakerConfig {
+            error_threshold: 1.5,
+            ..Default::default()
+        };
+        let result = CircuitBreaker::new(Box::new(store), config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("error_threshold"));
     }
 
     #[tokio::test]

@@ -5,9 +5,9 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 
 /// Blocks or escalates payments to merchants on a deny list, or not on an allow list.
 ///
-/// The rule's condition tree should contain a FieldCheck with field "merchant"
+/// The rule's condition tree should contain a FieldCheck with field "recipient.identifier"
 /// and a value that is an array of merchant identifiers. The comparison op
-/// determines allow-list (In) vs deny-list (NotIn) semantics.
+/// determines allow-list (NotIn) vs deny-list (In) semantics.
 pub struct MerchantCheckEvaluator;
 
 impl RuleEvaluator for MerchantCheckEvaluator {

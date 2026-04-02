@@ -257,7 +257,7 @@ mod tests {
             .collect();
 
         RouteSelector::new(
-            ProviderScorer::new(crate::config::ScoringWeights::default()),
+            ProviderScorer::new(crate::config::ScoringWeights::default()).unwrap(),
             cap_map,
             Box::new(StaticHealthSource::new(health_map)),
         )
@@ -404,7 +404,7 @@ mod tests {
 
         // Empty health source — get_health will fail
         let selector = RouteSelector::new(
-            ProviderScorer::new(crate::config::ScoringWeights::default()),
+            ProviderScorer::new(crate::config::ScoringWeights::default()).unwrap(),
             cap_map,
             Box::new(StaticHealthSource::new(HashMap::new())),
         );

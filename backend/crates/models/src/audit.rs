@@ -113,12 +113,22 @@ impl<'de> Deserialize<'de> for ProviderResponseRecord {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        if raw.transaction_id.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "transaction_id must not be empty or whitespace-only",
+            ));
+        }
         if raw.transaction_id.len() > MAX_PROVIDER_TRANSACTION_ID_LEN {
             return Err(serde::de::Error::custom(format!(
                 "transaction_id exceeds maximum length of {} characters (got {})",
                 MAX_PROVIDER_TRANSACTION_ID_LEN,
                 raw.transaction_id.len()
             )));
+        }
+        if raw.status.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "status must not be empty or whitespace-only",
+            ));
         }
         if raw.status.len() > MAX_PROVIDER_STATUS_LEN {
             return Err(serde::de::Error::custom(format!(
@@ -366,6 +376,76 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("reviewer_id"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.2: ProviderResponseRecord empty/whitespace guards
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_response_record_rejects_empty_transaction_id() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "",
+            "status": "succeeded",
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("transaction_id"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn provider_response_record_rejects_whitespace_transaction_id() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "   ",
+            "status": "succeeded",
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("transaction_id"));
+    }
+
+    #[test]
+    fn provider_response_record_rejects_empty_status() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "ch_123abc",
+            "status": "",
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("status"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn provider_response_record_rejects_whitespace_status() {
+        let json = serde_json::json!({
+            "provider": "stripe_issuing",
+            "transaction_id": "ch_123abc",
+            "status": "   ",
+            "amount_settled": "149.99",
+            "currency": "S_G_D",
+            "latency_ms": 187
+        });
+        let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("status"));
     }
 
     #[test]
