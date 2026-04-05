@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.12](#0712--2026-04-05) — Circuit breaker clock skew guard and u32 counter overflow protection
 - [0.7.11](#0711--2026-04-05) — Circuit breaker half-open fix: close only when all probe requests succeed, not on first success
 - [0.7.10](#0710--2026-04-05) — Cross-crate production review: Settled/Failed must have provider fields, audit deterministic ordering, settlement field pairing constraint, scorer deterministic tiebreaker, time_window offset bounds
 - [0.7.9](#079--2026-04-05) — Production review: Payment provider field state machine invariants, AuditEntry on_chain_tx_hash bounds, regex cache comment, virtual_cards composite unique constraint
@@ -35,6 +36,31 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.12 — 2026-04-05
+
+**Phase 7.12: Circuit Breaker Clock Skew Guard & Counter Overflow Protection**
+
+Production readiness review (router) fixing two defensive hardening gaps in the circuit breaker. The cooldown elapsed check now guards against clock skew (NTP adjustment causing `opened_at` to be in the future relative to `now`), and half-open counters use saturating arithmetic to prevent u32 overflow. Both changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **Circuit breaker cooldown check underflows on clock skew — premature HalfOpen transition (LOW-MEDIUM)** — `is_allowed()` computed elapsed time as `now - opened_at` without verifying `now >= opened_at`. If NTP adjusted the system clock backward after a breaker opened, the i64 subtraction would underflow (wrap to a large positive value in release mode, panic in debug mode), passing the cooldown check and prematurely transitioning an Open breaker to HalfOpen. Added `now >= opened` guard before the subtraction
+- **Half-open counters use unchecked u32 arithmetic — theoretical overflow (LOW)** — `half_open_count` and `half_open_success_count` in `InMemoryCircuitBreakerStore` used `+= 1`, which could theoretically overflow at `u32::MAX` (4 billion increments). Switched to `saturating_add(1)` for zero-cost overflow protection. The trait contract now implicitly expects saturating semantics from all store implementations
+
+### Added
+
+- 1 new test: `clock_skew_does_not_prematurely_transition_to_half_open` — manually sets `opened_at` to 60 seconds in the future, verifies the breaker remains Open and `is_allowed()` returns false
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 366/366 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router) |
 
 ---
 

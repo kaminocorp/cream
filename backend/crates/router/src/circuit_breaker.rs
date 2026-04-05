@@ -204,7 +204,7 @@ impl CircuitBreaker {
                 let opened_at = self.store.get_opened_at(provider_id).await?;
                 let now = Utc::now().timestamp();
                 if let Some(opened) = opened_at {
-                    if (now - opened) >= self.config.cooldown_secs as i64 {
+                    if now >= opened && (now - opened) >= self.config.cooldown_secs as i64 {
                         tracing::info!(
                             provider = %provider_id,
                             "circuit breaker transitioning to half-open after cooldown"
@@ -368,7 +368,7 @@ impl CircuitBreakerStore for InMemoryCircuitBreakerStore {
     ) -> Result<u32, RoutingError> {
         let mut data = self.data.lock().unwrap();
         let state = data.entry(provider_id.as_str().to_owned()).or_default();
-        state.half_open_count += 1;
+        state.half_open_count = state.half_open_count.saturating_add(1);
         Ok(state.half_open_count)
     }
 
@@ -389,7 +389,7 @@ impl CircuitBreakerStore for InMemoryCircuitBreakerStore {
     ) -> Result<u32, RoutingError> {
         let mut data = self.data.lock().unwrap();
         let state = data.entry(provider_id.as_str().to_owned()).or_default();
-        state.half_open_success_count += 1;
+        state.half_open_success_count = state.half_open_success_count.saturating_add(1);
         Ok(state.half_open_success_count)
     }
 
@@ -629,6 +629,32 @@ mod tests {
         breaker.reset(&pid).await.unwrap();
         assert_eq!(breaker.state(&pid).await.unwrap(), CircuitState::Closed);
         assert!(breaker.is_allowed(&pid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn clock_skew_does_not_prematurely_transition_to_half_open() {
+        // Simulate clock skew: set opened_at to 60 seconds in the future.
+        // Without the `now >= opened` guard, (now - future_ts) would underflow
+        // and wrap to a large positive value, passing the cooldown check.
+        let store = InMemoryCircuitBreakerStore::new();
+        let pid = ProviderId::new("test");
+
+        // Manually put the breaker in Open state with a future opened_at
+        store.set_state(&pid, CircuitState::Open).await.unwrap();
+        let future_ts = Utc::now().timestamp() + 60;
+        store.set_opened_at(&pid, future_ts).await.unwrap();
+
+        let config = CircuitBreakerConfig {
+            error_threshold: 0.5,
+            cooldown_secs: 30,
+            half_open_max_requests: 2,
+            ..Default::default()
+        };
+        let breaker = CircuitBreaker::new(Box::new(store), config).unwrap();
+
+        // Should remain Open — cooldown cannot have elapsed if opened_at is in the future
+        assert!(!breaker.is_allowed(&pid).await.unwrap());
+        assert_eq!(breaker.state(&pid).await.unwrap(), CircuitState::Open);
     }
 
     #[tokio::test]
