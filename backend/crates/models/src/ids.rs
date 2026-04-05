@@ -103,6 +103,11 @@ typed_id!(WebhookEndpointId, "whk");
 // IdempotencyKey — String-based, not UUID-based
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed length for an [`IdempotencyKey`].
+/// Idempotency keys are indexed in Redis and persisted to the database —
+/// unbounded keys would bloat both stores.
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct IdempotencyKey(String);
 
@@ -114,6 +119,12 @@ impl<'de> Deserialize<'de> for IdempotencyKey {
                 "idempotency_key must not be empty",
             ));
         }
+        if s.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "idempotency_key exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN} (got {})",
+                s.len()
+            )));
+        }
         Ok(Self(s))
     }
 }
@@ -122,6 +133,11 @@ impl IdempotencyKey {
     pub fn new(key: impl Into<String>) -> Self {
         let key = key.into();
         assert!(!key.is_empty(), "IdempotencyKey must not be empty");
+        assert!(
+            key.len() <= MAX_IDEMPOTENCY_KEY_LEN,
+            "IdempotencyKey exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN} (got {})",
+            key.len()
+        );
         Self(key)
     }
 
@@ -132,6 +148,12 @@ impl IdempotencyKey {
             return Err(DomainError::InvalidIdFormat(
                 "IdempotencyKey must not be empty".to_string(),
             ));
+        }
+        if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(DomainError::InvalidIdFormat(format!(
+                "IdempotencyKey exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN} (got {})",
+                key.len()
+            )));
         }
         Ok(Self(key))
     }
@@ -158,6 +180,12 @@ impl FromStr for IdempotencyKey {
             return Err(DomainError::InvalidIdFormat(
                 "IdempotencyKey must not be empty after prefix".to_string(),
             ));
+        }
+        if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(DomainError::InvalidIdFormat(format!(
+                "IdempotencyKey exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN} (got {})",
+                key.len()
+            )));
         }
         Ok(Self(key.to_owned()))
     }
@@ -251,5 +279,48 @@ mod tests {
         let result: Result<IdempotencyKey, _> = "idem_abc-123".parse();
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_str(), "abc-123");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.8: IdempotencyKey max length validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn idempotency_key_try_new_rejects_oversized() {
+        let long = "x".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1);
+        let result = IdempotencyKey::try_new(long);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
+    }
+
+    #[test]
+    fn idempotency_key_try_new_at_limit_accepted() {
+        let exact = "y".repeat(MAX_IDEMPOTENCY_KEY_LEN);
+        let result = IdempotencyKey::try_new(exact);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn idempotency_key_deserialize_rejects_oversized() {
+        let long = "z".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1);
+        let json = serde_json::Value::String(long);
+        let result: Result<IdempotencyKey, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
+    }
+
+    #[test]
+    fn idempotency_key_from_str_rejects_oversized() {
+        let long = format!("idem_{}", "k".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1));
+        let result: Result<IdempotencyKey, _> = long.parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum length"));
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum length")]
+    fn idempotency_key_new_panics_on_oversized() {
+        let long = "p".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1);
+        let _ = IdempotencyKey::new(long);
     }
 }

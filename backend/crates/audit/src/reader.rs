@@ -191,7 +191,7 @@ impl QueryBuilder {
         self.bind_idx += 1;
         let offset_idx = self.bind_idx;
         self.sql.push_str(&format!(
-            " ORDER BY timestamp DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"
+            " ORDER BY timestamp DESC, id DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"
         ));
         self.binds.push(BindValue::Int64(limit));
         self.binds.push(BindValue::Int64(offset));

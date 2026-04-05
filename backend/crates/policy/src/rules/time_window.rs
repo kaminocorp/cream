@@ -97,18 +97,18 @@ fn extract_hours(condition: &PolicyCondition) -> Option<(u32, u32, Option<i32>)>
             let start = check.value.get("allowed_hours_start")?.as_u64()? as u32;
             let end = check.value.get("allowed_hours_end")?.as_u64()? as u32;
             if start > 23 || end > 23 {
-                tracing::warn!(
+                tracing::error!(
                     start,
                     end,
-                    "time_window hours out of 0-23 range, rule will be skipped"
+                    "time_window hours out of 0-23 range — failing safe (rule will trigger)"
                 );
                 return None;
             }
             if start == end {
-                tracing::warn!(
+                tracing::error!(
                     start,
                     end,
-                    "time_window start == end defines a zero-width window (blocks all hours), skipping as likely misconfiguration"
+                    "time_window start == end defines a zero-width window — failing safe (rule will trigger)"
                 );
                 return None;
             }

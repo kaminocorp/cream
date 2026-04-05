@@ -93,7 +93,7 @@ impl<'de> Deserialize<'de> for PolicyCondition {
         }
 
         fn parse_depth(val: serde_json::Value, depth: usize) -> Result<PolicyCondition, String> {
-            if depth > MAX_CONDITION_DEPTH {
+            if depth >= MAX_CONDITION_DEPTH {
                 return Err(format!(
                     "PolicyCondition nesting exceeds maximum depth of {MAX_CONDITION_DEPTH}"
                 ));

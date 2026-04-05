@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.8](#078--2026-04-05) — Cross-crate production review: PaymentCategory::Other empty guard, IdempotencyKey max length, audit query deterministic ordering, time_window log accuracy, condition depth off-by-one
 - [0.7.7](#077--2026-04-02) — Recipient.identifier whitespace-only guard
 - [0.7.6](#076--2026-04-02) — Final empty-string guard sweep: HumanReviewRecord.reason and PaymentMetadata optional fields
 - [0.7.5](#075--2026-04-02) — Production hardening: unknown rule_type fail-safe, IdempotencyKey FromStr fix, scorer health clamp, VirtualCard schema alignment, scoring all-zero rejection, optional string empty guards, escalation zero-timeout guard, ProviderId max length
@@ -31,6 +32,38 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.8 — 2026-04-05
+
+**Phase 7.8: Cross-Crate Production Readiness Review**
+
+Systematic cross-crate review (models, audit, policy) targeting five findings from a full codebase audit of Phases 1-7. The central theme: closing the last remaining gaps in the established validation patterns — empty-string guards on enum payloads, length bounds on indexed keys, deterministic query ordering, accurate fail-safe log messages, and exact depth enforcement. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **`PaymentCategory::Other` accepts empty/whitespace-only strings — meaningless audit categories (MEDIUM)** — The `Other(String)` variant checked `len() > MAX_CATEGORY_OTHER_LEN` but allowed `Other("")` and `Other("   ")` through. Every other audit-persisted string field validates with `trim().is_empty()` — `Justification.summary` (v0.6.15), `Recipient.identifier` (v0.7.7), `HumanReviewRecord.reason` (v0.7.6), etc. A whitespace-only category would be permanently stored in the append-only audit ledger as a formally valid but meaningless classification. Added `trim().is_empty()` check before the max-length check, matching the established pattern
+- **`IdempotencyKey` has no maximum length — unbounded database index and Redis key bloat (MEDIUM)** — Every other audit-persisted string field has a `MAX_*_LEN` constant (established pattern since v0.6.10). Idempotency keys were unbounded. An arbitrarily long key would bloat the database index and Redis store. Added `MAX_IDEMPOTENCY_KEY_LEN = 255` with validation in `new()` (panic), `try_new()` (Result), `FromStr`, and custom `Deserialize`
+- **Audit query `ORDER BY timestamp DESC` is non-deterministic under timestamp collision — pagination instability (LOW-MEDIUM)** — When multiple audit entries share the same timestamp (plausible at microsecond precision under high throughput), their ordering is undefined. Paginated clients could see duplicates or miss records across page boundaries. Added `id DESC` as secondary sort — IDs are UUIDv7 (time-sortable), guaranteeing deterministic ordering even when timestamps collide
+- **Time window `extract_hours` log messages say "skipped" but rule actually triggers — misleading operator diagnostics (LOW)** — When `start > 23`, `end > 23`, or `start == end`, `extract_hours` returns `None`, which the evaluator at line 28 treats as `RuleResult::Triggered(rule.action)` — the rule fires (fail-safe), it does not skip. The log messages said "rule will be skipped" and "skipping as likely misconfiguration", actively misleading operators debugging policy behavior. Corrected to "failing safe (rule will trigger)" and upgraded from `warn` to `error` to match the severity of a misconfigured rule
+- **`PolicyCondition` depth check allows one more level than `MAX_CONDITION_DEPTH` advertises — off-by-one (LOW)** — `parse_depth` checked `depth > MAX_CONDITION_DEPTH` starting from depth 0, meaning a tree at depth 32 passed the `32 > 32` check. The effective max was 33 levels while the constant says 32. Changed to `depth >= MAX_CONDITION_DEPTH` so the constant means what it says
+
+### Added
+
+- `MAX_IDEMPOTENCY_KEY_LEN` constant (255) for idempotency key length validation
+- Max-length validation on `IdempotencyKey::new()` (panic), `try_new()` (Result), `FromStr`, and `Deserialize`
+- `trim().is_empty()` check for `PaymentCategory::Other` in custom `Deserialize`
+- Secondary sort `id DESC` in audit query `ORDER BY` clause
+- 7 new tests: PaymentCategory::Other empty + whitespace (2), IdempotencyKey oversized try_new + at-limit + deserialize + from_str + panic (5)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 347/347 passing (159 models + 14 audit + 106 policy + 17 providers + 51 router) |
 
 ---
 

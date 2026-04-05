@@ -153,6 +153,11 @@ impl<'de> Deserialize<'de> for PaymentCategory {
             Raw::Marketing => Ok(Self::Marketing),
             Raw::Legal => Ok(Self::Legal),
             Raw::Other(s) => {
+                if s.trim().is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "PaymentCategory::Other must not be empty or whitespace-only",
+                    ));
+                }
                 if s.len() > MAX_CATEGORY_OTHER_LEN {
                     return Err(serde::de::Error::custom(format!(
                         "PaymentCategory::Other exceeds maximum length of {} characters (got {})",
@@ -321,6 +326,28 @@ mod tests {
     // -----------------------------------------------------------------------
     // Phase 7.5: empty/whitespace optional string fields
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Phase 7.8: PaymentCategory::Other empty/whitespace guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn category_other_empty_rejected() {
+        let json = r#"{"other":""}"#;
+        let result: Result<PaymentCategory, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn category_other_whitespace_only_rejected() {
+        let json = r#"{"other":"   \t  "}"#;
+        let result: Result<PaymentCategory, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty"));
+    }
 
     #[test]
     fn justification_empty_task_id_rejected() {
