@@ -374,16 +374,35 @@ impl<'de> Deserialize<'de> for Payment {
             return Err(serde::de::Error::custom("created_at must be <= updated_at"));
         }
 
-        // Invariant: provider fields should not be set before submission
-        let pre_submission = matches!(
+        // Invariant 1: provider fields must not be set for statuses reached
+        // before provider assignment. Per the state machine, only Approved and
+        // Submitted can have provider fields set (via set_provider()), and
+        // terminal states Settled/Failed inherit them from Submitted.
+        let no_provider = matches!(
             raw.status,
-            PaymentStatus::Pending | PaymentStatus::Validating | PaymentStatus::PendingApproval
+            PaymentStatus::Pending
+                | PaymentStatus::Validating
+                | PaymentStatus::PendingApproval
+                | PaymentStatus::Blocked
+                | PaymentStatus::Rejected
+                | PaymentStatus::TimedOut
         );
-        if pre_submission && (raw.provider_id.is_some() || raw.provider_transaction_id.is_some()) {
+        if no_provider && (raw.provider_id.is_some() || raw.provider_transaction_id.is_some()) {
             return Err(serde::de::Error::custom(format!(
                 "provider_id and provider_transaction_id must not be set for status {:?}",
                 raw.status
             )));
+        }
+
+        // Invariant 2: provider fields must be set as a pair (both or neither).
+        // set_provider() always assigns both atomically; asymmetry indicates
+        // data corruption.
+        let has_provider_id = raw.provider_id.is_some();
+        let has_transaction_id = raw.provider_transaction_id.is_some();
+        if has_provider_id != has_transaction_id {
+            return Err(serde::de::Error::custom(
+                "provider_id and provider_transaction_id must be set together or both absent",
+            ));
         }
 
         Ok(Payment {
@@ -965,5 +984,83 @@ mod tests {
         assert_eq!(meta.agent_session_id.unwrap(), "sess_123");
         assert_eq!(meta.workflow_id.unwrap(), "wf_456");
         assert_eq!(meta.operator_ref.unwrap(), "ref_789");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.9: Payment provider field invariants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn payment_deserialize_rejects_provider_id_on_blocked() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Blocked).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::json!("prov_stripe");
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("provider_id"));
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_provider_id_on_rejected() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::PendingApproval).unwrap();
+        p.transition(PaymentStatus::Rejected).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::json!("prov_stripe");
+        val["provider_transaction_id"] = serde_json::json!("ch_123");
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("provider_id"));
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_provider_id_on_timed_out() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::PendingApproval).unwrap();
+        p.transition(PaymentStatus::TimedOut).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::json!("prov_stripe");
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("provider_id"));
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_asymmetric_provider_fields() {
+        // provider_id set but provider_transaction_id absent
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::json!("prov_stripe");
+        // provider_transaction_id remains null
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("set together"));
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_asymmetric_provider_fields_reverse() {
+        // provider_transaction_id set but provider_id absent
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_transaction_id"] = serde_json::json!("ch_123");
+        // provider_id remains null
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("set together"));
     }
 }

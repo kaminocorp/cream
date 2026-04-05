@@ -8,7 +8,8 @@ use crate::context::EvaluationContext;
 
 /// Cache for compiled regex patterns. Avoids re-compiling the same pattern on
 /// every `Matches` evaluation. Bounded to prevent unbounded memory growth from
-/// operator-defined patterns — evicts all entries when the limit is reached.
+/// operator-defined patterns — evicts one arbitrary entry when the limit is
+/// reached, so most hot patterns survive.
 static REGEX_CACHE: LazyLock<Mutex<std::collections::HashMap<String, regex::Regex>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 

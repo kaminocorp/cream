@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.9](#079--2026-04-05) — Production review: Payment provider field state machine invariants, AuditEntry on_chain_tx_hash bounds, regex cache comment, virtual_cards composite unique constraint
 - [0.7.8](#078--2026-04-05) — Cross-crate production review: PaymentCategory::Other empty guard, IdempotencyKey max length, audit query deterministic ordering, time_window log accuracy, condition depth off-by-one
 - [0.7.7](#077--2026-04-02) — Recipient.identifier whitespace-only guard
 - [0.7.6](#076--2026-04-02) — Final empty-string guard sweep: HumanReviewRecord.reason and PaymentMetadata optional fields
@@ -32,6 +33,39 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.9 — 2026-04-05
+
+**Phase 7.9: Production Review — State Machine Invariants, Audit Bounds, Schema Integrity**
+
+Systematic cross-crate review (models, audit, policy, migrations) targeting five findings from a full seven-agent parallel review of Phases 1-7. The central theme: closing gaps in state machine invariant enforcement at the deserialization boundary, completing the established length-bound pattern on the last unbounded audit-persisted string, correcting a misleading comment, and adding a missing database uniqueness constraint. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **Payment deserialization allows provider fields on no-provider terminal statuses — state machine invariant gap (MEDIUM)** — The pre-submission check covered `Pending`, `Validating`, and `PendingApproval`, but `Blocked`, `Rejected`, and `TimedOut` are also reached before provider assignment (per the state machine: `Validating→Blocked`, `PendingApproval→Rejected`, `PendingApproval→TimedOut→Blocked`). A corrupted database row with `status=blocked, provider_id=some_id` would deserialize without error, violating the invariant that `set_provider()` only operates in `Approved` or `Submitted` status. Extended the no-provider check to cover all six pre-provider statuses
+- **Payment deserialization allows asymmetric provider fields — impossible state accepted (MEDIUM)** — `set_provider()` always assigns `provider_id` and `provider_transaction_id` atomically as a pair, but deserialization did not verify they were set together. A row with `provider_id=Some, provider_transaction_id=None` (or vice versa) would load successfully, creating an in-memory state that could never be created through the normal code path. Added pair validation: both must be `Some` or both `None`
+- **`AuditEntry.on_chain_tx_hash` has no maximum length — unbounded audit ledger bloat (MEDIUM)** — Every other audit-persisted string field has a `MAX_*_LEN` constant and validation in its custom `Deserialize` (established pattern since v0.6.10). On-chain transaction hashes were unbounded. An arbitrarily long hash would persist permanently in the append-only ledger. Added `MAX_ON_CHAIN_TX_HASH_LEN = 256` (Ethereum/Base hashes are 66 chars; 256 provides headroom) with `trim().is_empty()` and max-length validation via custom `Deserialize`
+- **Regex cache comment says "evicts all entries" but code evicts one — misleading documentation (LOW)** — The doc comment on `REGEX_CACHE` at `evaluator.rs:11` stated the cache "evicts all entries when the limit is reached", but the code at lines 252-259 evicts a single arbitrary entry per insertion. The single-eviction strategy is correct (preserves hot patterns), but the comment was misleading. Corrected to match the actual behavior
+- **`virtual_cards` table missing composite unique constraint on `(provider_id, provider_card_id)` — silent duplicate acceptance (LOW-MEDIUM)** — If a provider bug or race condition returned the same card ID twice, the database would silently store both rows. Added `UNIQUE(provider_id, provider_card_id)` constraint via migration `20260405200001`
+
+### Added
+
+- Custom `Deserialize` for `AuditEntry` with `on_chain_tx_hash` empty/whitespace and max-length validation
+- `MAX_ON_CHAIN_TX_HASH_LEN` constant (256) for on-chain transaction hash length validation
+- Extended Payment deserialization: `Blocked`, `Rejected`, `TimedOut` added to no-provider check
+- Provider field pair validation in Payment deserialization (both or neither)
+- Migration `20260405200001`: `uk_virtual_cards_provider_card` composite unique constraint
+- 11 new tests: AuditEntry on_chain_tx_hash valid/none/empty/whitespace/oversized/at-limit (6), Payment provider fields on blocked/rejected/timed_out (3), Payment asymmetric provider fields both directions (2)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 358/358 passing (170 models + 14 audit + 106 policy + 17 providers + 51 router) |
 
 ---
 

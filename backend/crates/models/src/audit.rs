@@ -11,13 +11,22 @@ use crate::provider::{ProviderId, RoutingDecision};
 // Audit Entry
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed length for `AuditEntry.on_chain_tx_hash`.
+/// On-chain transaction hashes are external input persisted to the immutable
+/// audit ledger — must be bounded to prevent permanent bloat.
+/// Ethereum/Base hashes are 66 chars (`0x` + 64 hex); 256 provides headroom
+/// for future chain formats.
+pub const MAX_ON_CHAIN_TX_HASH_LEN: usize = 256;
+
 /// An immutable record of a complete payment lifecycle event.
 ///
 /// Every payment produces exactly one audit entry. The entry captures the
 /// full decision trace: what was requested, why, what the policy engine
 /// decided, how routing chose a provider, and what happened. These records
 /// are append-only — the database physically prevents updates or deletes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` validates `on_chain_tx_hash` length bounds.
+#[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
     pub id: AuditEntryId,
     pub timestamp: DateTime<Utc>,
@@ -46,8 +55,67 @@ pub struct AuditEntry {
     pub human_review: Option<HumanReviewRecord>,
     /// On-chain transaction hash for crypto-rail payments.
     /// Serves as an independently verifiable cryptographic receipt.
+    /// Bounded to [`MAX_ON_CHAIN_TX_HASH_LEN`] to prevent audit ledger bloat.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_chain_tx_hash: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for AuditEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: AuditEntryId,
+            timestamp: DateTime<Utc>,
+            agent_id: AgentId,
+            agent_profile_id: AgentProfileId,
+            payment_id: Option<crate::ids::PaymentId>,
+            request: serde_json::Value,
+            justification: serde_json::Value,
+            policy_evaluation: PolicyEvaluationRecord,
+            routing_decision: Option<RoutingDecision>,
+            provider_response: Option<ProviderResponseRecord>,
+            final_status: PaymentStatus,
+            human_review: Option<HumanReviewRecord>,
+            on_chain_tx_hash: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        if let Some(ref hash) = raw.on_chain_tx_hash {
+            if hash.trim().is_empty() {
+                return Err(serde::de::Error::custom(
+                    "on_chain_tx_hash must not be empty or whitespace-only when provided — \
+                     use None instead of an empty string",
+                ));
+            }
+            if hash.len() > MAX_ON_CHAIN_TX_HASH_LEN {
+                return Err(serde::de::Error::custom(format!(
+                    "on_chain_tx_hash exceeds maximum length of {} characters (got {})",
+                    MAX_ON_CHAIN_TX_HASH_LEN,
+                    hash.len()
+                )));
+            }
+        }
+
+        Ok(AuditEntry {
+            id: raw.id,
+            timestamp: raw.timestamp,
+            agent_id: raw.agent_id,
+            agent_profile_id: raw.agent_profile_id,
+            payment_id: raw.payment_id,
+            request: raw.request,
+            justification: raw.justification,
+            policy_evaluation: raw.policy_evaluation,
+            routing_decision: raw.routing_decision,
+            provider_response: raw.provider_response,
+            final_status: raw.final_status,
+            human_review: raw.human_review,
+            on_chain_tx_hash: raw.on_chain_tx_hash,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -569,5 +637,88 @@ mod tests {
         let record: ProviderResponseRecord = serde_json::from_value(json).unwrap();
         assert_eq!(record.transaction_id.len(), MAX_PROVIDER_TRANSACTION_ID_LEN);
         assert_eq!(record.status.len(), MAX_PROVIDER_STATUS_LEN);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.9: AuditEntry on_chain_tx_hash bounds
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal valid AuditEntry JSON for deserialization tests.
+    fn sample_audit_entry_json(on_chain_tx_hash: Option<&str>) -> serde_json::Value {
+        let mut entry = serde_json::json!({
+            "id": AuditEntryId::new(),
+            "timestamp": "2026-04-05T12:00:00Z",
+            "agent_id": AgentId::new(),
+            "agent_profile_id": AgentProfileId::new(),
+            "request": {},
+            "justification": {},
+            "policy_evaluation": {
+                "rules_evaluated": [],
+                "matching_rules": [],
+                "final_decision": "APPROVE",
+                "decision_latency_ms": 5
+            },
+            "final_status": "settled"
+        });
+        if let Some(hash) = on_chain_tx_hash {
+            entry["on_chain_tx_hash"] = serde_json::json!(hash);
+        }
+        entry
+    }
+
+    #[test]
+    fn audit_entry_accepts_valid_on_chain_tx_hash() {
+        let hash = "0x".to_string() + &"a".repeat(64); // standard Ethereum hash
+        let json = sample_audit_entry_json(Some(&hash));
+        let entry: AuditEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.on_chain_tx_hash.unwrap(), hash);
+    }
+
+    #[test]
+    fn audit_entry_accepts_none_on_chain_tx_hash() {
+        let json = sample_audit_entry_json(None);
+        let entry: AuditEntry = serde_json::from_value(json).unwrap();
+        assert!(entry.on_chain_tx_hash.is_none());
+    }
+
+    #[test]
+    fn audit_entry_rejects_empty_on_chain_tx_hash() {
+        let json = sample_audit_entry_json(Some(""));
+        let result: Result<AuditEntry, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("on_chain_tx_hash"));
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn audit_entry_rejects_whitespace_only_on_chain_tx_hash() {
+        let json = sample_audit_entry_json(Some("   "));
+        let result: Result<AuditEntry, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("on_chain_tx_hash"));
+    }
+
+    #[test]
+    fn audit_entry_rejects_oversized_on_chain_tx_hash() {
+        let long_hash = "x".repeat(MAX_ON_CHAIN_TX_HASH_LEN + 1);
+        let json = sample_audit_entry_json(Some(&long_hash));
+        let result: Result<AuditEntry, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("on_chain_tx_hash"));
+        assert!(err.contains("maximum length"));
+    }
+
+    #[test]
+    fn audit_entry_accepts_on_chain_tx_hash_at_limit() {
+        let exact_hash = "h".repeat(MAX_ON_CHAIN_TX_HASH_LEN);
+        let json = sample_audit_entry_json(Some(&exact_hash));
+        let entry: AuditEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            entry.on_chain_tx_hash.unwrap().len(),
+            MAX_ON_CHAIN_TX_HASH_LEN
+        );
     }
 }
