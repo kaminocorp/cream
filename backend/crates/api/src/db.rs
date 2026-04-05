@@ -53,6 +53,20 @@ pub trait PaymentRepository: Send + Sync {
         payment: &Payment,
         expected_status: &str,
     ) -> Result<bool, ApiError>;
+
+    /// Persist settlement data returned by the payment provider.
+    ///
+    /// Called after provider execution to write `amount_settled`, `settled_currency`,
+    /// and optionally `failure_reason` to the payments table. These columns exist in
+    /// the schema but are not part of the `Payment` domain model (which tracks status
+    /// and provider attribution, not settlement details).
+    async fn persist_settlement(
+        &self,
+        payment_id: &PaymentId,
+        amount_settled: rust_decimal::Decimal,
+        settled_currency: cream_models::prelude::Currency,
+        failure_reason: Option<&str>,
+    ) -> Result<(), ApiError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,5 +435,35 @@ impl PaymentRepository for PgPaymentRepository {
         .await?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn persist_settlement(
+        &self,
+        payment_id: &PaymentId,
+        amount_settled: rust_decimal::Decimal,
+        settled_currency: cream_models::prelude::Currency,
+        failure_reason: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let currency_str = serde_json::to_value(settled_currency)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize settled_currency: {e}")))?;
+        let currency_text = currency_str.as_str().ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "settled_currency serialized to non-string JSON value"
+            ))
+        })?;
+
+        sqlx::query(
+            "UPDATE payments
+             SET amount_settled = $1, settled_currency = $2, failure_reason = $3, updated_at = now()
+             WHERE id = $4",
+        )
+        .bind(amount_settled)
+        .bind(currency_text)
+        .bind(failure_reason)
+        .bind(payment_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }

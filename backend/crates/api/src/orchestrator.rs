@@ -117,22 +117,46 @@ impl PaymentOrchestrator {
             .await?;
 
         // --- Step 7: Settlement confirmation ---
-        match provider_response.status {
+        let failure_reason = match provider_response.status {
             TransactionStatus::Settled => {
                 payment.transition(PaymentStatus::Submitted)?;
                 payment.transition(PaymentStatus::Settled)?;
+                None
             }
             TransactionStatus::Pending | TransactionStatus::RequiresAction => {
                 payment.transition(PaymentStatus::Submitted)?;
+                None
             }
-            TransactionStatus::Failed
-            | TransactionStatus::Declined
-            | TransactionStatus::Refunded => {
+            TransactionStatus::Failed => {
                 payment.transition(PaymentStatus::Submitted)?;
                 payment.transition(PaymentStatus::Failed)?;
+                Some("provider returned failed")
             }
-        }
+            TransactionStatus::Declined => {
+                payment.transition(PaymentStatus::Submitted)?;
+                payment.transition(PaymentStatus::Failed)?;
+                Some("provider declined the transaction")
+            }
+            TransactionStatus::Refunded => {
+                payment.transition(PaymentStatus::Submitted)?;
+                payment.transition(PaymentStatus::Failed)?;
+                Some("provider returned refunded")
+            }
+        };
         self.state.payment_repo.update_payment(&payment).await?;
+
+        // Persist settlement data (amount_settled, settled_currency, failure_reason)
+        // to the payments table. These fields are not part of the Payment domain
+        // model but are critical for reconciliation and financial reporting.
+        self.state
+            .payment_repo
+            .persist_settlement(
+                &payment.id,
+                provider_response.amount_settled,
+                provider_response.currency,
+                failure_reason,
+            )
+            .await?;
 
         // --- Step 8: Audit write ---
         self.write_audit(
@@ -192,22 +216,44 @@ impl PaymentOrchestrator {
             .await?;
 
         // Step 7: Settlement
-        match provider_response.status {
+        let failure_reason = match provider_response.status {
             TransactionStatus::Settled => {
                 payment.transition(PaymentStatus::Submitted)?;
                 payment.transition(PaymentStatus::Settled)?;
+                None
             }
             TransactionStatus::Pending | TransactionStatus::RequiresAction => {
                 payment.transition(PaymentStatus::Submitted)?;
+                None
             }
-            TransactionStatus::Failed
-            | TransactionStatus::Declined
-            | TransactionStatus::Refunded => {
+            TransactionStatus::Failed => {
                 payment.transition(PaymentStatus::Submitted)?;
                 payment.transition(PaymentStatus::Failed)?;
+                Some("provider returned failed")
             }
-        }
+            TransactionStatus::Declined => {
+                payment.transition(PaymentStatus::Submitted)?;
+                payment.transition(PaymentStatus::Failed)?;
+                Some("provider declined the transaction")
+            }
+            TransactionStatus::Refunded => {
+                payment.transition(PaymentStatus::Submitted)?;
+                payment.transition(PaymentStatus::Failed)?;
+                Some("provider returned refunded")
+            }
+        };
         self.state.payment_repo.update_payment(&payment).await?;
+
+        // Persist settlement data from the provider response.
+        self.state
+            .payment_repo
+            .persist_settlement(
+                &payment.id,
+                provider_response.amount_settled,
+                provider_response.currency,
+                failure_reason,
+            )
+            .await?;
 
         // Step 8: Audit
         self.write_audit(
@@ -584,11 +630,29 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                         .append(&audit_entry, Some(payment.id))
                         .await
                     {
-                        tracing::error!(
+                        // Retry once after a short delay — transient DB errors are
+                        // the most common cause, and the audit trail is a core
+                        // compliance invariant for this payment control plane.
+                        tracing::warn!(
                             payment_id = %payment_id,
                             error = %e,
-                            "failed to write audit entry for escalation timeout"
+                            "escalation timeout audit write failed, retrying once"
                         );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        if let Err(e2) = state
+                            .audit_writer
+                            .append(&audit_entry, Some(payment.id))
+                            .await
+                        {
+                            tracing::error!(
+                                payment_id = %payment_id,
+                                error = %e2,
+                                "CRITICAL: escalation timeout audit write failed after retry — \
+                                 payment {} was blocked by timeout but has no audit record. \
+                                 Manual reconciliation required.",
+                                payment_id
+                            );
+                        }
                     }
 
                     // Release the idempotency key — the payment is terminally blocked.

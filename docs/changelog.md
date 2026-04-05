@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.5](#085--2026-04-05) — Production review: settlement data persistence, escalation timeout audit resilience, provider field DB constraints
 - [0.8.4](#084--2026-04-05) — Production review: API amount validation gap, invalid regex policy bypass, name length DB constraints
 - [0.8.3](#083--2026-04-05) — Production review: idempotency observability gap, escalation timeout audit correctness, webhook input validation
 - [0.8.2](#082--2026-04-05) — Production review: escalation timeout audit trail, idempotency key lifecycle completion, circuit breaker observability
@@ -41,6 +42,40 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.5 — 2026-04-05
+
+**Production review: settlement data persistence, escalation timeout audit resilience, provider field DB constraints**
+
+Full 6-crate production readiness review (4 parallel review agents across all crates + migrations + manual code-level verification). ~20 candidate findings surfaced; after line-by-line verification, the majority were confirmed as false positives (intentional design decisions, already-validated invariants, or misunderstood Rust ownership semantics). 3 genuine fixes across 2 files + 1 new migration, all additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **Settlement data never persisted to payments table — reconciliation-breaking gap (CRITICAL)** (`api/db.rs`, `api/orchestrator.rs`) — `update_payment()` and `update_payment_if_status()` only wrote `status`, `provider_id`, and `provider_tx_id`. The columns `amount_settled`, `settled_currency`, and `failure_reason` (present in the schema since migration `20260331200004`) were never populated. Every settled payment showed `NULL` for settlement amounts in the database. The audit log captured settlement data via `ProviderResponseRecord`, but the payments table — the queryable source of truth for reconciliation and financial reporting — permanently lost it. Added `persist_settlement()` to the `PaymentRepository` trait + `PgPaymentRepository` implementation. Called from both `process()` and `resume_after_approval()` immediately after provider execution, writing `amount_settled`, `settled_currency`, and a descriptive `failure_reason` for failed/declined/refunded transactions
+- **Escalation timeout audit write silently swallowed on failure — compliance gap (HIGH)** (`api/orchestrator.rs`) — When the escalation timeout monitor's audit write failed, the error was logged at ERROR level but the function continued. Since the payment state change was already committed to the DB, this left a permanent audit gap: a payment blocked by timeout with no corresponding audit record. Added a single retry with 250ms delay (covers transient DB errors, which are the most common failure mode). If the retry also fails, logs at ERROR with a `CRITICAL:` prefix and explicit guidance that manual reconciliation is required, giving operators clear signal for alerting
+- **DB lacks length constraints on `payments.provider_id` and `payments.provider_tx_id` — unbounded TEXT columns (HIGH)** (new migration `20260405200005`) — Rust types enforce `MAX_PROVIDER_ID_LEN = 255` (ProviderId) and `MAX_PROVIDER_TRANSACTION_ID_LEN = 500` (ProviderResponseRecord), but the DB allowed unbounded TEXT. Direct DB manipulation or future ORM changes could persist oversized values that break deserialization on read — and in the append-only audit ledger, oversized values would become permanent. Added CHECK constraints: `LENGTH(provider_id) <= 255` and `LENGTH(provider_tx_id) <= 500` (both allowing NULL). Same pattern as v0.8.4's name length constraints
+- **Missing index on `audit_log.agent_profile_id` — unbounded table scan (MEDIUM)** (new migration `20260405200005`) — The audit ledger is append-only and grows without bound. Profile-scoped audit queries (`WHERE agent_profile_id = $1`) required full table scans. Added `idx_audit_profile` B-tree index
+
+### Verified False Positives (Not Fixed)
+
+| Claimed Issue | Verdict |
+|---|---|
+| SQL injection in escalation timeout query | `(pr.escalation->>'timeout_minutes')::int` reads admin-controlled policy_rules data, not user input. PostgreSQL errors on non-integer cast; no SQL execution possible. |
+| NaN propagation in scorer health_score | `ProviderHealth` custom Deserialize validates `error_rate_5m` is finite ∈ [0.0, 1.0]. NaN cannot reach the scorer. |
+| Spend limits count Pending payments (bypass) | Intentional design — docstring explicitly states "includes in-flight payments." Not counting them would allow concurrent requests to individually pass but collectively exceed limits. |
+| Escalation threshold uses >= instead of > | Intentional — escalation_threshold means "require human approval at or above this amount." Different semantic from amount_cap's hard ceiling. |
+| Corrupt idempotency lock blocks retries | Idempotency values are always `payment_id.as_uuid().to_string()`. UUID corruption requires Redis-level data loss, not an application bug. |
+| Audit query fails on malformed entries | Correct behavior — surfacing data corruption rather than silently dropping records. |
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 
