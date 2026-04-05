@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.0](#080--2026-04-05) — API crate: Axum HTTP server, 12 REST endpoints, payment lifecycle orchestrator with failover, auth, rate limiting, escalation monitor
 - [0.7.12](#0712--2026-04-05) — Circuit breaker clock skew guard and u32 counter overflow protection
 - [0.7.11](#0711--2026-04-05) — Circuit breaker half-open fix: close only when all probe requests succeed, not on first success
 - [0.7.10](#0710--2026-04-05) — Cross-crate production review: Settled/Failed must have provider fields, audit deterministic ordering, settlement field pairing constraint, scorer deterministic tiebreaker, time_window offset bounds
@@ -36,6 +37,63 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.0 — 2026-04-05
+
+**Phase 8: API Crate — Axum HTTP Server, Payment Lifecycle Orchestrator, Authentication & Rate Limiting**
+
+Implements the `cream-api` crate — the Axum HTTP server that wires all five infrastructure crates (models, audit, policy, providers, router) into a runnable payment control plane. This is the integration crate that makes Cream a real service: 12 REST endpoints, the deterministic 8-step payment lifecycle with provider failover, agent authentication via API key, per-agent Redis rate limiting, and a background escalation timeout monitor.
+
+### Added
+
+- **Payment Lifecycle Orchestrator** (`orchestrator.rs`) — implements the 8-step deterministic pipeline from the vision spec. Steps 1-2 (schema validation, agent identity) are handled by Axum extractors; Steps 3-8 (justification validation, policy evaluation, routing, provider execution with failover, settlement confirmation, audit write) are in the orchestrator. Policy decisions branch into three paths: Approve (continue pipeline), Block (terminal — return 403), Escalate (return payment with `pending_approval` status). Idempotency is enforced via `IdempotencyGuard::acquire()` before any processing begins
+- **Provider failover logic** — iterates the router's ranked candidate list. Retryable errors (`RequestFailed`, `Timeout`, `Unavailable`, `RateLimited`, `UnexpectedResponse`) cascade to the next candidate; non-retryable errors (`InvalidAmount`, `ComplianceBlocked`, `InsufficientFunds`, etc.) fail immediately with 502. Circuit breaker updated on every outcome. All candidates exhausted → 503
+- **`resume_after_approval()`** — when a human approves an escalated payment, the orchestrator resumes from Step 5 (routing → execution → settlement → audit) without re-evaluating policy
+- **`PaymentRepository` trait** (`db.rs`) — abstracts all database queries behind a trait boundary for orchestrator unit testability. 8 methods: `insert_payment`, `get_payment`, `get_payment_for_agent`, `update_payment`, `load_rules`, `load_recent_payments`, `load_known_merchants`, `find_expired_escalations`. `PgPaymentRepository` implements against the actual schema (18 SQL queries total across all modules)
+- **`AuthenticatedAgent` extractor** (`extractors/auth.rs`) — implements Axum's `FromRequestParts<AppState>`. Extracts `Authorization: Bearer <api_key>`, SHA-256 hashes it, queries `agents` by `api_key_hash` (unique index), verifies `status = 'active'`, loads `AgentProfile`. Auth is per-handler via the extractor pattern — routes that omit the extractor are public
+- **`ValidatedJson<T>` extractor** (`extractors/json.rs`) — wraps `axum::Json<T>` with custom rejection returning `ApiError::ValidationError` (consistent JSON error body) instead of Axum's default plain-text rejection
+- **Per-agent rate limiting** (`middleware/rate_limit.rs`) — fixed-window counter via Redis. Key: `cream:rate:{key_hash}:{window_epoch}`. Over limit → `429 RateLimited` with `retry_after_secs`. Fail-open on Redis unavailability (WARN log, request allowed through)
+- **Request ID propagation** (`middleware/request_id.rs`) — `X-Request-Id` header with UUIDv7 generation via `tower_http::request_id`. Preserves client-provided IDs; generates one if absent; propagates to response
+- **Escalation timeout monitor** (`orchestrator.rs`) — Tokio interval task (configurable, default 30s). Queries for `PendingApproval` payments past their `escalation.timeout_minutes`. Transitions each: `PendingApproval → TimedOut → Blocked`
+- **`ApiError` enum** (`error.rs`) — 10 variants mapping to HTTP status codes (400, 401, 403, 404, 409, 422, 429, 500, 502, 503). JSON response body: `{ error_code, message, details }`. `From` impls for `PolicyError`, `RoutingError`, `AuditError`, `DomainError`, `sqlx::Error`, `anyhow::Error`. `Display` impl for tracing compatibility. Server errors (5xx) log at error/warn; client errors (4xx) log at debug
+- **`AppConfig`** (`config.rs`) — environment-based configuration: `DATABASE_URL`, `REDIS_URL` (required), `HOST` (default `0.0.0.0`), `PORT` (default `8080`), `RATE_LIMIT_REQUESTS` (default 100), `RATE_LIMIT_WINDOW_SECS` (default 60), `ESCALATION_CHECK_INTERVAL_SECS` (default 30)
+- **`AppState`** (`state.rs`) — `Clone`-friendly shared state: `PgPool`, Redis `ConnectionManager`, `Arc<PolicyEngine>`, `Arc<RouteSelector>`, `Arc<ProviderRegistry>`, `Arc<dyn AuditWriter>`, `Arc<dyn AuditReader>`, `Arc<IdempotencyGuard>`, `Arc<CircuitBreaker>`, `Arc<dyn PaymentRepository>`, `Arc<AppConfig>`
+- **12 REST endpoints** across 6 route modules:
+  - `POST /v1/payments` — initiate payment with structured justification (→ orchestrator pipeline)
+  - `GET /v1/payments/{id}` — retrieve payment status + audit trail (agent-scoped)
+  - `POST /v1/payments/{id}/approve` — human-approve escalated payment (resumes pipeline from Step 5)
+  - `POST /v1/payments/{id}/reject` — human-reject escalated payment (terminal, writes `HumanReviewRecord`)
+  - `POST /v1/cards` — issue scoped virtual card via provider
+  - `PATCH /v1/cards/{id}` — update card spending controls (agent-scoped ownership check)
+  - `DELETE /v1/cards/{id}` — cancel/revoke card immediately (agent-scoped)
+  - `GET /v1/audit` — query audit log with filters (agent-scoped, delegates to `AuditReader`)
+  - `GET /v1/agents/{id}/policy` — get agent's policy profile + rules (self-only access)
+  - `PUT /v1/agents/{id}/policy` — update agent's policy profile fields (self-only access)
+  - `GET /v1/providers/health` — real-time health status of all registered providers
+  - `POST /v1/webhooks` — register webhook endpoint (SHA-256 hashed secret)
+- **`/health` endpoint** — unauthenticated, no rate limit, returns `"ok"`
+- **Server startup** (`main.rs`) — wires `PgPool`, Redis, `PolicyEngine::new()`, `ProviderRegistry` with `MockProvider`, `RouteSelector` with default weights, `PgAuditWriter`/`PgAuditReader`, in-memory circuit breaker + idempotency stores, `PgPaymentRepository`. Spawns escalation monitor. Binds `TcpListener` and serves
+- **Workspace dependencies** — added `sha2 = "0.10"`, `hex = "0.4"` to workspace `Cargo.toml`
+- 11 new tests: 10 error variant → HTTP status mapping tests, 1 config validation test
+
+### Design decisions
+
+- **Auth as extractor, not middleware** — idiomatic Axum 0.8. Handlers that need auth include `AuthenticatedAgent` as a parameter; handlers that don't (health, approve, reject) simply omit it. No middleware exclusion lists
+- **SHA-256 for API key hashing** — not argon2. API keys are machine-generated high-entropy random tokens, not human passwords. SHA-256 is cryptographically appropriate and ~1000x faster at per-request auth time
+- **`PaymentRepository` trait** — follows the trait-boundary pattern from every other crate (`AuditWriter`, `AuditReader`, `CircuitBreakerStore`, `IdempotencyStore`, `HealthSource`). Enables orchestrator unit testing without Postgres
+- **Fail-open rate limiting** — Redis unavailability should not cascade into a full service outage. Rate limit failures log at WARN and allow the request through
+- **No auth on approve/reject** — human reviewer endpoints use dashboard session auth (Phase 10). Scaffold uses `reviewer_id` from request body
+- **Failover only on retryable errors** — non-retryable provider errors fail immediately. Same structurally invalid request would fail against any provider
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 

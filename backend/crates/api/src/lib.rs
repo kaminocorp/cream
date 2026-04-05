@@ -1,1 +1,62 @@
 // cream-api: Axum HTTP server. Wires all crates together into the payment lifecycle orchestrator.
+
+pub mod config;
+pub mod db;
+pub mod error;
+pub mod extractors;
+pub mod middleware;
+pub mod orchestrator;
+pub mod routes;
+pub mod state;
+
+pub use config::AppConfig;
+pub use error::ApiError;
+pub use state::AppState;
+
+use axum::routing::{get, patch, post};
+use axum::Router;
+
+/// Build the Axum router with all routes, middleware, and shared state.
+pub fn build_router(state: AppState) -> Router {
+    // API routes (require auth via extractor, rate-limited).
+    let api_routes = Router::new()
+        // Payments (Vision Section 4.1)
+        .route("/v1/payments", post(routes::payments::initiate))
+        .route("/v1/payments/{id}", get(routes::payments::get_status))
+        .route("/v1/payments/{id}/approve", post(routes::payments::approve))
+        .route("/v1/payments/{id}/reject", post(routes::payments::reject))
+        // Virtual Cards (Vision Section 7.3)
+        .route("/v1/cards", post(routes::cards::create))
+        .route(
+            "/v1/cards/{id}",
+            patch(routes::cards::update).delete(routes::cards::cancel),
+        )
+        // Audit (Vision Section 8)
+        .route("/v1/audit", get(routes::audit::query))
+        // Agent Policy (Vision Section 4.3)
+        .route(
+            "/v1/agents/{id}/policy",
+            get(routes::agents::get_policy).put(routes::agents::update_policy),
+        )
+        // Provider Health (Vision Section 6.1)
+        .route("/v1/providers/health", get(routes::providers::health))
+        // Webhooks (Vision Section 2.5)
+        .route("/v1/webhooks", post(routes::webhooks::register))
+        // Rate limiting middleware — applied to all /v1/* routes.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::rate_limit::rate_limit,
+        ));
+
+    Router::new()
+        // Health check — no auth, no rate limit.
+        .route("/health", get(|| async { "ok" }))
+        // Merge in API routes.
+        .merge(api_routes)
+        // Global layers (applied to all routes including /health).
+        .layer(middleware::request_id::propagate_request_id_layer())
+        .layer(middleware::request_id::set_request_id_layer())
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .with_state(state)
+}

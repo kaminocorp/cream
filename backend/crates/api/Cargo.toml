@@ -13,7 +13,7 @@ cream-audit = { workspace = true }
 cream-policy = { workspace = true }
 cream-providers = { workspace = true }
 cream-router = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
@@ -28,6 +28,11 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 mockall = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
