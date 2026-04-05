@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.9](#089--2026-04-05) — Production review: PaymentStatus DB serialization, ghost Failed records, missing audit on failure paths, idempotency lock ownership, escalation timeout stuck payments, PolicyAction data migration
 - [0.8.8](#088--2026-04-05) — Production review: Currency serde format, PolicyAction DB CHECK, NULL spending limits, idempotency leak on provider failure, escalation timeout query, duplicate detection status filter, merchant_check compound conditions, schema hardening
 - [0.8.7](#087--2026-04-05) — Production review: ProviderError info leak, is_terminal state machine correctness, idempotency_keys DB constraint
 - [0.8.6](#086--2026-04-05) — Production review: update_policy validation gap, approve/reject audit field bypass, spending limit strictness, audit ledger DB constraints
@@ -45,6 +46,40 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.9 — 2026-04-05
+
+**Production review: PaymentStatus DB serialization, ghost Failed records, missing audit on failure paths, idempotency lock ownership, escalation timeout stuck payments, PolicyAction data migration**
+
+Full 6-crate production readiness review (6 parallel review agents + manual cross-verification). ~30 candidate findings surfaced; after line-by-line verification against actual code, 6 genuine fixes confirmed across 5 files + 1 new migration. All changes are additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **`format!("{:?}", status).to_lowercase()` produces wrong DB values for multi-word PaymentStatus variants — entire escalation pipeline non-functional (CRITICAL)** (`api/db.rs`, 3 occurrences: `insert_payment`, `update_payment`, `update_payment_if_status`) — Rust's `Debug` trait on `PendingApproval` produces `"PendingApproval"` → `.to_lowercase()` = `"pendingapproval"`. The DB CHECK constraint expects `"pending_approval"`. Same for `TimedOut` → `"timedout"` vs `"timed_out"`. The correct `Display` impl (producing snake_case) existed but was never used. Any payment entering the escalation path (`PolicyAction::Escalate`) would fail the DB CHECK constraint on `update_payment()`, returning a 500 to the agent and stranding the payment in `Validating` with a leaked idempotency key. Not caught by unit tests because all tests use mocked `PaymentRepository` — never hitting real Postgres. Replaced all 3 occurrences of `format!("{:?}", payment.status()).to_lowercase()` with `payment.status().to_string()`
+- **Failed payments from routing/provider failure become un-loadable ghost records (HIGH)** (`models/payment.rs`, `api/orchestrator.rs`) — When routing failed or all providers were exhausted after policy approval, the error recovery path did `Approved → Submitted → Failed` without calling `set_provider()`. The DB stored `status='failed'` with `provider_id=NULL`. But Payment's custom Deserialize (Invariant 3, added v0.7.10) required both `Settled` and `Failed` to have provider fields. Any subsequent `get_payment()` call returned a 500 deserialization error — the payment existed in DB but was invisible through the API. **Three-part fix**: (1) Added `Approved → Failed` as a valid direct state machine transition for pre-provider failures, bypassing the semantically incorrect `Submitted` intermediate state. (2) Relaxed Invariant 3: only `Settled` requires provider fields; `Failed` is allowed without them since failure can occur before any provider is contacted. (3) Changed all 4 error recovery paths in `process()` and `resume_after_approval()` to use the direct `Approved → Failed` transition
+- **No audit entry written when routing/provider execution fails — compliance gap (HIGH)** (`api/orchestrator.rs`, 4 paths) — Both `process()` and `resume_after_approval()` had early-return error paths for routing failure and provider exhaustion that transitioned the payment to `Failed` and released the idempotency key, but returned before reaching `write_audit()`. A payment that was policy-approved but then failed at routing/provider had no corresponding audit trail. Added `write_audit()` calls (with `.ok()` to avoid masking the original error) in all 4 error recovery blocks, passing available routing info where applicable (`None` for routing failures, `Some(&routing)` for provider failures)
+- **Migration `20260405200008` changes PolicyAction CHECK from lowercase to uppercase without updating existing data — migration fails on non-empty tables (HIGH)** (new migration `20260405200009`) — The prior migration dropped `CHECK (action IN ('approve', 'block', 'escalate'))` and added `CHECK (action IN ('APPROVE', 'BLOCK', 'ESCALATE'))` without a preceding `UPDATE policy_rules SET action = UPPER(action)`. On any database with existing policy_rules rows (which the old CHECK required to be lowercase), the ADD CONSTRAINT would fail because PostgreSQL validates existing rows. Added data migration: `UPDATE policy_rules SET action = UPPER(action) WHERE action != UPPER(action)` — no-op on fresh databases, fixes existing data
+- **Idempotency `release()` and `complete()` don't verify lock ownership — double-payment window on TTL expiry (HIGH)** (`router/idempotency.rs`, `api/orchestrator.rs`, `api/routes/payments.rs`) — `release()` unconditionally deleted the Redis key without checking that the current value matched the caller's payment_id. If a lock's TTL expired during processing and a second process re-acquired the lock, a stale `release()` from the first process would delete the second's active lock, opening a window for double-payment. Same issue with `complete()` doing an unconditional `SET`. **Fix**: Replaced `IdempotencyStore::delete` with `delete_if_matches(key, expected_value) → bool` and `IdempotencyStore::set` with `set_if_matches(key, expected_value, new_value, ttl) → bool`. Both operations are atomic within the InMemory store's Mutex. Redis production implementations should use Lua scripts (documented in trait comments). Updated `release()` signature to accept `payment_id: &PaymentId` and all 5 callers across orchestrator and routes. Non-matching releases log at WARN level
+- **Escalation timeout permanently stuck when all escalation rules disabled — payments trapped forever (HIGH)** (`api/db.rs`, `find_expired_escalations()`) — When both the specific escalation rule and all profile rules were disabled/deleted, `COALESCE(NULL, NULL)` made `make_interval(mins := NULL)` → `NULL`, and `updated_at + NULL < now()` evaluated to false. Payments in `PendingApproval` were stuck forever with no timeout. Also removed `AND pr.enabled = true` from the first subquery (direct rule lookup by ID) — the triggering rule's timeout should be honored regardless of subsequent disablement. Added a third COALESCE fallback of 60 minutes as the absolute default
+
+### Added
+
+- `Approved → Failed` state machine transition for pre-provider failures (models)
+- `valid_pre_provider_failure_path` test (models)
+- `payment_deserialize_accepts_failed_without_provider` test replaces the old rejection test (models)
+- `delete_if_matches()` and `set_if_matches()` on `IdempotencyStore` trait with ownership verification (router)
+- `release_skips_if_not_owner` test (router)
+- Migration `20260405200009`: PolicyAction data migration (uppercase conversion)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 380/380 passing (174 models + 14 audit + 108 policy + 17 providers + 55 router + 11 api + 1 integration) |
 
 ---
 

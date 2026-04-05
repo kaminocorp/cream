@@ -241,7 +241,7 @@ impl PaymentRepository for PgPaymentRepository {
         })?)
         .bind(&justification_json)
         .bind(&metadata_json)
-        .bind(format!("{:?}", payment.status()).to_lowercase())
+        .bind(payment.status().to_string())
         .execute(&self.pool)
         .await?;
 
@@ -284,7 +284,7 @@ impl PaymentRepository for PgPaymentRepository {
     }
 
     async fn update_payment(&self, payment: &Payment) -> Result<(), ApiError> {
-        let status_str = format!("{:?}", payment.status()).to_lowercase();
+        let status_str = payment.status().to_string();
         let provider_id_str = payment.provider_id().map(|p| p.as_str().to_string());
         let provider_tx_id = payment.provider_transaction_id().map(|s| s.to_string());
 
@@ -418,6 +418,8 @@ impl PaymentRepository for PgPaymentRepository {
         // When escalation_rule_id is set, use that specific rule's timeout.
         // Fallback to MIN timeout across all profile escalation rules for
         // legacy payments that don't have escalation_rule_id set.
+        // Final fallback: 60 minutes default if all escalation rules are
+        // disabled/deleted — prevents payments stuck in pending_approval forever.
         let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
             r#"SELECT DISTINCT p.id
                FROM payments p
@@ -428,13 +430,13 @@ impl PaymentRepository for PgPaymentRepository {
                          (SELECT (pr.escalation->>'timeout_minutes')::int
                           FROM policy_rules pr
                           WHERE pr.id = p.escalation_rule_id
-                            AND pr.escalation IS NOT NULL
-                            AND pr.enabled = true),
+                            AND pr.escalation IS NOT NULL),
                          (SELECT MIN((pr2.escalation->>'timeout_minutes')::int)
                           FROM policy_rules pr2
                           WHERE pr2.profile_id = a.profile_id
                             AND pr2.escalation IS NOT NULL
-                            AND pr2.enabled = true)
+                            AND pr2.enabled = true),
+                         60
                      )
                  ) < now()"#,
         )
@@ -452,7 +454,7 @@ impl PaymentRepository for PgPaymentRepository {
         payment: &Payment,
         expected_status: &str,
     ) -> Result<bool, ApiError> {
-        let status_str = format!("{:?}", payment.status()).to_lowercase();
+        let status_str = payment.status().to_string();
         let provider_id_str = payment.provider_id().map(|p| p.as_str().to_string());
         let provider_tx_id = payment.provider_transaction_id().map(|s| s.to_string());
 

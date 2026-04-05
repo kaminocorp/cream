@@ -41,11 +41,26 @@ pub trait IdempotencyStore: Send + Sync {
         ttl_secs: u64,
     ) -> Result<Option<String>, RoutingError>;
 
-    /// Delete the key (release the lock).
-    async fn delete(&self, key: &str) -> Result<(), RoutingError>;
+    /// Delete the key only if its current value matches `expected_value`.
+    /// Returns `true` if deleted, `false` if value didn't match or key absent.
+    /// Redis production: implement via Lua script for atomicity:
+    ///   `if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) else return 0 end`
+    async fn delete_if_matches(
+        &self,
+        key: &str,
+        expected_value: &str,
+    ) -> Result<bool, RoutingError>;
 
-    /// Overwrite the key with a new value and refresh the TTL.
-    async fn set(&self, key: &str, payment_id: &str, ttl_secs: u64) -> Result<(), RoutingError>;
+    /// Overwrite the key only if its current value matches `expected_value`.
+    /// Returns `true` if updated, `false` if value didn't match or key absent.
+    /// Redis production: implement via Lua script for atomicity.
+    async fn set_if_matches(
+        &self,
+        key: &str,
+        expected_value: &str,
+        new_value: &str,
+        ttl_secs: u64,
+    ) -> Result<bool, RoutingError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +128,31 @@ impl IdempotencyGuard {
     }
 
     /// Release the lock (called when a payment is permanently abandoned).
-    pub async fn release(&self, key: &IdempotencyKey) -> Result<(), RoutingError> {
+    /// Verifies lock ownership before deleting to prevent releasing another
+    /// process's lock after TTL-based re-acquisition.
+    pub async fn release(
+        &self,
+        key: &IdempotencyKey,
+        payment_id: &PaymentId,
+    ) -> Result<(), RoutingError> {
         let redis_key = format!("cream:idemp:{}", key);
-        self.store.delete(&redis_key).await?;
-        tracing::debug!(key = %key, "idempotency lock released");
+        let expected = payment_id.as_uuid().to_string();
+        let deleted = self.store.delete_if_matches(&redis_key, &expected).await?;
+        if deleted {
+            tracing::debug!(key = %key, "idempotency lock released");
+        } else {
+            tracing::warn!(
+                key = %key,
+                payment_id = %payment_id,
+                "idempotency release skipped: lock not owned by this payment (TTL expired and re-acquired?)"
+            );
+        }
         Ok(())
     }
 
     /// Mark the payment as completed (refreshes TTL for idempotent returns).
+    /// Verifies lock ownership before overwriting to prevent corrupting another
+    /// process's lock after TTL-based re-acquisition.
     pub async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -128,10 +160,24 @@ impl IdempotencyGuard {
     ) -> Result<(), RoutingError> {
         let redis_key = format!("cream:idemp:{}", key);
         let payment_str = payment_id.as_uuid().to_string();
-        self.store
-            .set(&redis_key, &payment_str, self.config.lock_ttl_secs)
+        let updated = self
+            .store
+            .set_if_matches(
+                &redis_key,
+                &payment_str,
+                &payment_str,
+                self.config.lock_ttl_secs,
+            )
             .await?;
-        tracing::debug!(key = %key, "idempotency entry completed");
+        if updated {
+            tracing::debug!(key = %key, "idempotency entry completed");
+        } else {
+            tracing::warn!(
+                key = %key,
+                payment_id = %payment_id,
+                "idempotency complete skipped: lock not owned by this payment (TTL expired and re-acquired?)"
+            );
+        }
         Ok(())
     }
 }
@@ -176,16 +222,34 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         }
     }
 
-    async fn delete(&self, key: &str) -> Result<(), RoutingError> {
+    async fn delete_if_matches(
+        &self,
+        key: &str,
+        expected_value: &str,
+    ) -> Result<bool, RoutingError> {
         let mut data = self.data.lock().unwrap();
-        data.remove(key);
-        Ok(())
+        if data.get(key).map(|v| v.as_str()) == Some(expected_value) {
+            data.remove(key);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
-    async fn set(&self, key: &str, payment_id: &str, _ttl_secs: u64) -> Result<(), RoutingError> {
+    async fn set_if_matches(
+        &self,
+        key: &str,
+        expected_value: &str,
+        new_value: &str,
+        _ttl_secs: u64,
+    ) -> Result<bool, RoutingError> {
         let mut data = self.data.lock().unwrap();
-        data.insert(key.to_owned(), payment_id.to_owned());
-        Ok(())
+        if data.get(key).map(|v| v.as_str()) == Some(expected_value) {
+            data.insert(key.to_owned(), new_value.to_owned());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -239,10 +303,27 @@ mod tests {
         let pid2 = PaymentId::new();
 
         guard.acquire(&key, &pid1).await.unwrap();
-        guard.release(&key).await.unwrap();
+        guard.release(&key, &pid1).await.unwrap();
 
         let result = guard.acquire(&key, &pid2).await.unwrap();
         assert_eq!(result, IdempotencyOutcome::Acquired);
+    }
+
+    #[tokio::test]
+    async fn release_skips_if_not_owner() {
+        let guard = make_guard();
+        let key = IdempotencyKey::new("idem_ownership");
+        let pid1 = PaymentId::new();
+        let pid2 = PaymentId::new();
+
+        guard.acquire(&key, &pid1).await.unwrap();
+        // Try to release with a different payment_id — should not delete.
+        guard.release(&key, &pid2).await.unwrap();
+
+        // Key should still be held by pid1.
+        let pid3 = PaymentId::new();
+        let result = guard.acquire(&key, &pid3).await.unwrap();
+        assert_eq!(result, IdempotencyOutcome::Existing(pid1));
     }
 
     #[tokio::test]

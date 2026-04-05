@@ -72,7 +72,7 @@ impl PaymentOrchestrator {
                 if let Err(e) = self
                     .state
                     .idempotency_guard
-                    .release(&request.idempotency_key)
+                    .release(&request.idempotency_key, &payment.id)
                     .await
                 {
                     tracing::warn!(
@@ -122,10 +122,10 @@ impl PaymentOrchestrator {
 
         // --- Step 5: Routing engine selection ---
         // --- Step 6: Provider execution with failover ---
-        // If routing or provider execution fails after policy approval, we must
-        // transition the payment to Failed and release the idempotency key so
-        // the agent can retry. Without this, the payment is stranded in Approved
-        // forever with a permanently leaked idempotency key.
+        // If routing or provider execution fails after policy approval, we
+        // transition directly Approved → Failed (not via Submitted, since no
+        // provider was contacted for routing failures). Write an audit entry
+        // and release the idempotency key so the agent can retry.
         let routing = match self
             .state
             .route_selector
@@ -135,13 +135,15 @@ impl PaymentOrchestrator {
         {
             Ok(r) => r,
             Err(e) => {
-                payment.transition(PaymentStatus::Submitted).ok();
                 payment.transition(PaymentStatus::Failed).ok();
                 self.state.payment_repo.update_payment(&payment).await.ok();
+                self.write_audit(&payment, agent, &decision, None, None)
+                    .await
+                    .ok();
                 if let Err(rel_err) = self
                     .state
                     .idempotency_guard
-                    .release(&request.idempotency_key)
+                    .release(&request.idempotency_key, &payment.id)
                     .await
                 {
                     tracing::warn!(
@@ -161,14 +163,16 @@ impl PaymentOrchestrator {
             Ok(r) => r,
             Err(e) => {
                 if !payment.status().is_terminal() {
-                    payment.transition(PaymentStatus::Submitted).ok();
                     payment.transition(PaymentStatus::Failed).ok();
                     self.state.payment_repo.update_payment(&payment).await.ok();
                 }
+                self.write_audit(&payment, agent, &decision, Some(&routing), None)
+                    .await
+                    .ok();
                 if let Err(rel_err) = self
                     .state
                     .idempotency_guard
-                    .release(&request.idempotency_key)
+                    .release(&request.idempotency_key, &payment.id)
                     .await
                 {
                     tracing::warn!(
@@ -270,8 +274,8 @@ impl PaymentOrchestrator {
 
         // Step 5: Routing
         // Step 6: Provider execution
-        // Same error-recovery pattern as process(): if routing or execution fails,
-        // transition to Failed and return the error so the caller can handle it.
+        // Same error-recovery as process(): Approved → Failed (direct, not via
+        // Submitted) for pre-provider failures, with audit write.
         let routing = match self
             .state
             .route_selector
@@ -281,9 +285,11 @@ impl PaymentOrchestrator {
         {
             Ok(r) => r,
             Err(e) => {
-                payment.transition(PaymentStatus::Submitted).ok();
                 payment.transition(PaymentStatus::Failed).ok();
                 self.state.payment_repo.update_payment(&payment).await.ok();
+                self.write_audit(&payment, agent, &decision, None, None)
+                    .await
+                    .ok();
                 return Err(e);
             }
         };
@@ -295,10 +301,12 @@ impl PaymentOrchestrator {
             Ok(r) => r,
             Err(e) => {
                 if !payment.status().is_terminal() {
-                    payment.transition(PaymentStatus::Submitted).ok();
                     payment.transition(PaymentStatus::Failed).ok();
                     self.state.payment_repo.update_payment(&payment).await.ok();
                 }
+                self.write_audit(&payment, agent, &decision, Some(&routing), None)
+                    .await
+                    .ok();
                 return Err(e);
             }
         };
@@ -746,7 +754,7 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                     // Release the idempotency key — the payment is terminally blocked.
                     if let Err(e) = state
                         .idempotency_guard
-                        .release(&payment.request.idempotency_key)
+                        .release(&payment.request.idempotency_key, &payment.id)
                         .await
                     {
                         tracing::warn!(

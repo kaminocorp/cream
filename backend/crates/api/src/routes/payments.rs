@@ -423,7 +423,7 @@ pub async fn reject(
     // Release the idempotency key — the payment is terminally rejected.
     if let Err(e) = state
         .idempotency_guard
-        .release(&payment.request.idempotency_key)
+        .release(&payment.request.idempotency_key, &payment.id)
         .await
     {
         tracing::warn!(

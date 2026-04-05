@@ -22,11 +22,12 @@ pub const MAX_CATEGORY_OTHER_LEN: usize = 500;
 /// Valid transitions:
 /// ```text
 /// Pending → Validating → Approved → Submitted → Settled
+///                                 → Failed (pre-provider)
 ///                      → PendingApproval → Approved
 ///                                        → Rejected
 ///                                        → TimedOut → Blocked
 ///                      → Blocked
-/// Submitted → Failed
+/// Submitted → Failed (post-provider)
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +69,7 @@ impl PaymentStatus {
                 | (PaymentStatus::PendingApproval, PaymentStatus::TimedOut)
                 | (PaymentStatus::TimedOut, PaymentStatus::Blocked)
                 | (PaymentStatus::Approved, PaymentStatus::Submitted)
+                | (PaymentStatus::Approved, PaymentStatus::Failed)
                 | (PaymentStatus::Submitted, PaymentStatus::Settled)
                 | (PaymentStatus::Submitted, PaymentStatus::Failed)
         )
@@ -406,19 +408,20 @@ impl<'de> Deserialize<'de> for Payment {
             ));
         }
 
-        // Invariant 3: post-provider terminal states must HAVE provider fields.
-        // Settled and Failed are only reachable from Submitted, which requires
-        // set_provider(). A row with status=settled but no provider fields
-        // indicates data corruption — no provider attribution for the payment.
-        let must_have_provider =
-            matches!(raw.status, PaymentStatus::Settled | PaymentStatus::Failed);
-        if must_have_provider
+        // Invariant 3: Settled must HAVE provider fields. Settled is only
+        // reachable from Submitted, which requires set_provider(). A row with
+        // status=settled but no provider fields indicates data corruption.
+        //
+        // Failed is NOT required to have provider fields because failure can
+        // occur before any provider is contacted (routing failure, all providers
+        // exhausted). Failed WITH provider fields means the provider was
+        // contacted but the payment failed post-submission.
+        if raw.status == PaymentStatus::Settled
             && (raw.provider_id.is_none() || raw.provider_transaction_id.is_none())
         {
-            return Err(serde::de::Error::custom(format!(
-                "provider_id and provider_transaction_id must be set for terminal status {:?}",
-                raw.status
-            )));
+            return Err(serde::de::Error::custom(
+                "provider_id and provider_transaction_id must be set for Settled status",
+            ));
         }
 
         Ok(Payment {
@@ -633,6 +636,18 @@ mod tests {
         p.transition(PaymentStatus::TimedOut).unwrap();
         p.transition(PaymentStatus::Blocked).unwrap();
         assert!(p.status.is_terminal());
+    }
+
+    #[test]
+    fn valid_pre_provider_failure_path() {
+        // Approved → Failed is valid for pre-provider failures (routing
+        // failure, all providers exhausted). No set_provider() needed.
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.transition(PaymentStatus::Failed).unwrap();
+        assert!(p.status.is_terminal());
+        assert!(p.provider_id().is_none());
     }
 
     #[test]
@@ -1069,25 +1084,21 @@ mod tests {
         let result: Result<Payment, _> = serde_json::from_value(val);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("must be set for terminal status"));
+        assert!(err.contains("must be set for Settled status"));
     }
 
     #[test]
-    fn payment_deserialize_rejects_failed_without_provider() {
+    fn payment_deserialize_accepts_failed_without_provider() {
+        // Failed without provider fields is valid — represents a pre-provider
+        // failure (routing failure, all providers exhausted).
         let mut p = Payment::new(sample_request());
         p.transition(PaymentStatus::Validating).unwrap();
         p.transition(PaymentStatus::Approved).unwrap();
-        p.set_provider(ProviderId::new("stripe"), "ch_456".to_string())
-            .unwrap();
-        p.transition(PaymentStatus::Submitted).unwrap();
         p.transition(PaymentStatus::Failed).unwrap();
-        let mut val = serde_json::to_value(&p).unwrap();
-        val["provider_id"] = serde_json::Value::Null;
-        val["provider_transaction_id"] = serde_json::Value::Null;
+        let val = serde_json::to_value(&p).unwrap();
         let result: Result<Payment, _> = serde_json::from_value(val);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("must be set for terminal status"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status(), PaymentStatus::Failed);
     }
 
     #[test]
