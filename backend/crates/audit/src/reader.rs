@@ -458,7 +458,7 @@ impl AuditReader for PgAuditReader {
              request, justification, policy_evaluation, \
              routing_decision, provider_response, final_status, human_review, \
              on_chain_tx_hash \
-             FROM audit_log WHERE payment_id = $1 ORDER BY timestamp DESC, id DESC",
+             FROM audit_log WHERE payment_id = $1 ORDER BY timestamp DESC, id DESC LIMIT 1000",
         )
         .bind(*payment_id.as_uuid())
         .fetch_all(&self.pool)

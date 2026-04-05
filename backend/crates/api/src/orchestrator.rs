@@ -33,6 +33,9 @@ impl PaymentOrchestrator {
         // Inject agent_id from the authenticated session.
         request.agent_id = agent.agent.id;
 
+        // --- Step 3: Justification structural validation (before any state) ---
+        self.validate_justification(&request)?;
+
         // Create the payment entity in Pending state.
         let mut payment = Payment::new(request.clone());
 
@@ -53,17 +56,6 @@ impl PaymentOrchestrator {
 
         // Persist the new payment.
         self.state.payment_repo.insert_payment(&payment).await?;
-
-        // --- Step 3: Justification structural validation ---
-        if let Err(e) = self.validate_justification(&request) {
-            // Release the idempotency lock since the payment is abandoned.
-            let _ = self
-                .state
-                .idempotency_guard
-                .release(&request.idempotency_key)
-                .await;
-            return Err(e);
-        }
 
         // --- Step 4: Policy engine evaluation ---
         payment.transition(PaymentStatus::Validating)?;
@@ -146,11 +138,18 @@ impl PaymentOrchestrator {
         .await?;
 
         // Mark idempotency as completed.
-        let _ = self
+        if let Err(e) = self
             .state
             .idempotency_guard
             .complete(&request.idempotency_key, &payment.id)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                payment_id = %payment.id,
+                error = %e,
+                "idempotency guard completion failed; payment already persisted"
+            );
+        }
 
         Ok(PaymentResponse::from(&payment))
     }
@@ -484,12 +483,27 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                 // Still persist the TimedOut state.
             }
 
-            if let Err(e) = state.payment_repo.update_payment(&payment).await {
-                tracing::error!(payment_id = %payment_id, error = %e, "failed to update timed-out payment");
-                continue;
+            // Conditional update: only write if DB status is still pending_approval.
+            // If a human approved/rejected concurrently, this is a no-op (race lost).
+            let updated = state
+                .payment_repo
+                .update_payment_if_status(&payment, "pending_approval")
+                .await;
+            match updated {
+                Ok(true) => {
+                    tracing::warn!(payment_id = %payment_id, "escalation timed out, payment blocked");
+                }
+                Ok(false) => {
+                    tracing::info!(
+                        payment_id = %payment_id,
+                        "escalation timeout skipped: payment status changed concurrently"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(payment_id = %payment_id, error = %e, "failed to update timed-out payment");
+                    continue;
+                }
             }
-
-            tracing::warn!(payment_id = %payment_id, "escalation timed out, payment blocked");
         }
     }
 

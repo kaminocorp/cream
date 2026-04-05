@@ -45,6 +45,14 @@ pub trait PaymentRepository: Send + Sync {
 
     /// Find payments stuck in `pending_approval` past their escalation timeout.
     async fn find_expired_escalations(&self) -> Result<Vec<PaymentId>, ApiError>;
+
+    /// Conditionally update a payment only if its current DB status matches `expected_status`.
+    /// Returns `true` if the row was updated, `false` if status had already changed (race lost).
+    async fn update_payment_if_status(
+        &self,
+        payment: &Payment,
+        expected_status: &str,
+    ) -> Result<bool, ApiError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,9 +205,17 @@ impl PaymentRepository for PgPaymentRepository {
         .bind(req.agent_id.as_uuid())
         .bind(req.idempotency_key.as_str())
         .bind(req.amount)
-        .bind(currency_str.as_str().unwrap_or("USD"))
+        .bind(currency_str.as_str().ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "currency serialized to non-string JSON value"
+            ))
+        })?)
         .bind(&recipient_json)
-        .bind(rail_str.as_str().unwrap_or("auto"))
+        .bind(rail_str.as_str().ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "preferred_rail serialized to non-string JSON value"
+            ))
+        })?)
         .bind(&justification_json)
         .bind(&metadata_json)
         .bind(format!("{:?}", payment.status()).to_lowercase())
@@ -298,18 +314,36 @@ impl PaymentRepository for PgPaymentRepository {
 
         let mut summaries = Vec::with_capacity(rows.len());
         for row in rows {
-            let currency: Currency =
-                serde_json::from_value(serde_json::json!(row.currency)).unwrap_or(Currency::USD);
+            let currency: Currency = serde_json::from_value(serde_json::json!(row.currency))
+                .map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "corrupted currency '{}' in payments table: {e}",
+                        row.currency
+                    ))
+                })?;
             let category: PaymentCategory = row
                 .category
                 .as_deref()
-                .and_then(|c| serde_json::from_value(serde_json::json!(c)).ok())
+                .map(|c| serde_json::from_value(serde_json::json!(c)))
+                .transpose()
+                .map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!("corrupted category in payments table: {e}"))
+                })?
                 .unwrap_or(PaymentCategory::Other("unknown".to_string()));
             let status: PaymentStatus = serde_json::from_value(serde_json::json!(row.status))
-                .unwrap_or(PaymentStatus::Pending);
+                .map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "corrupted status '{}' in payments table: {e}",
+                        row.status
+                    ))
+                })?;
             let rail: RailPreference =
-                serde_json::from_value(serde_json::json!(row.preferred_rail))
-                    .unwrap_or(RailPreference::Auto);
+                serde_json::from_value(serde_json::json!(row.preferred_rail)).map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "corrupted preferred_rail '{}' in payments table: {e}",
+                        row.preferred_rail
+                    ))
+                })?;
 
             summaries.push(PaymentSummary {
                 amount: row.amount,
@@ -335,7 +369,11 @@ impl PaymentRepository for PgPaymentRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().filter_map(|(id,)| id).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id,)| id)
+            .map(|s| s.to_ascii_lowercase())
+            .collect())
     }
 
     async fn find_expired_escalations(&self) -> Result<Vec<PaymentId>, ApiError> {
@@ -358,5 +396,30 @@ impl PaymentRepository for PgPaymentRepository {
             .into_iter()
             .map(|(id,)| PaymentId::from_uuid(id))
             .collect())
+    }
+
+    async fn update_payment_if_status(
+        &self,
+        payment: &Payment,
+        expected_status: &str,
+    ) -> Result<bool, ApiError> {
+        let status_str = format!("{:?}", payment.status()).to_lowercase();
+        let provider_id_str = payment.provider_id().map(|p| p.as_str().to_string());
+        let provider_tx_id = payment.provider_transaction_id().map(|s| s.to_string());
+
+        let result = sqlx::query(
+            "UPDATE payments
+             SET status = $1, provider_id = $2, provider_tx_id = $3, updated_at = now()
+             WHERE id = $4 AND status = $5",
+        )
+        .bind(&status_str)
+        .bind(&provider_id_str)
+        .bind(&provider_tx_id)
+        .bind(payment.id.as_uuid())
+        .bind(expected_status)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 }

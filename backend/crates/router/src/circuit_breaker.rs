@@ -221,11 +221,18 @@ impl CircuitBreaker {
                 Ok(false)
             }
             CircuitState::HalfOpen => {
-                let count = self.store.get_half_open_count(provider_id).await?;
-                if count < self.config.half_open_max_requests {
-                    self.store.increment_half_open_count(provider_id).await?;
+                // Atomic increment-then-check: increment first, then verify the
+                // new count is within the limit. This prevents the race where
+                // concurrent requests all read the same count, all pass the check,
+                // and all increment — allowing more than half_open_max_requests through.
+                let new_count = self.store.increment_half_open_count(provider_id).await?;
+                if new_count <= self.config.half_open_max_requests {
                     Ok(true)
                 } else {
+                    // We incremented past the limit — we lost the race. The count
+                    // is now slightly over the limit, but this is benign: record_success
+                    // compares success_count against half_open_max_requests, not against
+                    // the request count. The extra increment is harmless.
                     Ok(false)
                 }
             }

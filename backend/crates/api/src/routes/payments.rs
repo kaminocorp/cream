@@ -133,51 +133,19 @@ pub async fn approve(
         )));
     }
 
-    // Transition to Approved.
+    // Transition to Approved with conditional update to prevent race with escalation monitor.
     payment.transition(PaymentStatus::Approved)?;
-    state.payment_repo.update_payment(&payment).await?;
+    let updated = state
+        .payment_repo
+        .update_payment_if_status(&payment, "pending_approval")
+        .await?;
+    if !updated {
+        return Err(ApiError::ValidationError(
+            "payment status changed concurrently (possibly timed out)".to_string(),
+        ));
+    }
 
-    // Write the human review audit entry.
-    let review = HumanReviewRecord {
-        reviewer_id: body.reviewer_id,
-        decision: PolicyAction::Approve,
-        reason: body.reason,
-        decided_at: Utc::now(),
-    };
-
-    let request_json = serde_json::to_value(&payment.request)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize request: {e}")))?;
-    let justification_json = serde_json::to_value(&payment.request.justification)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize justification: {e}")))?;
-
-    let audit_entry = AuditEntry {
-        id: AuditEntryId::new(),
-        timestamp: Utc::now(),
-        agent_id: payment.request.agent_id,
-        agent_profile_id: AgentProfileId::from_uuid(*payment.request.agent_id.as_uuid()),
-        payment_id: Some(payment.id),
-        request: request_json,
-        justification: justification_json,
-        policy_evaluation: PolicyEvaluationRecord {
-            rules_evaluated: vec![],
-            matching_rules: vec![],
-            final_decision: PolicyAction::Approve,
-            decision_latency_ms: 0,
-        },
-        routing_decision: None,
-        provider_response: None,
-        final_status: payment.status(),
-        human_review: Some(review),
-        on_chain_tx_hash: None,
-    };
-    state
-        .audit_writer
-        .append(&audit_entry, Some(payment.id))
-        .await
-        .map_err(ApiError::from)?;
-
-    // Resume the pipeline from routing onwards.
-    // Look up the agent + profile for routing.
+    // Look up the agent + profile for audit and routing.
     let agent_row: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT profile_id FROM agents WHERE id = $1")
             .bind(payment.request.agent_id.as_uuid())
@@ -249,6 +217,46 @@ pub async fn approve(
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize profile: {e}")))?;
 
     let auth_agent = crate::extractors::auth::AuthenticatedAgent { agent, profile };
+
+    // Write the human review audit entry (after profile lookup so we have the correct profile_id).
+    let review = HumanReviewRecord {
+        reviewer_id: body.reviewer_id,
+        decision: PolicyAction::Approve,
+        reason: body.reason,
+        decided_at: Utc::now(),
+    };
+
+    let request_json = serde_json::to_value(&payment.request)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize request: {e}")))?;
+    let justification_json = serde_json::to_value(&payment.request.justification)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize justification: {e}")))?;
+
+    let audit_entry = AuditEntry {
+        id: AuditEntryId::new(),
+        timestamp: Utc::now(),
+        agent_id: payment.request.agent_id,
+        agent_profile_id: auth_agent.profile.id,
+        payment_id: Some(payment.id),
+        request: request_json,
+        justification: justification_json,
+        policy_evaluation: PolicyEvaluationRecord {
+            rules_evaluated: vec![],
+            matching_rules: vec![],
+            final_decision: PolicyAction::Approve,
+            decision_latency_ms: 0,
+        },
+        routing_decision: None,
+        provider_response: None,
+        final_status: payment.status(),
+        human_review: Some(review),
+        on_chain_tx_hash: None,
+    };
+    state
+        .audit_writer
+        .append(&audit_entry, Some(payment.id))
+        .await
+        .map_err(ApiError::from)?;
+
     let orchestrator = PaymentOrchestrator::new(state);
     let response = orchestrator
         .resume_after_approval(&auth_agent, payment)
@@ -280,7 +288,25 @@ pub async fn reject(
     }
 
     payment.transition(PaymentStatus::Rejected)?;
-    state.payment_repo.update_payment(&payment).await?;
+    let updated = state
+        .payment_repo
+        .update_payment_if_status(&payment, "pending_approval")
+        .await?;
+    if !updated {
+        return Err(ApiError::ValidationError(
+            "payment status changed concurrently (possibly timed out)".to_string(),
+        ));
+    }
+
+    // Look up the agent's actual profile_id for a correct audit entry.
+    let agent_row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT profile_id FROM agents WHERE id = $1")
+            .bind(payment.request.agent_id.as_uuid())
+            .fetch_optional(&state.db)
+            .await?;
+    let profile_id = agent_row
+        .ok_or_else(|| ApiError::NotFound("agent".to_string()))?
+        .0;
 
     // Write audit entry with human review record.
     let review = HumanReviewRecord {
@@ -299,7 +325,7 @@ pub async fn reject(
         id: AuditEntryId::new(),
         timestamp: Utc::now(),
         agent_id: payment.request.agent_id,
-        agent_profile_id: AgentProfileId::from_uuid(*payment.request.agent_id.as_uuid()),
+        agent_profile_id: AgentProfileId::from_uuid(profile_id),
         payment_id: Some(payment.id),
         request: request_json,
         justification: justification_json,

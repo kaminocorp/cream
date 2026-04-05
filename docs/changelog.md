@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.1](#081--2026-04-05) — Cross-crate production review: 11 fixes targeting audit correctness, race safety, data corruption prevention, and schema hardening
 - [0.8.0](#080--2026-04-05) — API crate: Axum HTTP server, 12 REST endpoints, payment lifecycle orchestrator with failover, auth, rate limiting, escalation monitor
 - [0.7.12](#0712--2026-04-05) — Circuit breaker clock skew guard and u32 counter overflow protection
 - [0.7.11](#0711--2026-04-05) — Circuit breaker half-open fix: close only when all probe requests succeed, not on first success
@@ -37,6 +38,36 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.1 — 2026-04-05
+
+**Cross-crate production review: audit correctness, race safety, data corruption prevention, schema hardening**
+
+Comprehensive 7-agent parallel review of all 6 crates + migrations, targeting production readiness. 11 fixes across 4 crates and 1 migration, all additive (no reversals of prior hardenings). Central theme: eliminating silent data corruption paths, fixing race conditions in concurrent payment operations, and closing schema gaps.
+
+### Fixed
+
+- **Wrong `agent_profile_id` in approve/reject audit entries** (`api/routes/payments.rs`) — Both handlers used the agent's UUID as the profile ID when constructing audit entries, writing incorrect data to the immutable audit log. Moved agent/profile lookup before audit write so the correct `profile.id` is used. The approve handler now constructs `AuthenticatedAgent` before the audit entry; the reject handler now looks up the actual `profile_id` from the agents table
+- **Silent deserialization fallbacks in `load_recent_payments`** (`api/db.rs`) — `unwrap_or(Currency::USD)`, `unwrap_or(PaymentStatus::Pending)`, and `unwrap_or(RailPreference::Auto)` silently masked data corruption, feeding wrong data into policy evaluation (velocity limits, spend rates, duplicate detection). Replaced all with explicit error propagation that surfaces the corrupted field name and value
+- **Idempotency key released after payment INSERT on validation failure** (`api/orchestrator.rs`) — Justification validation ran after both `insert_payment` and `idempotency_guard.acquire()`. On validation failure, the idempotency key was released while the payment row remained in the DB. Moved justification validation before payment creation and idempotency acquisition, eliminating the inconsistent state window
+- **`insert_payment` silently defaulted currency/rail on serialization failure** (`api/db.rs`) — `unwrap_or("USD")` and `unwrap_or("auto")` on `serde_json::to_value().as_str()` could write wrong currency to the payments table. Replaced with `ok_or_else` that returns `ApiError::Internal` with a descriptive message
+- **Unbounded `get_by_payment()` audit query** (`audit/reader.rs`) — No LIMIT clause, unlike the bounded `query()` method (clamped to 1000). Added `LIMIT 1000` to prevent OOM on payments with many audit entries
+- **Race condition: approve/reject vs escalation timeout monitor** (`api/orchestrator.rs`, `api/db.rs`, `api/routes/payments.rs`) — Both the escalation timeout monitor and approve/reject handlers performed read-check-write without atomicity guarantees. Added `update_payment_if_status()` to `PaymentRepository` trait — a conditional UPDATE with `WHERE status = $expected` that returns whether the row was updated. Approve, reject, and escalation monitor all use this; concurrent losers get a clear error (handlers) or info log (monitor) instead of silently overwriting
+- **Half-open circuit breaker non-atomic increment** (`router/circuit_breaker.rs`) — `get_half_open_count` + check + `increment_half_open_count` was three separate operations, allowing more requests through than `half_open_max_requests` under concurrent load. Changed to increment-first-then-check: atomically increment via `increment_half_open_count` (returns new count), then compare `new_count <= max`. The extra increment past the limit is benign (success counting is independent)
+- **Missing index on `virtual_cards(provider_id)`** (new migration `20260405200003`) — No index for provider-level card lookups; the composite unique `(provider_id, provider_card_id)` doesn't serve as a leading index for provider_id-only queries
+- **Missing unique constraint on `webhook_endpoints(url)`** (new migration `20260405200003`) — Allowed duplicate webhook registrations at the DB level
+- **First-time merchant O(n) lookup** (`policy/rules/first_time_merchant.rs`, `api/db.rs`) — `HashSet::iter().any()` with per-element `to_ascii_lowercase()` instead of O(1) `HashSet::contains()`. Fixed by pre-lowercasing merchant identifiers in `load_known_merchants` and using `contains(&id_lower)` in the evaluator
+- **`idempotency_guard.complete()` error silently discarded** (`api/orchestrator.rs`) — `let _ =` on the completion result. Added WARN-level log with payment_id and error message. The payment is already persisted, so this is informational, not fatal
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 
