@@ -63,7 +63,19 @@ pub trait CircuitBreakerStore: Send + Sync {
         provider_id: &ProviderId,
     ) -> Result<u32, RoutingError>;
 
-    /// Reset the half-open request counter (called when transitioning into HalfOpen).
+    /// Get the number of successful responses recorded in HalfOpen.
+    async fn get_half_open_success_count(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Result<u32, RoutingError>;
+
+    /// Increment and return the half-open success count.
+    async fn increment_half_open_success_count(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Result<u32, RoutingError>;
+
+    /// Reset the half-open request and success counters (called when transitioning into HalfOpen).
     async fn reset_half_open_count(&self, provider_id: &ProviderId) -> Result<(), RoutingError>;
 
     /// Reset all circuit breaker state for a provider to Closed.
@@ -108,13 +120,16 @@ impl CircuitBreaker {
 
         let state = self.store.get_state(provider_id).await?;
         if state == CircuitState::HalfOpen {
-            let count = self.store.get_half_open_count(provider_id).await?;
-            // +1 because the current success hasn't been counted in half_open_count
-            // (half_open_count tracks requests allowed through, not successes)
-            if count >= self.config.half_open_max_requests {
+            let success_count = self
+                .store
+                .increment_half_open_success_count(provider_id)
+                .await?;
+            if success_count >= self.config.half_open_max_requests {
                 tracing::info!(
                     provider = %provider_id,
-                    "circuit breaker closing: enough successful requests in half-open"
+                    success_count,
+                    required = self.config.half_open_max_requests,
+                    "circuit breaker closing: all half-open requests succeeded"
                 );
                 self.store.reset(provider_id).await?;
             }
@@ -241,6 +256,7 @@ struct ProviderState {
     state: Option<CircuitState>,
     opened_at: Option<i64>,
     half_open_count: u32,
+    half_open_success_count: u32,
 }
 
 /// In-memory implementation of `CircuitBreakerStore` for unit tests.
@@ -356,10 +372,32 @@ impl CircuitBreakerStore for InMemoryCircuitBreakerStore {
         Ok(state.half_open_count)
     }
 
+    async fn get_half_open_success_count(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Result<u32, RoutingError> {
+        let data = self.data.lock().unwrap();
+        Ok(data
+            .get(provider_id.as_str())
+            .map(|s| s.half_open_success_count)
+            .unwrap_or(0))
+    }
+
+    async fn increment_half_open_success_count(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Result<u32, RoutingError> {
+        let mut data = self.data.lock().unwrap();
+        let state = data.entry(provider_id.as_str().to_owned()).or_default();
+        state.half_open_success_count += 1;
+        Ok(state.half_open_success_count)
+    }
+
     async fn reset_half_open_count(&self, provider_id: &ProviderId) -> Result<(), RoutingError> {
         let mut data = self.data.lock().unwrap();
         let state = data.entry(provider_id.as_str().to_owned()).or_default();
         state.half_open_count = 0;
+        state.half_open_success_count = 0;
         Ok(())
     }
 
@@ -369,6 +407,7 @@ impl CircuitBreakerStore for InMemoryCircuitBreakerStore {
         state.state = Some(CircuitState::Closed);
         state.opened_at = None;
         state.half_open_count = 0;
+        state.half_open_success_count = 0;
         Ok(())
     }
 }
@@ -492,15 +531,42 @@ mod tests {
             breaker.record_failure(&pid).await.unwrap();
         }
         breaker.is_allowed(&pid).await.unwrap(); // Transitions to HalfOpen, count=1
-
-        // Allow another request through
         breaker.is_allowed(&pid).await.unwrap(); // count=2
 
-        // Record enough successes to close
+        // First success: success_count=1, not yet >= 2 → stays HalfOpen
         breaker.record_success(&pid).await.unwrap();
+        assert_eq!(breaker.state(&pid).await.unwrap(), CircuitState::HalfOpen);
+
+        // Second success: success_count=2 >= 2 → close
         breaker.record_success(&pid).await.unwrap();
-        // half_open_count (2) >= half_open_max_requests (2) → close
         assert_eq!(breaker.state(&pid).await.unwrap(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn half_open_partial_success_does_not_close() {
+        // Verifies that a single success out of N allowed requests does NOT
+        // prematurely close the breaker — all N must succeed.
+        let store = InMemoryCircuitBreakerStore::new();
+        let config = CircuitBreakerConfig {
+            error_threshold: 0.5,
+            cooldown_secs: 0,
+            half_open_max_requests: 3,
+            ..Default::default()
+        };
+        let pid = ProviderId::new("test");
+        let breaker = CircuitBreaker::new(Box::new(store), config).unwrap();
+
+        // Trip → HalfOpen
+        for _ in 0..5 {
+            breaker.record_failure(&pid).await.unwrap();
+        }
+        breaker.is_allowed(&pid).await.unwrap(); // HalfOpen, count=1
+        breaker.is_allowed(&pid).await.unwrap(); // count=2
+        breaker.is_allowed(&pid).await.unwrap(); // count=3
+
+        // Only 1 success out of 3 allowed → must NOT close
+        breaker.record_success(&pid).await.unwrap();
+        assert_eq!(breaker.state(&pid).await.unwrap(), CircuitState::HalfOpen);
     }
 
     #[tokio::test]

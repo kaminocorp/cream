@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.11](#0711--2026-04-05) — Circuit breaker half-open fix: close only when all probe requests succeed, not on first success
 - [0.7.10](#0710--2026-04-05) — Cross-crate production review: Settled/Failed must have provider fields, audit deterministic ordering, settlement field pairing constraint, scorer deterministic tiebreaker, time_window offset bounds
 - [0.7.9](#079--2026-04-05) — Production review: Payment provider field state machine invariants, AuditEntry on_chain_tx_hash bounds, regex cache comment, virtual_cards composite unique constraint
 - [0.7.8](#078--2026-04-05) — Cross-crate production review: PaymentCategory::Other empty guard, IdempotencyKey max length, audit query deterministic ordering, time_window log accuracy, condition depth off-by-one
@@ -34,6 +35,34 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.11 — 2026-04-05
+
+**Phase 7.11: Circuit Breaker Half-Open Success Counting Fix**
+
+Production readiness review (router) fixing a concurrency-correctness issue in the circuit breaker's half-open → closed transition. The breaker previously tracked *requests allowed through* to decide when to close, meaning a single success could prematurely promote a partially-failing provider back to Closed when concurrent half-open requests were in flight. The fix introduces a dedicated success counter so the breaker only closes when all N probe requests have succeeded. The change is additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **Circuit breaker closes on first success in half-open under concurrency — premature provider promotion (MEDIUM)** — `record_success()` checked `half_open_count >= half_open_max_requests` to decide when to close the breaker, but `half_open_count` was incremented by `is_allowed()` (tracking requests *let through*, not successes). With `half_open_max_requests = 3` and 3 concurrent requests in flight, a single success arriving before pending failures would see `count(3) >= max(3)` and close the breaker — even if the other 2 requests failed. The failures would then arrive in Closed state and only affect the error rate, never re-opening the breaker. A provider with a 33% success rate could be promoted back to full traffic. Added a dedicated `half_open_success_count` to `CircuitBreakerStore`, incremented only in `record_success()`. The breaker now closes when `success_count >= half_open_max_requests`, requiring all probe requests to succeed
+
+### Added
+
+- `get_half_open_success_count()` and `increment_half_open_success_count()` methods on `CircuitBreakerStore` trait
+- `half_open_success_count` field in `InMemoryCircuitBreakerStore`
+- Success counter reset in `reset_half_open_count()` and `reset()` methods
+- 1 new test: `half_open_partial_success_does_not_close` — verifies 1 success out of 3 does not close the breaker
+- Updated existing `half_open_successes_close_breaker` test to verify incremental success counting (stays HalfOpen after first success, closes after second)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 365/365 passing (173 models + 14 audit + 108 policy + 17 providers + 53 router) |
 
 ---
 
