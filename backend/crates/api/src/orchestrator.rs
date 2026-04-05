@@ -256,6 +256,9 @@ impl PaymentOrchestrator {
 
     /// Resume the pipeline for a payment that was approved by a human reviewer.
     /// Picks up from Step 5 (routing).
+    ///
+    /// On failure, the idempotency key is released so the agent can retry.
+    /// On success, the caller (approve handler) is responsible for completing it.
     pub async fn resume_after_approval(
         &self,
         agent: &AuthenticatedAgent,
@@ -290,6 +293,19 @@ impl PaymentOrchestrator {
                 self.write_audit(&payment, agent, &decision, None, None)
                     .await
                     .ok();
+                // Release idempotency key so the agent can retry.
+                if let Err(rel_err) = self
+                    .state
+                    .idempotency_guard
+                    .release(&request.idempotency_key, &payment.id)
+                    .await
+                {
+                    tracing::warn!(
+                        payment_id = %payment.id,
+                        error = %rel_err,
+                        "failed to release idempotency key after routing failure in resume_after_approval"
+                    );
+                }
                 return Err(e);
             }
         };
@@ -307,6 +323,19 @@ impl PaymentOrchestrator {
                 self.write_audit(&payment, agent, &decision, Some(&routing), None)
                     .await
                     .ok();
+                // Release idempotency key so the agent can retry.
+                if let Err(rel_err) = self
+                    .state
+                    .idempotency_guard
+                    .release(&request.idempotency_key, &payment.id)
+                    .await
+                {
+                    tracing::warn!(
+                        payment_id = %payment.id,
+                        error = %rel_err,
+                        "failed to release idempotency key after provider failure in resume_after_approval"
+                    );
+                }
                 return Err(e);
             }
         };

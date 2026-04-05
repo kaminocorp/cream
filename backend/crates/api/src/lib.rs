@@ -15,6 +15,7 @@ pub use state::AppState;
 
 use axum::routing::{get, patch, post};
 use axum::Router;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Build the Axum router with all routes, middleware, and shared state.
 pub fn build_router(state: AppState) -> Router {
@@ -57,6 +58,37 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::request_id::propagate_request_id_layer())
         .layer(middleware::request_id::set_request_id_layer())
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(build_cors_layer(&state.config.cors_allowed_origins))
         .with_state(state)
+}
+
+/// Build a CORS layer from configured origins.
+///
+/// If `allowed_origins` is empty (no `CORS_ALLOWED_ORIGINS` set), falls back to
+/// permissive mode for local development. In production, operators MUST set
+/// `CORS_ALLOWED_ORIGINS` to restrict cross-origin access.
+fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    if allowed_origins.is_empty() {
+        tracing::warn!("CORS_ALLOWED_ORIGINS not set — using permissive CORS (development only)");
+        return CorsLayer::permissive();
+    }
+
+    let origins: Vec<axum::http::HeaderValue> = allowed_origins
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ])
 }

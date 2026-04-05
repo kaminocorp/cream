@@ -1,2 +1,2 @@
--- Reverse: convert uppercase actions back to lowercase for the old CHECK constraint.
-UPDATE policy_rules SET action = LOWER(action) WHERE action != LOWER(action);
+-- No-op: the data migration was moved into 20260405200008.
+-- The down migration for 20260405200008 handles reverting action values to lowercase.

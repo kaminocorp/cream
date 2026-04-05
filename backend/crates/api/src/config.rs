@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub rate_limit_window_secs: u64,
     /// How often (seconds) the escalation timeout monitor checks for expired approvals.
     pub escalation_check_interval_secs: u64,
+    /// Comma-separated list of allowed CORS origins (e.g. "https://dashboard.example.com").
+    /// If empty or unset, defaults to permissive (development only).
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl AppConfig {
@@ -31,6 +34,12 @@ impl AppConfig {
         let rate_limit_requests = parse_env("RATE_LIMIT_REQUESTS", 100)?;
         let rate_limit_window_secs = parse_env("RATE_LIMIT_WINDOW_SECS", 60)?;
         let escalation_check_interval_secs = parse_env("ESCALATION_CHECK_INTERVAL_SECS", 30)?;
+        let cors_allowed_origins: Vec<String> = env::var("CORS_ALLOWED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
         Ok(Self {
             database_url,
@@ -40,6 +49,7 @@ impl AppConfig {
             rate_limit_requests,
             rate_limit_window_secs,
             escalation_check_interval_secs,
+            cors_allowed_origins,
         })
     }
 }

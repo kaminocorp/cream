@@ -69,17 +69,22 @@ async fn increment_counter(
     window_secs: u64,
 ) -> Result<u64, redis::RedisError> {
     let mut conn = redis.clone();
-    let count: u64 = redis::cmd("INCR").arg(key).query_async(&mut conn).await?;
 
-    // Set expiry only on the first increment (when count == 1) to avoid
-    // resetting the TTL on subsequent requests within the same window.
-    if count == 1 {
-        let _: () = redis::cmd("EXPIRE")
-            .arg(key)
-            .arg(window_secs)
-            .query_async(&mut conn)
-            .await?;
-    }
+    // Use a pipeline to make INCR + EXPIRE atomic at the network level.
+    // EXPIRE is sent on every request (not just count==1) to be self-healing:
+    // if a prior EXPIRE was lost due to a crash between INCR and EXPIRE,
+    // the next request will set the TTL correctly. The slight overhead of
+    // a redundant EXPIRE is negligible compared to the risk of a key
+    // leaking without TTL and permanently rate-limiting an agent.
+    let (count,): (u64,) = redis::pipe()
+        .cmd("INCR")
+        .arg(key)
+        .cmd("EXPIRE")
+        .arg(key)
+        .arg(window_secs)
+        .ignore()
+        .query_async(&mut conn)
+        .await?;
 
     Ok(count)
 }

@@ -230,6 +230,36 @@ fn geographic_passes_when_country_allowed() {
     assert_eq!(result, RuleResult::Pass);
 }
 
+#[test]
+fn geographic_triggers_when_country_is_none_and_restrictions_configured() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.profile.geographic_restrictions = vec![CountryCode::new("SG")];
+    ctx.request.recipient.country = None; // omitted country
+    let rule = make_rule(
+        "recipient.country",
+        serde_json::json!("SG"),
+        PolicyAction::Block,
+    );
+    // Fail-closed: restrictions configured but country unknown → trigger.
+    let result = GeographicEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Triggered(PolicyAction::Block));
+}
+
+#[test]
+fn geographic_passes_when_country_is_none_and_no_restrictions() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.profile.geographic_restrictions = vec![]; // no restrictions
+    ctx.request.recipient.country = None;
+    let rule = make_rule(
+        "recipient.country",
+        serde_json::json!("SG"),
+        PolicyAction::Block,
+    );
+    // No restrictions = all allowed, regardless of country presence.
+    let result = GeographicEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
 // ---------------------------------------------------------------------------
 // Rail Restriction tests
 // ---------------------------------------------------------------------------

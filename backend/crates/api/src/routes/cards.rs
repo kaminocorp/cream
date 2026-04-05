@@ -84,9 +84,25 @@ pub async fn create(
     .bind(card.agent_id.as_uuid())
     .bind(card.provider.as_str())
     .bind(&card.provider_card_id)
-    .bind(format!("{:?}", card.card_type).to_lowercase())
+    .bind(
+        serde_json::to_value(card.card_type)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize card_type: {e}")))?
+            .as_str()
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!("card_type did not serialize to string"))
+            })?
+            .to_string(),
+    )
     .bind(&controls_json)
-    .bind(format!("{:?}", card.status).to_lowercase())
+    .bind(
+        serde_json::to_value(card.status)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize card status: {e}")))?
+            .as_str()
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!("card status did not serialize to string"))
+            })?
+            .to_string(),
+    )
     .bind(card.expires_at)
     .execute(&state.db)
     .await?;

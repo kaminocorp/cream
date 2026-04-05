@@ -3,7 +3,9 @@
 
 -- C2: PolicyAction DB CHECK uses lowercase but Rust serde uses SCREAMING_SNAKE_CASE.
 -- Every load_rules() call fails because serde cannot deserialize 'approve' as "APPROVE".
+-- Data migration MUST run before the new CHECK to avoid constraint violation on non-empty tables.
 ALTER TABLE policy_rules DROP CONSTRAINT IF EXISTS policy_rules_action_check;
+UPDATE policy_rules SET action = UPPER(action) WHERE action != UPPER(action);
 ALTER TABLE policy_rules
     ADD CONSTRAINT policy_rules_action_check
         CHECK (action IN ('APPROVE', 'BLOCK', 'ESCALATE'));

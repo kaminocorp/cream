@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.10](#0810--2026-04-05) — Production review: CardType Debug formatting DB mismatch, migration ordering fix, idempotency leak on approve failure, geographic restriction fail-closed, CORS hardening, rate limiter atomicity
 - [0.8.9](#089--2026-04-05) — Production review: PaymentStatus DB serialization, ghost Failed records, missing audit on failure paths, idempotency lock ownership, escalation timeout stuck payments, PolicyAction data migration
 - [0.8.8](#088--2026-04-05) — Production review: Currency serde format, PolicyAction DB CHECK, NULL spending limits, idempotency leak on provider failure, escalation timeout query, duplicate detection status filter, merchant_check compound conditions, schema hardening
 - [0.8.7](#087--2026-04-05) — Production review: ProviderError info leak, is_terminal state machine correctness, idempotency_keys DB constraint
@@ -46,6 +47,38 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.10 — 2026-04-05
+
+**Production review: CardType Debug formatting DB mismatch, migration ordering fix, idempotency leak on approve failure, geographic restriction fail-closed, CORS hardening, rate limiter atomicity**
+
+Full 7-agent production readiness review (one per crate + migrations) with manual cross-verification against actual source code. ~20 candidate findings surfaced across all agents; after line-by-line verification, 6 genuine fixes confirmed across 7 files. All changes are additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **`format!("{:?}", card.card_type).to_lowercase()` produces wrong DB values — every virtual card INSERT fails (HIGH)** (`api/routes/cards.rs`, 2 occurrences: `card_type` and `card.status`) — `Debug` on `CardType::SingleUse` produces `"SingleUse"` → `.to_lowercase()` = `"singleuse"`. The DB CHECK constraint expects `"single_use"`. Same class of bug as the CRITICAL `PaymentStatus` fix in v0.8.9, but applied to card fields. Replaced both occurrences with `serde_json::to_value()` → `.as_str()`, ensuring the persisted string matches the serde contract (which the model tests confirm produces `"single_use"`)
+- **Migration `20260405200008` adds uppercase PolicyAction CHECK before data migration — fails on non-empty databases (HIGH)** (`20260405200008`, `20260405200009`) — The prior migration dropped `CHECK (action IN ('approve', 'block', 'escalate'))` and added `CHECK (action IN ('APPROVE', 'BLOCK', 'ESCALATE'))` without first updating existing rows. PostgreSQL validates existing rows on `ADD CONSTRAINT CHECK`, so any database with pre-existing lowercase action values would fail. Moved the `UPDATE policy_rules SET action = UPPER(action)` from migration 9 into migration 8, before the `ADD CONSTRAINT`. Migration 9 is now a no-op (retained for migration history continuity)
+- **`resume_after_approval` does not release idempotency key on failure — agent locked out of retries (MEDIUM)** (`api/orchestrator.rs`, 2 error paths) — When routing or provider execution failed after human approval, the error paths transitioned the payment to `Failed` and wrote audit entries, but did not release the idempotency key. The key remained held in Redis until TTL expiry (~300s), during which the agent received 409 Conflict on retries. The same paths in `process()` correctly released the key (added in v0.8.8), but `resume_after_approval` was missed. Added matching `idempotency_guard.release()` calls in both routing-failure and provider-failure error paths
+- **Geographic restriction bypassed when recipient country is `None` — policy evasion vector (MEDIUM)** (`policy/rules/geographic.rs`) — When `geographic_restrictions` was configured but the payment's `recipient.country` was `None`, the evaluator returned `Pass`, allowing agents to bypass geographic controls by omitting the country field. Changed to **fail-closed**: if restrictions exist and country is unknown, the rule now triggers (block/escalate). No-restriction profiles (empty `geographic_restrictions`) still pass regardless of country presence
+- **CORS fully permissive in production — cross-origin attack surface (MEDIUM)** (`api/lib.rs`, `api/config.rs`) — `CorsLayer::permissive()` allowed requests from any origin with any method and headers. Added `CORS_ALLOWED_ORIGINS` environment variable (comma-separated list of allowed origins). When set, only listed origins are allowed with explicit method and header restrictions. When unset, falls back to permissive mode with a WARN log (development only)
+- **Rate limiter INCR/EXPIRE not atomic — key can leak without TTL (MEDIUM)** (`api/middleware/rate_limit.rs`) — `INCR` and `EXPIRE` were two separate Redis commands. If the process crashed between them (when count==1), the key persisted forever without a TTL, permanently rate-limiting the agent. Replaced with a Redis pipeline that sends both commands atomically. `EXPIRE` is now sent on every request (not just count==1) as a self-healing measure — if a prior `EXPIRE` was lost, the next request sets the TTL correctly
+
+### Added
+
+- `geographic_triggers_when_country_is_none_and_restrictions_configured` test (policy)
+- `geographic_passes_when_country_is_none_and_no_restrictions` test (policy)
+- `cors_allowed_origins` field on `AppConfig` with `CORS_ALLOWED_ORIGINS` env var support
+- `build_cors_layer()` helper for configurable CORS
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 382/382 passing (174 models + 14 audit + 110 policy + 17 providers + 55 router + 11 api + 1 integration) |
 
 ---
 

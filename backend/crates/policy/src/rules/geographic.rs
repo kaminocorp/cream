@@ -6,7 +6,9 @@ use crate::evaluator::{RuleEvaluator, RuleResult};
 /// Blocks payments to recipients in countries not in the profile's allowed list.
 ///
 /// If `geographic_restrictions` is empty, all countries are allowed.
-/// If the recipient has no country, the rule passes (country is optional).
+/// If the recipient has no country and restrictions are configured, the rule
+/// triggers (fail-closed) — an agent cannot bypass geographic controls by
+/// omitting the country field.
 pub struct GeographicEvaluator;
 
 impl RuleEvaluator for GeographicEvaluator {
@@ -17,7 +19,8 @@ impl RuleEvaluator for GeographicEvaluator {
 
         let recipient_country = match &ctx.request.recipient.country {
             Some(c) => c,
-            None => return RuleResult::Pass,
+            // Fail-closed: restrictions are configured but country is unknown.
+            None => return RuleResult::Triggered(rule.action),
         };
 
         let allowed = ctx
