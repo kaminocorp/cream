@@ -139,7 +139,7 @@ mod tests {
             "max_per_transaction": "100.00",
             "max_per_cycle": "1000.00",
             "allowed_mcc_codes": ["5411"],
-            "currency": "S_G_D"
+            "currency": "SGD"
         });
         let controls: CardControls = serde_json::from_value(json).unwrap();
         assert!(controls.max_per_transaction.is_some());
@@ -149,7 +149,7 @@ mod tests {
     fn card_controls_none_limits_accepted() {
         let json = serde_json::json!({
             "allowed_mcc_codes": [],
-            "currency": "U_S_D"
+            "currency": "USD"
         });
         let controls: CardControls = serde_json::from_value(json).unwrap();
         assert!(controls.max_per_transaction.is_none());
@@ -161,7 +161,7 @@ mod tests {
         let json = serde_json::json!({
             "max_per_transaction": "0",
             "allowed_mcc_codes": [],
-            "currency": "U_S_D"
+            "currency": "USD"
         });
         let result: Result<CardControls, _> = serde_json::from_value(json);
         assert!(result.is_err());
@@ -176,7 +176,7 @@ mod tests {
         let json = serde_json::json!({
             "max_per_cycle": "-50.00",
             "allowed_mcc_codes": [],
-            "currency": "U_S_D"
+            "currency": "USD"
         });
         let result: Result<CardControls, _> = serde_json::from_value(json);
         assert!(result.is_err());

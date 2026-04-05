@@ -721,7 +721,7 @@ fn engine_unknown_rule_type_approve_action_continues() {
 #[test]
 fn condition_all_requires_all_true() {
     let ctx = test_context(Decimal::new(600, 0));
-    // Currency::SGD serializes as "S_G_D" due to SCREAMING_SNAKE_CASE serde rename
+    // Currency::SGD serializes as "SGD" (variant name matches ISO 4217 code)
     let sgd_value = serde_json::to_value(Currency::SGD).unwrap();
     let condition = PolicyCondition::All(vec![
         PolicyCondition::FieldCheck(FieldCheck {

@@ -32,6 +32,9 @@ pub struct PolicyDecision {
     pub matching_rules: Vec<PolicyRuleId>,
     /// How long the evaluation took, in milliseconds.
     pub latency_ms: u64,
+    /// The specific rule that triggered escalation (when action == Escalate).
+    /// Used by the escalation timeout monitor to look up the correct timeout.
+    pub escalation_rule_id: Option<PolicyRuleId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +120,7 @@ impl PolicyEngine {
         let mut rules_evaluated = Vec::new();
         let mut matching_rules = Vec::new();
         let mut has_escalate = false;
+        let mut escalation_rule_id: Option<PolicyRuleId> = None;
 
         for rule in &sorted_rules {
             // Use explicit rule_type if set; fall back to inference from
@@ -149,10 +153,14 @@ impl PolicyEngine {
                                 rules_evaluated,
                                 matching_rules,
                                 latency_ms: start.elapsed().as_millis() as u64,
+                                escalation_rule_id: None,
                             });
                         }
                         PolicyAction::Escalate => {
                             has_escalate = true;
+                            if escalation_rule_id.is_none() {
+                                escalation_rule_id = Some(rule.id);
+                            }
                         }
                         PolicyAction::Approve => {}
                     }
@@ -172,11 +180,15 @@ impl PolicyEngine {
                         rules_evaluated,
                         matching_rules,
                         latency_ms: start.elapsed().as_millis() as u64,
+                        escalation_rule_id: None,
                     });
                 }
                 RuleResult::Triggered(PolicyAction::Escalate) => {
                     matching_rules.push(rule.id);
                     has_escalate = true;
+                    if escalation_rule_id.is_none() {
+                        escalation_rule_id = Some(rule.id);
+                    }
                     tracing::info!(rule_id = %rule.id, "rule triggered: ESCALATE");
                     // Continue evaluating — a later Block may override
                 }
@@ -198,6 +210,7 @@ impl PolicyEngine {
             rules_evaluated,
             matching_rules,
             latency_ms: start.elapsed().as_millis() as u64,
+            escalation_rule_id,
         })
     }
 }

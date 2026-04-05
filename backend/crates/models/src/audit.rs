@@ -387,7 +387,7 @@ mod tests {
             "transaction_id": "ch_123abc",
             "status": "succeeded",
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let record: ProviderResponseRecord = serde_json::from_value(json).unwrap();
@@ -403,7 +403,7 @@ mod tests {
             "transaction_id": long_id,
             "status": "succeeded",
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -419,7 +419,7 @@ mod tests {
             "transaction_id": "ch_123",
             "status": long_status,
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -525,7 +525,7 @@ mod tests {
             "transaction_id": "",
             "status": "succeeded",
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -542,7 +542,7 @@ mod tests {
             "transaction_id": "   ",
             "status": "succeeded",
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -558,7 +558,7 @@ mod tests {
             "transaction_id": "ch_123abc",
             "status": "",
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -575,7 +575,7 @@ mod tests {
             "transaction_id": "ch_123abc",
             "status": "   ",
             "amount_settled": "149.99",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -595,7 +595,7 @@ mod tests {
             "transaction_id": "ch_123abc",
             "status": "succeeded",
             "amount_settled": "0.00",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -612,7 +612,7 @@ mod tests {
             "transaction_id": "ch_123abc",
             "status": "succeeded",
             "amount_settled": "-5.00",
-            "currency": "S_G_D",
+            "currency": "SGD",
             "latency_ms": 187
         });
         let result: Result<ProviderResponseRecord, _> = serde_json::from_value(json);
@@ -631,7 +631,7 @@ mod tests {
             "transaction_id": exact_id,
             "status": exact_status,
             "amount_settled": "100.00",
-            "currency": "U_S_D",
+            "currency": "USD",
             "latency_ms": 100
         });
         let record: ProviderResponseRecord = serde_json::from_value(json).unwrap();

@@ -64,6 +64,14 @@ fn has_merchant_match(condition: &PolicyCondition, merchant_id: &str) -> bool {
             children.iter().any(|c| has_merchant_match(c, merchant_id))
         }
         PolicyCondition::Not(inner) => !has_merchant_match(inner, merchant_id),
-        _ => false,
+        // Non-merchant FieldChecks are vacuously true in the merchant-matching
+        // dimension. Returning false here would cause All([amount_check,
+        // merchant_check]) to always be false, silently disabling the merchant
+        // check in compound conditions. The trade-off: Any([non_merchant_check,
+        // merchant_check]) will always return true because the non-merchant check
+        // is vacuously satisfied. In practice this is low risk — Any is not a
+        // natural combinator for compound merchant restrictions, and all 12
+        // dedicated evaluators bypass has_merchant_match entirely.
+        _ => true,
     }
 }

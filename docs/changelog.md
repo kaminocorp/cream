@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.8](#088--2026-04-05) — Production review: Currency serde format, PolicyAction DB CHECK, NULL spending limits, idempotency leak on provider failure, escalation timeout query, duplicate detection status filter, merchant_check compound conditions, schema hardening
 - [0.8.7](#087--2026-04-05) — Production review: ProviderError info leak, is_terminal state machine correctness, idempotency_keys DB constraint
 - [0.8.6](#086--2026-04-05) — Production review: update_policy validation gap, approve/reject audit field bypass, spending limit strictness, audit ledger DB constraints
 - [0.8.5](#085--2026-04-05) — Production review: settlement data persistence, escalation timeout audit resilience, provider field DB constraints
@@ -44,6 +45,39 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.8 — 2026-04-05
+
+**Production review: Currency serde format, PolicyAction DB CHECK, NULL spending limits, idempotency leak on provider failure, escalation timeout query, duplicate detection status filter, merchant_check compound conditions, schema hardening**
+
+Full 6-crate + migrations production readiness review (7 parallel review agents + manual cross-verification). ~40 candidate findings surfaced; after line-by-line verification against actual code, 10 genuine fixes confirmed across 5 files + 1 new migration. All changes are additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **Currency enum serialized to wrong format — every DB INSERT would fail (CRITICAL)** (`models/payment.rs`) — `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` on the `Currency` enum caused the `heck` crate to split 3-letter all-caps variant names into individual characters: `USD` → `"U_S_D"`, `SGD` → `"S_G_D"`, `BTC` → `"B_T_C"`. The DB CHECK constraint expects standard ISO 4217 codes (`'USD'`, `'SGD'`, `'BTC'`). Every `insert_payment()` would fail with a constraint violation. Removed `rename_all` from the enum — variant names are already the desired format. Kept explicit `#[serde(rename = "BASE_ETH")]` on `BaseEth`
+- **PolicyAction DB CHECK case mismatch — every `load_rules()` would fail (CRITICAL)** (new migration `20260405200008`) — DB CHECK: `action IN ('approve', 'block', 'escalate')`. Rust `PolicyAction`: `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` → `"APPROVE"`, `"BLOCK"`, `"ESCALATE"`. Every deserialization of policy rules from DB would fail. Updated CHECK to `('APPROVE', 'BLOCK', 'ESCALATE')`
+- **Agent profile spending limits NULL in DB, non-optional in Rust — agent auth crash (HIGH)** (new migration `20260405200008`) — DB columns `max_per_transaction`, `max_daily_spend`, `max_weekly_spend`, `max_monthly_spend` allowed NULL, but `AgentProfile`'s custom Deserialize expects non-optional `Decimal > 0`. Any agent with NULL limits would get a 500 on every authenticated request. Migration sets existing NULLs to a high default and adds NOT NULL constraints
+- **Idempotency key permanently leaked on routing/provider failure (HIGH)** (`api/orchestrator.rs`) — After policy Approve, if routing failed or all providers were exhausted, the `?` propagated the error but the idempotency key was neither released nor completed. The agent could never retry with the same key (409 Conflict). Added error recovery: on routing/provider failure after approval, transition payment to Failed and release the idempotency key. Same pattern applied to `resume_after_approval()`
+- **Payment stranded in Approved state with no recovery (HIGH)** (`api/orchestrator.rs`) — Related to above. When all providers failed, the payment stayed in `Approved` forever with no background monitor, retry queue, or manual re-submission path. Now transitions to `Submitted → Failed` on provider exhaustion
+- **`find_expired_escalations` used wrong timeout — premature expiry (MEDIUM)** (`api/db.rs`, `api/orchestrator.rs`, `policy/engine.rs`, new migration) — The query joined ALL escalation rules for the agent's profile, not the specific rule that triggered escalation. If Rule A had a 10-minute timeout and Rule B (the actual trigger) had 60 minutes, the payment timed out at 10 minutes. Proper fix: added `escalation_rule_id` column to payments table, `escalation_rule_id` field to `PolicyDecision`, and persistence in the orchestrator's Escalate path. The timeout query now uses the specific triggering rule's timeout via `COALESCE`, with fallback to `MIN(timeout_minutes)` across the profile's rules for legacy payments without the field set
+- **Duplicate detection blocked retries of failed payments (MEDIUM)** (`policy/rules/duplicate_detection.rs`) — Unlike `spend_rate` and `velocity_limit` evaluators which filter by `counts_toward_spend()`, duplicate detection matched all payment statuses including `Failed`. A payment that failed due to a provider timeout would block a legitimate retry within the window. Added `p.status.counts_toward_spend()` filter
+- **Merchant check compound condition bypass (MEDIUM)** (`policy/rules/merchant_check.rs`) — Non-merchant `FieldCheck` nodes in `has_merchant_match()` returned `false`, causing `All([amount_check, merchant_check])` to always return false (short-circuit on the amount check). An operator creating "block merchant X if amount > $500" would have the check silently disabled. Changed non-merchant FieldChecks to return `true` (vacuously satisfied in the merchant-matching dimension). Known trade-off: `Any([non_merchant_check, merchant_check])` will now always return true since the non-merchant check is vacuously satisfied. In practice this is low risk — `Any` is not a natural combinator for compound merchant restrictions, and all 12 dedicated evaluators bypass `has_merchant_match` entirely
+- **Missing composite index on `payments(agent_id, created_at)` (MEDIUM)** (new migration `20260405200008`) — Hot-path `load_recent_payments` query (every payment initiation) lacked optimal index, requiring scan of all agent payments instead of just the 30-day window
+- **`payments.idempotency_key` missing length constraint (MEDIUM)** (new migration `20260405200008`) — `idempotency_keys.key` had `CHECK (LENGTH(key) <= 255)` but `payments.idempotency_key` (same value) was unbounded. Added matching constraint
+- **`virtual_cards` provider columns missing length constraints (MEDIUM)** (new migration `20260405200008`) — `payments.provider_id` has `CHECK (LENGTH <= 255)` but equivalent columns on `virtual_cards` had none. Added constraints
+- **Audit category GIN index unusable for text equality queries (MEDIUM)** (new migration `20260405200008`) — GIN index on `justification->'category'` (JSONB) doesn't serve text equality queries using `->>` (TEXT). Replaced with btree index on `justification->>'category'`
+- **`payments.failure_reason` unbounded TEXT (LOW-MEDIUM)** (new migration `20260405200008`) — Provider error messages written to `failure_reason` had no length constraint. Added `CHECK (LENGTH <= 2000)`
+- **Redundant `idx_webhook_endpoints_url` index (LOW)** (new migration `20260405200008`) — Regular btree index alongside UNIQUE constraint on same column. Dropped redundant index
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 

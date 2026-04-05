@@ -45,8 +45,13 @@ impl RuleEvaluator for DuplicateDetectionEvaluator {
         let cutoff = ctx.current_time - Duration::minutes(window_minutes);
 
         let request_id_lower = ctx.request.recipient.identifier.to_ascii_lowercase();
+        // Only consider payments that count toward spend (excludes Failed, Blocked,
+        // Rejected, TimedOut). Failed payments should not block legitimate retries —
+        // a provider timeout or transient error is the most common reason for a
+        // same-amount retry within the duplicate window.
         let is_duplicate = ctx.recent_payments.iter().any(|p| {
-            p.created_at >= cutoff
+            p.status.counts_toward_spend()
+                && p.created_at >= cutoff
                 && p.amount == ctx.request.amount
                 && p.currency == ctx.request.currency
                 && p.recipient_identifier.to_ascii_lowercase() == request_id_lower

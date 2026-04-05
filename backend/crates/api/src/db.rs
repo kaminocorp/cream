@@ -43,6 +43,15 @@ pub trait PaymentRepository: Send + Sync {
     /// Load the set of merchant identifiers this agent has previously settled with.
     async fn load_known_merchants(&self, agent_id: &AgentId) -> Result<HashSet<String>, ApiError>;
 
+    /// Persist the ID of the policy rule that triggered escalation.
+    /// Called when the policy engine returns Escalate so the timeout monitor
+    /// can use the correct rule's timeout_minutes.
+    async fn persist_escalation_rule(
+        &self,
+        payment_id: &PaymentId,
+        rule_id: &cream_models::prelude::PolicyRuleId,
+    ) -> Result<(), ApiError>;
+
     /// Find payments stuck in `pending_approval` past their escalation timeout.
     async fn find_expired_escalations(&self) -> Result<Vec<PaymentId>, ApiError>;
 
@@ -390,17 +399,43 @@ impl PaymentRepository for PgPaymentRepository {
             .collect())
     }
 
+    async fn persist_escalation_rule(
+        &self,
+        payment_id: &PaymentId,
+        rule_id: &cream_models::prelude::PolicyRuleId,
+    ) -> Result<(), ApiError> {
+        sqlx::query(
+            "UPDATE payments SET escalation_rule_id = $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(rule_id.as_uuid())
+        .bind(payment_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn find_expired_escalations(&self) -> Result<Vec<PaymentId>, ApiError> {
+        // When escalation_rule_id is set, use that specific rule's timeout.
+        // Fallback to MIN timeout across all profile escalation rules for
+        // legacy payments that don't have escalation_rule_id set.
         let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-            r#"SELECT p.id
+            r#"SELECT DISTINCT p.id
                FROM payments p
                JOIN agents a ON a.id = p.agent_id
-               JOIN policy_rules pr ON pr.profile_id = a.profile_id
                WHERE p.status = 'pending_approval'
-                 AND pr.escalation IS NOT NULL
-                 AND pr.enabled = true
                  AND p.updated_at + make_interval(
-                     mins := (pr.escalation->>'timeout_minutes')::int
+                     mins := COALESCE(
+                         (SELECT (pr.escalation->>'timeout_minutes')::int
+                          FROM policy_rules pr
+                          WHERE pr.id = p.escalation_rule_id
+                            AND pr.escalation IS NOT NULL
+                            AND pr.enabled = true),
+                         (SELECT MIN((pr2.escalation->>'timeout_minutes')::int)
+                          FROM policy_rules pr2
+                          WHERE pr2.profile_id = a.profile_id
+                            AND pr2.escalation IS NOT NULL
+                            AND pr2.enabled = true)
+                     )
                  ) < now()"#,
         )
         .fetch_all(&self.pool)

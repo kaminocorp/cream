@@ -113,7 +113,6 @@ impl PaymentStatus {
 /// Covers ~95% of global fiat transaction volume and the major stablecoins
 /// / crypto assets relevant to agent payments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Currency {
     // Major fiat

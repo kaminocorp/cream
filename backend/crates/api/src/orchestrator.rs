@@ -92,6 +92,23 @@ impl PaymentOrchestrator {
             PolicyAction::Escalate => {
                 payment.transition(PaymentStatus::PendingApproval)?;
                 self.state.payment_repo.update_payment(&payment).await?;
+                // Persist the specific rule that triggered escalation so the
+                // timeout monitor can use the correct timeout_minutes.
+                if let Some(ref rule_id) = decision.escalation_rule_id {
+                    if let Err(e) = self
+                        .state
+                        .payment_repo
+                        .persist_escalation_rule(&payment.id, rule_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            payment_id = %payment.id,
+                            rule_id = %rule_id,
+                            error = %e,
+                            "failed to persist escalation_rule_id; timeout monitor will use fallback"
+                        );
+                    }
+                }
                 self.write_audit(&payment, agent, &decision, None, None)
                     .await?;
                 // Don't release idempotency — the payment is still in progress.
@@ -104,17 +121,65 @@ impl PaymentOrchestrator {
         }
 
         // --- Step 5: Routing engine selection ---
-        let routing = self
+        // --- Step 6: Provider execution with failover ---
+        // If routing or provider execution fails after policy approval, we must
+        // transition the payment to Failed and release the idempotency key so
+        // the agent can retry. Without this, the payment is stranded in Approved
+        // forever with a permanently leaked idempotency key.
+        let routing = match self
             .state
             .route_selector
             .select(&request, &agent.profile)
             .await
-            .map_err(ApiError::from)?;
+            .map_err(ApiError::from)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                payment.transition(PaymentStatus::Submitted).ok();
+                payment.transition(PaymentStatus::Failed).ok();
+                self.state.payment_repo.update_payment(&payment).await.ok();
+                if let Err(rel_err) = self
+                    .state
+                    .idempotency_guard
+                    .release(&request.idempotency_key)
+                    .await
+                {
+                    tracing::warn!(
+                        payment_id = %payment.id,
+                        error = %rel_err,
+                        "failed to release idempotency key after routing failure"
+                    );
+                }
+                return Err(e);
+            }
+        };
 
-        // --- Step 6: Provider execution with failover ---
-        let provider_response = self
+        let provider_response = match self
             .execute_with_failover(&mut payment, &request, &routing)
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if !payment.status().is_terminal() {
+                    payment.transition(PaymentStatus::Submitted).ok();
+                    payment.transition(PaymentStatus::Failed).ok();
+                    self.state.payment_repo.update_payment(&payment).await.ok();
+                }
+                if let Err(rel_err) = self
+                    .state
+                    .idempotency_guard
+                    .release(&request.idempotency_key)
+                    .await
+                {
+                    tracing::warn!(
+                        payment_id = %payment.id,
+                        error = %rel_err,
+                        "failed to release idempotency key after provider failure"
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         // --- Step 7: Settlement confirmation ---
         let failure_reason = match provider_response.status {
@@ -200,20 +265,43 @@ impl PaymentOrchestrator {
             rules_evaluated: vec![],
             matching_rules: vec![],
             latency_ms: 0,
+            escalation_rule_id: None,
         };
 
         // Step 5: Routing
-        let routing = self
+        // Step 6: Provider execution
+        // Same error-recovery pattern as process(): if routing or execution fails,
+        // transition to Failed and return the error so the caller can handle it.
+        let routing = match self
             .state
             .route_selector
             .select(&request, &agent.profile)
             .await
-            .map_err(ApiError::from)?;
+            .map_err(ApiError::from)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                payment.transition(PaymentStatus::Submitted).ok();
+                payment.transition(PaymentStatus::Failed).ok();
+                self.state.payment_repo.update_payment(&payment).await.ok();
+                return Err(e);
+            }
+        };
 
-        // Step 6: Provider execution
-        let provider_response = self
+        let provider_response = match self
             .execute_with_failover(&mut payment, &request, &routing)
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if !payment.status().is_terminal() {
+                    payment.transition(PaymentStatus::Submitted).ok();
+                    payment.transition(PaymentStatus::Failed).ok();
+                    self.state.payment_repo.update_payment(&payment).await.ok();
+                }
+                return Err(e);
+            }
+        };
 
         // Step 7: Settlement
         let failure_reason = match provider_response.status {
