@@ -257,10 +257,27 @@ pub async fn approve(
         .await
         .map_err(ApiError::from)?;
 
-    let orchestrator = PaymentOrchestrator::new(state);
+    let idempotency_key = payment.request.idempotency_key.clone();
+    let payment_id_for_idemp = payment.id;
+
+    let orchestrator = PaymentOrchestrator::new(state.clone());
     let response = orchestrator
         .resume_after_approval(&auth_agent, payment)
         .await?;
+
+    // Complete the idempotency key now that the payment lifecycle is finished.
+    if let Err(e) = state
+        .idempotency_guard
+        .complete(&idempotency_key, &payment_id_for_idemp)
+        .await
+    {
+        tracing::warn!(
+            payment_id = %payment_id_for_idemp,
+            error = %e,
+            "idempotency guard completion failed after approval; payment already persisted"
+        );
+    }
+
     Ok(Json(response))
 }
 
@@ -346,6 +363,19 @@ pub async fn reject(
         .append(&audit_entry, Some(payment.id))
         .await
         .map_err(ApiError::from)?;
+
+    // Release the idempotency key — the payment is terminally rejected.
+    if let Err(e) = state
+        .idempotency_guard
+        .release(&payment.request.idempotency_key)
+        .await
+    {
+        tracing::warn!(
+            payment_id = %payment.id,
+            error = %e,
+            "failed to release idempotency key after rejection"
+        );
+    }
 
     Ok(Json(PaymentResponse::from(&payment)))
 }

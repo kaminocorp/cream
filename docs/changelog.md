@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.2](#082--2026-04-05) — Production review: escalation timeout audit trail, idempotency key lifecycle completion, circuit breaker observability
 - [0.8.1](#081--2026-04-05) — Cross-crate production review: 11 fixes targeting audit correctness, race safety, data corruption prevention, and schema hardening
 - [0.8.0](#080--2026-04-05) — API crate: Axum HTTP server, 12 REST endpoints, payment lifecycle orchestrator with failover, auth, rate limiting, escalation monitor
 - [0.7.12](#0712--2026-04-05) — Circuit breaker clock skew guard and u32 counter overflow protection
@@ -38,6 +39,28 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.2 — 2026-04-05
+
+**Production review: escalation timeout audit trail, idempotency key lifecycle completion, circuit breaker observability**
+
+Full 6-crate parallel production readiness review targeting lifecycle completeness in the escalation paths (approve, reject, timeout). The happy path correctly handles audit writes, idempotency completion, and circuit breaker logging — but the escalation branches were missing these bookkeeping steps. 3 fixes across 2 files, all additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **Missing audit entry on escalation timeout — compliance-breaking gap (CRITICAL)** (`api/orchestrator.rs`) — The escalation timeout monitor transitioned payments `PendingApproval → TimedOut → Blocked` and updated the DB, but never wrote an audit entry. The docstring stated "writes an audit entry" but the code did not. For a payment control plane whose core invariant is an immutable audit trail of every state change, this meant a payment could be silently blocked by timeout with zero audit record. Added a full `AuditEntry` write (with `reviewer_id: "system:escalation_timeout"` and a `HumanReviewRecord` recording the system decision) after the conditional DB update succeeds
+- **Idempotency key permanently leaked for escalated payments (HIGH)** (`api/orchestrator.rs`, `api/routes/payments.rs`) — When `process()` escalated a payment, the idempotency key was intentionally held ("Don't release idempotency — the payment is still in progress"). But none of the three resolution paths completed or released it: approve called `resume_after_approval()` which never touched idempotency; reject never released; timeout never released. In production with Redis, the key would eventually expire via TTL, but during the TTL window after resolution, client retries with the same key would get `IdempotencyConflict` for a payment that was already resolved. Added `idempotency_guard.complete()` after successful approval execution, `idempotency_guard.release()` after rejection, and `idempotency_guard.release()` after escalation timeout
+- **Circuit breaker recording errors silently swallowed (MEDIUM)** (`api/orchestrator.rs`) — All three `record_success()` and `record_failure()` calls in the failover loop used `let _ =`, completely discarding errors. In v0.8.1, the analogous idempotency completion case was upgraded to a WARN log, but circuit breaker recording was missed. If circuit breaker state fails to update (e.g., Redis hiccup), routing decisions would be based on stale health data with zero visibility. Replaced all three `let _ =` with `if let Err(e)` blocks that log at WARN level with provider ID and error context
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 

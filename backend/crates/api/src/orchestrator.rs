@@ -329,11 +329,18 @@ impl PaymentOrchestrator {
             // Attempt payment.
             match provider.initiate_payment(&normalized).await {
                 Ok(response) => {
-                    let _ = self
+                    if let Err(e) = self
                         .state
                         .circuit_breaker
                         .record_success(&candidate.provider_id)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            provider = %candidate.provider_id,
+                            error = %e,
+                            "circuit breaker record_success failed; routing may use stale health data"
+                        );
+                    }
 
                     payment.set_provider(
                         candidate.provider_id.clone(),
@@ -349,11 +356,18 @@ impl PaymentOrchestrator {
                     return Ok(response);
                 }
                 Err(e) if e.is_retryable() => {
-                    let _ = self
+                    if let Err(cb_err) = self
                         .state
                         .circuit_breaker
                         .record_failure(&candidate.provider_id)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            provider = %candidate.provider_id,
+                            error = %cb_err,
+                            "circuit breaker record_failure failed; routing may use stale health data"
+                        );
+                    }
                     tracing::warn!(
                         provider = %candidate.provider_id,
                         error = %e,
@@ -362,11 +376,18 @@ impl PaymentOrchestrator {
                     continue;
                 }
                 Err(e) => {
-                    let _ = self
+                    if let Err(cb_err) = self
                         .state
                         .circuit_breaker
                         .record_failure(&candidate.provider_id)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            provider = %candidate.provider_id,
+                            error = %cb_err,
+                            "circuit breaker record_failure failed; routing may use stale health data"
+                        );
+                    }
                     tracing::error!(
                         provider = %candidate.provider_id,
                         error = %e,
@@ -492,6 +513,63 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
             match updated {
                 Ok(true) => {
                     tracing::warn!(payment_id = %payment_id, "escalation timed out, payment blocked");
+
+                    // Write audit entry for the timeout/block transition.
+                    let request_json = serde_json::to_value(&payment.request)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    let justification_json = serde_json::to_value(&payment.request.justification)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+
+                    let audit_entry = AuditEntry {
+                        id: AuditEntryId::new(),
+                        timestamp: Utc::now(),
+                        agent_id: payment.request.agent_id,
+                        agent_profile_id: AgentProfileId::from_uuid(uuid::Uuid::nil()),
+                        payment_id: Some(payment.id),
+                        request: request_json,
+                        justification: justification_json,
+                        policy_evaluation: PolicyEvaluationRecord {
+                            rules_evaluated: vec![],
+                            matching_rules: vec![],
+                            final_decision: PolicyAction::Block,
+                            decision_latency_ms: 0,
+                        },
+                        routing_decision: None,
+                        provider_response: None,
+                        final_status: payment.status(),
+                        human_review: Some(HumanReviewRecord {
+                            reviewer_id: "system:escalation_timeout".to_string(),
+                            decision: PolicyAction::Block,
+                            reason: Some("escalation timed out without human approval".to_string()),
+                            decided_at: Utc::now(),
+                        }),
+                        on_chain_tx_hash: None,
+                    };
+
+                    if let Err(e) = state
+                        .audit_writer
+                        .append(&audit_entry, Some(payment.id))
+                        .await
+                    {
+                        tracing::error!(
+                            payment_id = %payment_id,
+                            error = %e,
+                            "failed to write audit entry for escalation timeout"
+                        );
+                    }
+
+                    // Release the idempotency key — the payment is terminally blocked.
+                    if let Err(e) = state
+                        .idempotency_guard
+                        .release(&payment.request.idempotency_key)
+                        .await
+                    {
+                        tracing::warn!(
+                            payment_id = %payment_id,
+                            error = %e,
+                            "failed to release idempotency key after escalation timeout"
+                        );
+                    }
                 }
                 Ok(false) => {
                     tracing::info!(
