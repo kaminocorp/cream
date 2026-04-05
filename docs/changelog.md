@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.7](#087--2026-04-05) — Production review: ProviderError info leak, is_terminal state machine correctness, idempotency_keys DB constraint
 - [0.8.6](#086--2026-04-05) — Production review: update_policy validation gap, approve/reject audit field bypass, spending limit strictness, audit ledger DB constraints
 - [0.8.5](#085--2026-04-05) — Production review: settlement data persistence, escalation timeout audit resilience, provider field DB constraints
 - [0.8.4](#084--2026-04-05) — Production review: API amount validation gap, invalid regex policy bypass, name length DB constraints
@@ -43,6 +44,45 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.7 — 2026-04-05
+
+**Production review: ProviderError info leak, is_terminal state machine correctness, idempotency_keys DB constraint**
+
+Full 6-crate production readiness review (5 parallel review agents across all crates + migrations + manual code-level verification). ~150 candidate findings surfaced across all agents; after line-by-line verification, the vast majority were confirmed as false positives (already fixed in v0.7.x-v0.8.6, intentional design decisions, or misunderstood Rust ownership semantics). 3 genuine fixes across 3 files + 1 new migration, all additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **ProviderError details leaked to HTTP clients — information disclosure (MEDIUM)** (`api/error.rs`) — `ProviderFailure(e)` returned `format!("payment provider error: {e}")` in the HTTP response body. Since `ProviderError` variants include `InsufficientFunds("account balance $X")`, `ComplianceBlocked("specific reason")`, and `UnsupportedCountry("country code")`, these exposed internal provider details that could help attackers reverse-engineer policy/compliance constraints. Replaced with generic message `"payment provider error — see server logs for details"`. The specific error is still logged server-side at WARN level (line 107-108)
+- **`is_terminal()` incorrectly includes `TimedOut` — state machine semantic inconsistency (LOW)** (`models/payment.rs`) — `PaymentStatus::TimedOut.is_terminal()` returned `true`, but `can_transition_to(Blocked)` also returns `true` for TimedOut. A state that can transition is by definition not terminal. The escalation timeout monitor performs `TimedOut → Blocked` atomically, making TimedOut a transient intermediate state. Removed `TimedOut` from `is_terminal()`. Currently only used in tests, but prevents future code from relying on incorrect semantics
+- **DB lacks CHECK on `idempotency_keys.key` length — unbounded TEXT primary key (MEDIUM)** (new migration `20260405200007`) — Rust enforces `MAX_IDEMPOTENCY_KEY_LEN = 255` on deserialization, but the DB allowed unbounded TEXT. Consistent with the defense-in-depth pattern from v0.8.4-v0.8.6 (names, provider_id, provider_tx_id, on_chain_tx_hash). Added `CHECK (LENGTH(key) <= 255 AND LENGTH(TRIM(key)) > 0)`
+
+### Verified False Positives (Not Fixed)
+
+| Claimed Issue | Verdict |
+|---|---|
+| Unauthenticated approve/reject endpoints | Documented Phase 10 scope (line 160-161 in payments.rs). Dashboard auth is planned, not missing. |
+| Settlement data loss on audit write failure | `write_audit` returns `?` — error propagates. Idempotency key not completed. Acceptable for current phase. |
+| persist_settlement race condition | Only called from process() and resume_after_approval(), both holding idempotency lock. |
+| Escalation timeout nil profile_id fallback | Intentional graceful degradation added in v0.8.3 for agent-deleted edge case. |
+| Circuit breaker Mutex poisoning | InMemoryCircuitBreakerStore is test-only. Production uses Redis. |
+| Idempotency TTL expiry double-payment | 300s TTL vs. sub-300ms target. Provider has own idempotency. Architecture concern, not code bug. |
+| Provider registry not thread-safe | register(&mut self) called at startup only. Rust borrow checker prevents concurrent registration. |
+| Scorer all-zero weights float precision | 0.0 + 0.0 + 0.0 + 0.0 = exactly 0.0 in IEEE 754. |
+| NotIn non-array bypass | Operator misconfiguration edge case. Schema validation on write should prevent. |
+| Unknown rule type Approve bypass | Explicit Approve from matching_rules doesn't change final decision. |
+| FK cascade behavior unspecified | RESTRICT is correct (verified in v0.8.5). Prevents orphan records. |
+| Index column order suboptimal | (profile_id, enabled, priority) is optimal for the query pattern. |
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 

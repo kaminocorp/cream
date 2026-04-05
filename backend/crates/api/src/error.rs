@@ -81,7 +81,9 @@ impl ApiError {
                 format!("rate limit exceeded; retry after {retry_after_secs}s")
             }
             Self::Internal(_) => "an internal error occurred".to_string(),
-            Self::ProviderFailure(e) => format!("payment provider error: {e}"),
+            Self::ProviderFailure(_) => {
+                "payment provider error — see server logs for details".to_string()
+            }
             Self::AllProvidersUnavailable => {
                 "no payment providers are currently available".to_string()
             }

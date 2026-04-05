@@ -74,6 +74,9 @@ impl PaymentStatus {
     }
 
     /// Returns `true` if this is a terminal state (no further transitions).
+    ///
+    /// `TimedOut` is NOT terminal — it always transitions to `Blocked`.
+    /// The escalation timeout monitor performs `TimedOut → Blocked` atomically.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -81,7 +84,6 @@ impl PaymentStatus {
                 | PaymentStatus::Failed
                 | PaymentStatus::Blocked
                 | PaymentStatus::Rejected
-                | PaymentStatus::TimedOut
         )
     }
 
@@ -671,10 +673,12 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_is_terminal() {
-        // TimedOut can only transition to Blocked — it is effectively terminal
-        // and should be reported as such by is_terminal().
-        assert!(PaymentStatus::TimedOut.is_terminal());
+    fn timed_out_is_not_terminal() {
+        // TimedOut always transitions to Blocked — it is an intermediate state,
+        // not a terminal one. The escalation timeout monitor performs
+        // TimedOut → Blocked atomically.
+        assert!(!PaymentStatus::TimedOut.is_terminal());
+        assert!(PaymentStatus::TimedOut.can_transition_to(PaymentStatus::Blocked));
     }
 
     #[test]
@@ -683,7 +687,6 @@ mod tests {
         assert!(PaymentStatus::Failed.is_terminal());
         assert!(PaymentStatus::Blocked.is_terminal());
         assert!(PaymentStatus::Rejected.is_terminal());
-        assert!(PaymentStatus::TimedOut.is_terminal());
 
         // Non-terminal states
         assert!(!PaymentStatus::Pending.is_terminal());
@@ -691,6 +694,7 @@ mod tests {
         assert!(!PaymentStatus::PendingApproval.is_terminal());
         assert!(!PaymentStatus::Approved.is_terminal());
         assert!(!PaymentStatus::Submitted.is_terminal());
+        assert!(!PaymentStatus::TimedOut.is_terminal());
     }
 
     #[test]
