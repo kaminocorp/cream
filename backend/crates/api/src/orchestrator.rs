@@ -69,11 +69,18 @@ impl PaymentOrchestrator {
                 self.state.payment_repo.update_payment(&payment).await?;
                 self.write_audit(&payment, agent, &decision, None, None)
                     .await?;
-                let _ = self
+                if let Err(e) = self
                     .state
                     .idempotency_guard
                     .release(&request.idempotency_key)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        payment_id = %payment.id,
+                        error = %e,
+                        "failed to release idempotency key after policy block"
+                    );
+                }
                 return Err(ApiError::PolicyBlocked {
                     rule_ids: decision.matching_rules.clone(),
                     reason: format!(
@@ -514,6 +521,32 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                 Ok(true) => {
                     tracing::warn!(payment_id = %payment_id, "escalation timed out, payment blocked");
 
+                    // Look up the agent's actual profile_id for a correct audit entry.
+                    let profile_id = match sqlx::query_as::<_, (uuid::Uuid,)>(
+                        "SELECT profile_id FROM agents WHERE id = $1",
+                    )
+                    .bind(payment.request.agent_id.as_uuid())
+                    .fetch_optional(&state.db)
+                    .await
+                    {
+                        Ok(Some(row)) => AgentProfileId::from_uuid(row.0),
+                        Ok(None) => {
+                            tracing::warn!(
+                                agent_id = %payment.request.agent_id,
+                                "agent not found for escalation timeout audit entry, using nil profile_id"
+                            );
+                            AgentProfileId::from_uuid(uuid::Uuid::nil())
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                agent_id = %payment.request.agent_id,
+                                error = %e,
+                                "failed to look up agent profile for escalation timeout audit entry, using nil profile_id"
+                            );
+                            AgentProfileId::from_uuid(uuid::Uuid::nil())
+                        }
+                    };
+
                     // Write audit entry for the timeout/block transition.
                     let request_json = serde_json::to_value(&payment.request)
                         .unwrap_or_else(|_| serde_json::json!({}));
@@ -524,7 +557,7 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                         id: AuditEntryId::new(),
                         timestamp: Utc::now(),
                         agent_id: payment.request.agent_id,
-                        agent_profile_id: AgentProfileId::from_uuid(uuid::Uuid::nil()),
+                        agent_profile_id: profile_id,
                         payment_id: Some(payment.id),
                         request: request_json,
                         justification: justification_json,

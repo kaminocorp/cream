@@ -36,9 +36,24 @@ pub async fn register(
             "webhook URL cannot be empty".into(),
         ));
     }
+    if body.url.len() > 2048 {
+        return Err(ApiError::ValidationError(
+            "webhook URL exceeds maximum length of 2048 characters".into(),
+        ));
+    }
+    if !body.url.starts_with("https://") && !body.url.starts_with("http://") {
+        return Err(ApiError::ValidationError(
+            "webhook URL must start with https:// or http://".into(),
+        ));
+    }
     if body.secret.is_empty() {
         return Err(ApiError::ValidationError(
             "webhook secret cannot be empty".into(),
+        ));
+    }
+    if body.secret.len() < 16 {
+        return Err(ApiError::ValidationError(
+            "webhook secret must be at least 16 characters".into(),
         ));
     }
 

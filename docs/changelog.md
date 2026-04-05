@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.3](#083--2026-04-05) — Production review: idempotency observability gap, escalation timeout audit correctness, webhook input validation
 - [0.8.2](#082--2026-04-05) — Production review: escalation timeout audit trail, idempotency key lifecycle completion, circuit breaker observability
 - [0.8.1](#081--2026-04-05) — Cross-crate production review: 11 fixes targeting audit correctness, race safety, data corruption prevention, and schema hardening
 - [0.8.0](#080--2026-04-05) — API crate: Axum HTTP server, 12 REST endpoints, payment lifecycle orchestrator with failover, auth, rate limiting, escalation monitor
@@ -39,6 +40,29 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.3 — 2026-04-05
+
+**Production review: idempotency observability gap, escalation timeout audit correctness, webhook input validation**
+
+Full 6-crate production readiness review (4 parallel review agents + manual verification). Surfaced ~30 candidate findings; after code-level verification, 26 were confirmed as false alarms or intentional design (fail-safe semantics, symmetric case-insensitive comparison, correct velocity arithmetic, deferred Phase 10 auth). 4 genuine fixes across 2 files, all additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **Silent idempotency release error on policy block — observability gap (HIGH)** (`api/orchestrator.rs`) — When a payment was blocked by policy, the idempotency key release used `let _ =`, completely discarding any Redis error. v0.8.2 upgraded the identical pattern in approval, rejection, and escalation timeout paths to WARN-level logging, but missed the policy-block path. If Redis fails to release, operators now have visibility via `"failed to release idempotency key after policy block"` at WARN level, consistent with all other idempotency error handling
+- **Escalation timeout audit entry wrote nil UUID for `agent_profile_id` — immutable data corruption (HIGH)** (`api/orchestrator.rs`) — The escalation timeout monitor wrote `Uuid::nil()` as the `agent_profile_id` in the audit entry. Since the audit ledger is append-only (DB triggers prevent UPDATE/DELETE), this incorrect data was permanent. The approve handler (line 149-218) and reject handler (line 319-326) both correctly looked up the real `profile_id` from the agents table. Added the same lookup pattern to the timeout monitor with graceful fallback to nil UUID if the agent was deleted or the query fails
+- **Webhook URL missing format validation — malformed data persistence (MEDIUM)** (`api/routes/webhooks.rs`) — The webhook registration endpoint only checked `url.is_empty()`. No URL scheme validation (could accept arbitrary strings like `ftp://` or `not-a-url`), no length bound (unbounded TEXT column). Added: must start with `https://` or `http://`, maximum 2048 characters
+- **Webhook secret accepted single-character values — weak HMAC signatures (LOW)** (`api/routes/webhooks.rs`) — The webhook secret only checked `secret.is_empty()`. A 1-character secret would produce trivially brute-forceable HMAC-SHA256 signatures when webhook dispatch is implemented. Added minimum 16-character requirement
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 
