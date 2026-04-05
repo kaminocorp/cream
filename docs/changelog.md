@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.4](#084--2026-04-05) — Production review: API amount validation gap, invalid regex policy bypass, name length DB constraints
 - [0.8.3](#083--2026-04-05) — Production review: idempotency observability gap, escalation timeout audit correctness, webhook input validation
 - [0.8.2](#082--2026-04-05) — Production review: escalation timeout audit trail, idempotency key lifecycle completion, circuit breaker observability
 - [0.8.1](#081--2026-04-05) — Cross-crate production review: 11 fixes targeting audit correctness, race safety, data corruption prevention, and schema hardening
@@ -40,6 +41,28 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.4 — 2026-04-05
+
+**Production review: API amount validation gap, invalid regex policy bypass, name length DB constraints**
+
+Full 6-crate production readiness review (7 parallel review agents across all crates + migrations). ~50 candidate findings surfaced; after manual code-level verification, the majority were confirmed as false positives (already fixed in prior hardenings, known design decisions, or misunderstood Rust ownership semantics). 3 genuine fixes across 3 files + 1 new migration, all additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **API boundary bypasses `PaymentRequest` amount validation — invalid data reaches orchestrator (MEDIUM)** (`api/routes/payments.rs`) — `CreatePaymentRequest` deserializes `amount: Decimal` via derive(Deserialize) with no validation. The handler then constructs `PaymentRequest` via struct literal (bypassing the custom `Deserialize` impl on `PaymentRequest` which validates `amount > 0`). A zero or negative amount would reach the orchestrator and only be caught by the DB `CHECK (amount > 0)` constraint, surfacing as a raw sqlx error instead of a clean 422 validation response. Added explicit `amount <= Decimal::ZERO` check before `PaymentRequest` construction, returning `ApiError::ValidationError`
+- **Invalid regex pattern returns `true` — broken APPROVE rules grant unintended approvals (MEDIUM)** (`policy/evaluator.rs`) — `regex_matches()` returned `true` when a regex pattern was invalid, with the reasoning "to prevent policy bypass from misconfigured patterns." This reasoning assumed all rules are restrictive (BLOCK/ESCALATE). For APPROVE rules, returning `true` means the condition matches, the rule fires, and the payment is approved — a policy bypass in the opposite direction. Changed both the normal path (line 273) and the poisoned-mutex fallback (line 238) to return `false`. A non-matching condition means the rule does not fire, so payments continue to subsequent rules or the default policy. Updated the corresponding test (`condition_matches_invalid_regex_fails_safe`) to assert the corrected semantics
+- **DB lacks length constraints on `agents.name` and `agent_profiles.name` — unbounded TEXT columns (LOW-MEDIUM)** (new migration `20260405200004`) — Rust types enforce `MAX_NAME_LEN = 255` and whitespace validation, but the DB allowed unbounded TEXT. Direct DB manipulation or future ORM changes could persist oversized names into the append-only audit ledger (where they become permanent). Added CHECK constraints: `LENGTH(name) <= 255 AND LENGTH(TRIM(name)) > 0` on both tables
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 

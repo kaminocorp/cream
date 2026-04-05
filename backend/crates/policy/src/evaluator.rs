@@ -233,9 +233,9 @@ fn regex_matches(text: &str, pattern: &str) -> bool {
                 .unwrap_or_else(|_| {
                     tracing::error!(
                         pattern,
-                        "invalid regex in poisoned-mutex fallback — failing safe (true)"
+                        "invalid regex in poisoned-mutex fallback — condition does not match (false)"
                     );
-                    true
+                    false
                 });
         }
     };
@@ -267,10 +267,12 @@ fn regex_matches(text: &str, pattern: &str) -> bool {
             tracing::error!(
                 pattern,
                 error = %e,
-                "invalid regex pattern in Matches condition — failing safe (returning true) \
-                 to prevent policy bypass from misconfigured patterns"
+                "invalid regex pattern in Matches condition — condition does not match (false). \
+                 A non-matching condition means the rule does not fire, so payments continue to \
+                 subsequent rules or the default policy. This prevents a broken APPROVE rule \
+                 from granting unintended approvals."
             );
-            true
+            false
         }
     }
 }

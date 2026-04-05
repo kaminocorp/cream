@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::Utc;
 use cream_models::prelude::*;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::error::ApiError;
@@ -59,6 +60,16 @@ pub async fn initiate(
     agent: AuthenticatedAgent,
     ValidatedJson(body): ValidatedJson<CreatePaymentRequest>,
 ) -> Result<(StatusCode, Json<PaymentResponse>), ApiError> {
+    // Validate amount at the API boundary. PaymentRequest's custom Deserialize
+    // enforces this when loading from JSON/DB, but here we construct via struct
+    // literal — so we must check explicitly to avoid a raw DB constraint error.
+    if body.amount <= Decimal::ZERO {
+        return Err(ApiError::ValidationError(format!(
+            "amount must be positive, got {}",
+            body.amount
+        )));
+    }
+
     let idempotency_key = IdempotencyKey::try_new(body.idempotency_key)
         .map_err(|e| ApiError::ValidationError(format!("invalid idempotency_key: {e}")))?;
 

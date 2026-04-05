@@ -1001,9 +1001,10 @@ fn condition_matches_invalid_regex_fails_safe() {
         op: ComparisonOp::Matches,
         value: serde_json::json!(r"[invalid(regex"),
     });
-    // Invalid regex should fail safe (return true = match) to prevent
-    // policy bypass from misconfigured patterns, not return false.
-    assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
+    // Invalid regex returns false (condition does not match, rule does not fire).
+    // This prevents a broken APPROVE rule from granting unintended approvals.
+    // Payments continue to subsequent rules or the default policy.
+    assert!(!crate::evaluator::evaluate_condition(&condition, &ctx));
 }
 
 // ---------------------------------------------------------------------------
