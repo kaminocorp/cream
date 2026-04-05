@@ -405,6 +405,21 @@ impl<'de> Deserialize<'de> for Payment {
             ));
         }
 
+        // Invariant 3: post-provider terminal states must HAVE provider fields.
+        // Settled and Failed are only reachable from Submitted, which requires
+        // set_provider(). A row with status=settled but no provider fields
+        // indicates data corruption — no provider attribution for the payment.
+        let must_have_provider =
+            matches!(raw.status, PaymentStatus::Settled | PaymentStatus::Failed);
+        if must_have_provider
+            && (raw.provider_id.is_none() || raw.provider_transaction_id.is_none())
+        {
+            return Err(serde::de::Error::custom(format!(
+                "provider_id and provider_transaction_id must be set for terminal status {:?}",
+                raw.status
+            )));
+        }
+
         Ok(Payment {
             id: raw.id,
             request: raw.request,
@@ -1030,6 +1045,60 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("provider_id"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.10: Settled/Failed must have provider fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn payment_deserialize_rejects_settled_without_provider() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.set_provider(ProviderId::new("stripe"), "ch_123".to_string())
+            .unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        p.transition(PaymentStatus::Settled).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::Value::Null;
+        val["provider_transaction_id"] = serde_json::Value::Null;
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must be set for terminal status"));
+    }
+
+    #[test]
+    fn payment_deserialize_rejects_failed_without_provider() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.set_provider(ProviderId::new("stripe"), "ch_456".to_string())
+            .unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        p.transition(PaymentStatus::Failed).unwrap();
+        let mut val = serde_json::to_value(&p).unwrap();
+        val["provider_id"] = serde_json::Value::Null;
+        val["provider_transaction_id"] = serde_json::Value::Null;
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must be set for terminal status"));
+    }
+
+    #[test]
+    fn payment_deserialize_accepts_settled_with_provider() {
+        let mut p = Payment::new(sample_request());
+        p.transition(PaymentStatus::Validating).unwrap();
+        p.transition(PaymentStatus::Approved).unwrap();
+        p.set_provider(ProviderId::new("stripe"), "ch_789".to_string())
+            .unwrap();
+        p.transition(PaymentStatus::Submitted).unwrap();
+        p.transition(PaymentStatus::Settled).unwrap();
+        let val = serde_json::to_value(&p).unwrap();
+        let result: Result<Payment, _> = serde_json::from_value(val);
+        assert!(result.is_ok());
     }
 
     #[test]

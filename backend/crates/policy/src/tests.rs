@@ -2059,6 +2059,71 @@ fn condition_contains_case_insensitive() {
 }
 
 #[test]
+fn time_window_extreme_utc_offset_ignored() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    // Set time to 12:00 UTC. Window is 9-17.
+    // Without offset: 12:00 is inside → Pass.
+    // With extreme utc_offset_hours=9999: should be ignored, fallback to
+    // UTC → still inside → Pass (not crash).
+    ctx.current_time = chrono::NaiveDate::from_ymd_opt(2026, 4, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc();
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("time_window".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "time_window".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!({
+                "allowed_hours_start": 9,
+                "allowed_hours_end": 17,
+                "utc_offset_hours": 9999,
+            }),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    // Extreme offset is ignored → falls back to UTC → 12:00 inside 9-17 → Pass
+    let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
+fn time_window_negative_extreme_utc_offset_ignored() {
+    let mut ctx = test_context(Decimal::new(100, 0));
+    ctx.current_time = chrono::NaiveDate::from_ymd_opt(2026, 4, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc();
+    let rule = PolicyRule {
+        id: PolicyRuleId::new(),
+        profile_id: AgentProfileId::new(),
+        rule_type: Some("time_window".to_string()),
+        priority: 10,
+        condition: PolicyCondition::FieldCheck(FieldCheck {
+            field: "time_window".to_string(),
+            op: ComparisonOp::Equals,
+            value: serde_json::json!({
+                "allowed_hours_start": 9,
+                "allowed_hours_end": 17,
+                "utc_offset_hours": -9999,
+            }),
+        }),
+        action: PolicyAction::Block,
+        escalation: None,
+        enabled: true,
+    };
+    let result = TimeWindowEvaluator.evaluate(&rule, &ctx);
+    assert_eq!(result, RuleResult::Pass);
+}
+
+#[test]
 fn condition_contains_case_insensitive_needle_lowercase() {
     let ctx = test_context(Decimal::new(100, 0));
     let condition = PolicyCondition::FieldCheck(FieldCheck {

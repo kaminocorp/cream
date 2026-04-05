@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.7.10](#0710--2026-04-05) — Cross-crate production review: Settled/Failed must have provider fields, audit deterministic ordering, settlement field pairing constraint, scorer deterministic tiebreaker, time_window offset bounds
 - [0.7.9](#079--2026-04-05) — Production review: Payment provider field state machine invariants, AuditEntry on_chain_tx_hash bounds, regex cache comment, virtual_cards composite unique constraint
 - [0.7.8](#078--2026-04-05) — Cross-crate production review: PaymentCategory::Other empty guard, IdempotencyKey max length, audit query deterministic ordering, time_window log accuracy, condition depth off-by-one
 - [0.7.7](#077--2026-04-02) — Recipient.identifier whitespace-only guard
@@ -33,6 +34,40 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.7.10 — 2026-04-05
+
+**Phase 7.10: Cross-Crate Production Review — State Machine Completeness, Deterministic Routing, Settlement Integrity**
+
+Systematic cross-crate review (models, audit, policy, router, migrations) targeting five findings from a full six-agent parallel review of all Phases 1-7. The central theme: closing the remaining gaps in state machine invariant enforcement at the deserialization boundary, ensuring deterministic behavior in routing and audit queries, preventing i32 overflow in the policy hot path, and enforcing settlement field integrity at the database level. All changes are additive — no reverts of previous hardenings.
+
+### Fixed
+
+- **Payment deserialization allows Settled/Failed without provider fields — missing state machine invariant (CRITICAL)** — The deserialization validated that pre-provider statuses must NOT have provider fields (v0.7.9) and that provider fields must be paired (v0.7.9), but did not enforce the converse: Settled and Failed are only reachable from Submitted (which requires `set_provider()`), so they MUST have provider fields. A corrupted row with `status=settled, provider_id=NULL` would deserialize without error, creating an audit trail entry with no provider attribution for a settled payment. Added Invariant 3: `must_have_provider` check for Settled and Failed statuses
+- **`get_by_payment()` uses non-deterministic ordering — pagination instability (MEDIUM)** — The main `query()` method uses `ORDER BY timestamp DESC, id DESC` (fixed in v0.7.8), but `get_by_payment()` still used only `ORDER BY timestamp DESC`. Under timestamp collision, paginated clients calling this method could see duplicates or miss records. Added `id DESC` as secondary sort, matching the established pattern
+- **Scorer sort uses non-deterministic tiebreaker — unstable provider selection (MEDIUM)** — When multiple providers have identical composite scores, `partial_cmp` returns `Equal` and the sort order is non-deterministic. Combined with `candidates[0]` selection, the "winning" provider could change between calls with identical state, making routing unpredictable and A/B testing impossible. Added `.then_with(|| a.provider_id.cmp(&b.provider_id))` for lexicographic tiebreaking. Added `Ord`/`PartialOrd` derives to `ProviderId`
+- **`utc_offset_hours` cast can panic in debug mode — i32 overflow (LOW-MEDIUM)** — `v.as_i64().map(|h| h as i32 * 3600)` in `extract_hours()` panics in debug mode if an operator sets an extreme JSON value (e.g., `2147483647`), because `i32 * 3600` overflows before `FixedOffset::east_opt` can validate the result. Added bounds check: values outside `-26..=26` are logged as errors and ignored, falling back to UTC or profile timezone
+- **No DB constraint pairing `amount_settled` and `settled_currency` — inconsistent settlement records (HIGH)** — Constraints existed for `amount_settled > 0` and `settled_currency IN (...)` separately, but nothing enforced that they must be set together. A payment could have `amount_settled = 100.00` with `settled_currency = NULL`, making settlement reconciliation impossible. Added `chk_payments_settlement_pair` CHECK constraint via migration `20260405200002`
+
+### Added
+
+- Invariant 3 in Payment deserialization: Settled/Failed must have both `provider_id` and `provider_transaction_id`
+- Deterministic `id DESC` secondary sort in `get_by_payment()` audit query
+- Lexicographic provider_id tiebreaker in scorer sort
+- `Ord` and `PartialOrd` derives on `ProviderId`
+- Bounds check on `utc_offset_hours` in TimeWindowEvaluator (`-26..=26` range)
+- Migration `20260405200002`: `chk_payments_settlement_pair` CHECK constraint
+- 6 new tests: Payment settled/failed without provider (2), settled with provider accepted (1), scorer deterministic tiebreaker (1), time_window extreme positive/negative offset ignored (2)
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 364/364 passing (173 models + 14 audit + 108 policy + 17 providers + 52 router) |
 
 ---
 

@@ -19,7 +19,7 @@ use crate::payment::RailPreference;
 /// [`MAX_PROVIDER_ID_LEN`]. Provider IDs are persisted to the append-only
 /// audit ledger via `RoutingDecision.selected`, so unbounded values would
 /// cause permanent bloat.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ProviderId(String);
 
 /// Maximum allowed length for provider IDs.

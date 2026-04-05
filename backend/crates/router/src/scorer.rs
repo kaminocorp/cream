@@ -187,11 +187,14 @@ impl ProviderScorer {
             })
             .collect();
 
-        // Sort by score descending (highest score = best provider)
+        // Sort by score descending (highest score = best provider).
+        // Stable tiebreaker on provider_id ensures deterministic selection
+        // when scores are equal — prevents non-deterministic routing.
         candidates.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.provider_id.cmp(&b.provider_id))
         });
 
         candidates
@@ -609,6 +612,44 @@ mod tests {
         let result = ProviderScorer::new(weights);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("non-zero"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7.10: Deterministic tiebreaker on equal scores
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tied_scores_break_deterministically_by_provider_id() {
+        // Two providers with identical characteristics → identical scores.
+        // Tiebreaker should be lexicographic on provider_id.
+        let scorer = ProviderScorer::new(ScoringWeights::default()).unwrap();
+        let providers = vec![
+            make_input(
+                make_caps(
+                    "z_provider",
+                    vec![RailPreference::Card],
+                    vec![Currency::SGD],
+                    "0.029",
+                ),
+                make_health("z_provider", 0.01, 100),
+            ),
+            make_input(
+                make_caps(
+                    "a_provider",
+                    vec![RailPreference::Card],
+                    vec![Currency::SGD],
+                    "0.029",
+                ),
+                make_health("a_provider", 0.01, 100),
+            ),
+        ];
+
+        let result = scorer.score_candidates(&providers, &sample_request(), &sample_profile());
+        assert_eq!(result.len(), 2);
+        assert!((result[0].score - result[1].score).abs() < f64::EPSILON);
+        // Lexicographic: "a_provider" < "z_provider"
+        assert_eq!(result[0].provider_id.as_str(), "a_provider");
+        assert_eq!(result[1].provider_id.as_str(), "z_provider");
     }
 
     #[test]

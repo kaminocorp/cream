@@ -116,7 +116,20 @@ fn extract_hours(condition: &PolicyCondition) -> Option<(u32, u32, Option<i32>)>
                 .value
                 .get("utc_offset_hours")
                 .and_then(|v| v.as_i64())
-                .map(|h| h as i32 * 3600);
+                .and_then(|h| {
+                    // Valid UTC offsets range from -26 to +26 (covers all
+                    // real-world timezones with generous headroom). Reject
+                    // extreme values to prevent i32 overflow on the * 3600
+                    // multiplication (which panics in debug mode).
+                    if !(-26..=26).contains(&h) {
+                        tracing::error!(
+                            utc_offset_hours = h,
+                            "utc_offset_hours out of valid range (-26..=26), ignoring override"
+                        );
+                        return None;
+                    }
+                    Some(h as i32 * 3600)
+                });
             Some((start, end, offset))
         }
         PolicyCondition::All(children) | PolicyCondition::Any(children) => {
