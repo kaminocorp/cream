@@ -81,6 +81,28 @@ pub async fn update_policy(
         return Err(ApiError::NotFound(format!("agent {agent_id}")));
     }
 
+    // Validate spending limits are strictly positive when provided.
+    // AgentProfile's custom Deserialize enforces > 0, but this handler
+    // bypasses deserialization (struct literal → SQL). Without this check,
+    // a zero value would pass the DB CHECK (>= 0), be persisted, and then
+    // fail deserialization on the next auth attempt — permanently locking
+    // the agent out.
+    for (name, value) in [
+        ("max_per_transaction", &body.max_per_transaction),
+        ("max_daily_spend", &body.max_daily_spend),
+        ("max_weekly_spend", &body.max_weekly_spend),
+        ("max_monthly_spend", &body.max_monthly_spend),
+        ("escalation_threshold", &body.escalation_threshold),
+    ] {
+        if let Some(v) = value {
+            if *v <= rust_decimal::Decimal::ZERO {
+                return Err(ApiError::ValidationError(format!(
+                    "{name} must be positive, got {v}"
+                )));
+            }
+        }
+    }
+
     let categories_json = body
         .allowed_categories
         .as_ref()

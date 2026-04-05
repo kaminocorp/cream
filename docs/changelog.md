@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.8.6](#086--2026-04-05) — Production review: update_policy validation gap, approve/reject audit field bypass, spending limit strictness, audit ledger DB constraints
 - [0.8.5](#085--2026-04-05) — Production review: settlement data persistence, escalation timeout audit resilience, provider field DB constraints
 - [0.8.4](#084--2026-04-05) — Production review: API amount validation gap, invalid regex policy bypass, name length DB constraints
 - [0.8.3](#083--2026-04-05) — Production review: idempotency observability gap, escalation timeout audit correctness, webhook input validation
@@ -42,6 +43,42 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.6 — 2026-04-05
+
+**Production review: update_policy validation gap, approve/reject audit field bypass, spending limit strictness, audit ledger DB constraints**
+
+Full 6-crate production readiness review (4 parallel review agents across all crates + migrations + manual code-level verification). ~80 candidate findings surfaced across all agents; after line-by-line verification, the majority were confirmed as false positives (already fixed in v0.8.1-0.8.5, intentional design decisions, or misunderstood code paths). 5 genuine fixes across 3 files + 1 new migration, all additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **`update_policy` handler allows zero spending limits — agent lockout (MEDIUM)** (`api/routes/agents.rs`) — `UpdatePolicyRequest` uses `Option<Decimal>` with derive(Deserialize), providing no validation. The handler writes values directly to SQL via `COALESCE($1, existing_value)`. A zero value passed the DB CHECK (`>= 0`) and was persisted, but `AgentProfile`'s custom Deserialize requires `> 0`. On the next authentication attempt, the auth extractor's deserialization failed with a 500 error, permanently locking the agent out. Added explicit positive-value validation for all five spending limit fields (`max_per_transaction`, `max_daily_spend`, `max_weekly_spend`, `max_monthly_spend`, `escalation_threshold`) before any DB write
+- **Approve/reject handlers bypass `HumanReviewRecord` validation — permanent audit corruption (MEDIUM)** (`api/routes/payments.rs`) — Both handlers constructed `HumanReviewRecord` via struct literal, bypassing the custom Deserialize that validates: `reviewer_id` non-empty/non-whitespace, `reviewer_id` length ≤ 255, `reason` non-empty/non-whitespace when present, `reason` length ≤ 2000. Since audit records are append-only (DB triggers prevent UPDATE/DELETE), invalid values would be permanently persisted. Added `validate_review_fields()` function called before any state mutation in both handlers, enforcing the same invariants as the Deserialize impl. Also exported `MAX_REVIEWER_ID_LEN` and `MAX_REVIEW_REASON_LEN` constants in the models prelude
+- **DB spending limits CHECK constraints allow zero — Rust↔DB validation gap (MEDIUM)** (new migration `20260405200006`) — DB used `CHECK (max_per_transaction IS NULL OR max_per_transaction >= 0)` but Rust requires `> 0`. Replaced all five `_non_negative` constraints with `_positive` variants using `> 0`. Same pattern applied to `escalation_threshold`
+- **DB lacks CHECK on `audit_log.final_status` — unconstrained append-only column (MEDIUM)** (new migration `20260405200006`) — `final_status` was unconstrained TEXT. Added CHECK constraining to the 10 valid `PaymentStatus` enum values (`pending`, `validating`, `pending_approval`, `approved`, `submitted`, `settled`, `failed`, `blocked`, `rejected`, `timed_out`). Critical because the audit ledger is append-only — invalid values would be permanent
+- **DB lacks CHECK on `audit_log.on_chain_tx_hash` length — unbounded append-only column (LOW-MEDIUM)** (new migration `20260405200006`) — Rust enforces `MAX_ON_CHAIN_TX_HASH_LEN = 256` on deserialization, but the DB allowed unbounded TEXT. Added `CHECK (on_chain_tx_hash IS NULL OR LENGTH(on_chain_tx_hash) <= 256)`
+
+### Verified False Positives (Not Fixed)
+
+| Claimed Issue | Verdict |
+|---|---|
+| SQL injection in `find_expired_escalations` | `(pr.escalation->>'timeout_minutes')::int` reads admin-controlled policy_rules data, not user input. Already verified in v0.8.5. |
+| Nil profile_id in escalation timeout audit | Intentional graceful degradation added in v0.8.3. Agent deletion while PendingApproval is an extreme edge case with no delete endpoint exposed. |
+| Double idempotency complete in approve | `process()` holds (doesn't complete) the key on escalation; approve completes it once. Single complete, not double. |
+| Approve endpoint ordering race | No agent delete endpoint exists. Requires direct DB manipulation during approval — not an application-level bug. |
+| FK cascade behavior (RESTRICT default) | RESTRICT is correct for a payment system — prevents orphan records. |
+| NaN propagation in scorer | `ProviderHealth` custom Deserialize validates `error_rate_5m` is finite ∈ [0.0, 1.0]. |
+| Spend limits count Pending payments | Intentional — includes in-flight payments to prevent concurrent requests collectively exceeding limits. |
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 377/377 passing (173 models + 14 audit + 108 policy + 17 providers + 54 router + 11 api) |
 
 ---
 

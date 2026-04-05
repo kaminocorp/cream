@@ -28,6 +28,7 @@ pub mod prelude {
     pub use crate::agent::{Agent, AgentProfile, AgentStatus, CountryCode};
     pub use crate::audit::{
         AuditEntry, HumanReviewRecord, PolicyEvaluationRecord, ProviderResponseRecord,
+        MAX_REVIEWER_ID_LEN, MAX_REVIEW_REASON_LEN,
     };
     pub use crate::card::{CardControls, CardStatus, CardType, VirtualCard};
     pub use crate::error::DomainError;

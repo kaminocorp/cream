@@ -12,6 +12,43 @@ use crate::extractors::json::ValidatedJson;
 use crate::orchestrator::PaymentOrchestrator;
 use crate::state::AppState;
 
+/// Validate reviewer_id and optional reason at the API boundary.
+///
+/// `HumanReviewRecord`'s custom `Deserialize` enforces these invariants, but
+/// the approve/reject handlers construct the record via struct literal (not
+/// deserialization), bypassing those guards. Since the data is written to the
+/// append-only audit ledger, invalid values would become permanent.
+fn validate_review_fields(reviewer_id: &str, reason: &Option<String>) -> Result<(), ApiError> {
+    if reviewer_id.trim().is_empty() {
+        return Err(ApiError::ValidationError(
+            "reviewer_id must not be empty — audit trail requires reviewer identity".to_string(),
+        ));
+    }
+    if reviewer_id.len() > cream_models::prelude::MAX_REVIEWER_ID_LEN {
+        return Err(ApiError::ValidationError(format!(
+            "reviewer_id exceeds maximum length of {} characters (got {})",
+            cream_models::prelude::MAX_REVIEWER_ID_LEN,
+            reviewer_id.len()
+        )));
+    }
+    if let Some(ref r) = reason {
+        if r.trim().is_empty() {
+            return Err(ApiError::ValidationError(
+                "reason must not be empty or whitespace-only when provided — omit the field instead"
+                    .to_string(),
+            ));
+        }
+        if r.len() > cream_models::prelude::MAX_REVIEW_REASON_LEN {
+            return Err(ApiError::ValidationError(format!(
+                "reason exceeds maximum length of {} characters (got {})",
+                cream_models::prelude::MAX_REVIEW_REASON_LEN,
+                r.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Request / response types
 // ---------------------------------------------------------------------------
@@ -143,6 +180,10 @@ pub async fn approve(
             payment.status()
         )));
     }
+
+    // Validate review fields before any state mutation — these go to the
+    // append-only audit ledger, so invalid values would be permanent.
+    validate_review_fields(&body.reviewer_id, &body.reason)?;
 
     // Transition to Approved with conditional update to prevent race with escalation monitor.
     payment.transition(PaymentStatus::Approved)?;
@@ -314,6 +355,10 @@ pub async fn reject(
             payment.status()
         )));
     }
+
+    // Validate review fields before any state mutation — these go to the
+    // append-only audit ledger, so invalid values would be permanent.
+    validate_review_fields(&body.reviewer_id, &body.reason)?;
 
     payment.transition(PaymentStatus::Rejected)?;
     let updated = state
