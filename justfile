@@ -55,11 +55,17 @@ run-mcp:
 
 # ── Frontend ────────────────────────────────────
 
+fe-install:
+    cd frontend && npm install
+
 fe-dev:
-    cd frontend && npm run dev
+    cd frontend && npm run dev -- --port 3000
 
 fe-build:
     cd frontend && npm run build
 
 fe-lint:
     cd frontend && npm run lint
+
+fe-type-check:
+    cd frontend && npx tsc --noEmit

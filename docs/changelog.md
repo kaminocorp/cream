@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.9.0](#090--2026-04-06) — Frontend skeleton: Next.js 16 App Router, shadcn/ui, TypeScript type surface mirroring Rust models, typed API client, shared component primitives, 9 placeholder pages, production build passing
 - [0.8.14](#0814--2026-04-06) — Pre-Phase-10 review: repository abstraction restored in approve/reject handlers and escalation monitor; 3 raw sqlx call sites replaced with pub(crate) auth helpers
 - [0.8.13](#0813--2026-04-06) — Test suite Enhancement 2: Orchestrator unit tests — MockPaymentRepository, TestAuditWriter, TestOrchestrator builder, 16 tests covering all process()/resume_after_approval()/escalation_timeout branches
 - [0.8.12](#0812--2026-04-06) — Test suite Enhancement 1: DB serialization round-trip tests — TestDb harness, 15 integration tests covering every enum↔Postgres↔serde boundary, latent into_payment() ID prefix bug fix
@@ -51,6 +52,72 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.9.0 — 2026-04-06
+
+**Phase 10: Frontend Skeleton — Next.js 16 App Router, shadcn/ui, TypeScript Types, API Client, Layout, 9 Pages**
+
+Initialises the `frontend/` dashboard — a Next.js 16 App Router application that will serve as the operator-facing UI for the Cream payment control plane. This phase establishes the complete structural and type foundation: component library, TypeScript types mirroring the Rust domain models exactly, a typed server-side API client covering all 12 REST endpoints, shared UI primitives, a layout shell with navigation sidebar, and placeholder pages for every dashboard view. No live API calls are made — all page data is typed empty state. The call patterns, component contracts, and type surfaces are fully established so Phase 15 can wire real data by replacing single lines per page.
+
+### Added
+
+- **`frontend/` project scaffold** — `create-next-app@16.2.2` with TypeScript, Tailwind v4, App Router, `@/*` import alias, no `src/` directory. `next.config.ts` configured with `reactStrictMode: true` and `typescript.ignoreBuildErrors: false` (type regressions caught at build time, not silently ignored)
+- **shadcn/ui component library** — `shadcn@4.1.2` initialised with CSS variables, RSC support, Lucide icon set. 10 components added: `badge`, `button`, `card`, `dialog`, `input`, `select`, `separator`, `sheet`, `table`, `tabs`. Stored under `components/ui/` (do not edit manually — regenerate via CLI)
+- **`lib/types.ts`** — complete TypeScript type surface mirroring the Rust domain models: 7 typed ID string aliases (`PaymentId`, `AgentId`, `AgentProfileId`, `PolicyRuleId`, `AuditEntryId`, `VirtualCardId`, `WebhookEndpointId`), 8 enum types (`PaymentStatus` with 10 variants, `Currency` with 33 values, `RailPreference`, `PolicyAction`, `PaymentCategory`, `CardType`, `CardStatus`, `AgentStatus`, `CircuitState`), `TERMINAL_STATUSES` constant, and 20+ interfaces spanning payments, policy, routing, providers, audit, virtual cards, webhooks, and API errors. All enum values match Rust serde serialization exactly (`snake_case` for `PaymentStatus`, `SCREAMING_SNAKE_CASE` for `PolicyAction`). Monetary amounts typed as `string` throughout — never `number` — to mirror Rust `Decimal` serialization and avoid IEEE 754 rounding errors. `PolicyCondition` is a recursive discriminated union (`All`/`Any`/`Not`/`FieldCheck`) matching the Rust policy tree. `ApiError` class extends `Error` with `status` and `error_code` fields matching the Rust API error shape
+- **`lib/api.ts`** — `CreamApiClient` class wrapping all 12 REST endpoints with typed request/response signatures. Internal `request<T>()` helper with `cache: "no-store"` on all fetches (real-time dashboard data must never be served stale). Structured error handling: non-2xx responses are parsed into `ApiErrorResponse` and re-thrown as typed `ApiError`; 204 No Content returns `undefined as T`. Trailing slash normalisation on `baseUrl`. `getApiClient()` singleton factory — module-level `_client` variable persists across requests in one Node.js process, avoids re-parsing env vars per request. Intended for exclusive use in Server Components and Route Handlers; never imported into client components
+- **`lib/utils.ts`** — extended with four dashboard utilities: `formatAmount(amount, currency)` (fiat symbol map + currency code suffix, never parses to float); `formatDate(iso)` (Singapore locale `"en-SG"` — `"Apr 6, 2026, 14:32"` format); `relativeTime(iso)` (`"just now"` / `"3m ago"` / `"2h ago"` / `"1d ago"`); `statusColor(status: PaymentStatus)` (maps every status variant to a Tailwind class pair for colour-consistent badges across the dashboard). `cn()` helper from shadcn init retained unchanged
+- **`components/layout/sidebar.tsx`** — `"use client"` component (smallest possible client subtree). Uses `usePathname()` for active link highlighting. 8 nav items in deliberate order: Overview, Transactions, Escalations (surfaced third — highest-urgency operator action), Agents, Policies, Audit Log, Providers, Settings. Active item: `bg-zinc-900 text-white`; inactive: `text-zinc-600` with hover transitions. 56-wide sidebar, fixed height, border-right separator
+- **`components/layout/header.tsx`** — server component. Accepts `title` and optional `description` props. Renders `<h1>` + description paragraph + `Separator` from shadcn. Used by every page via `PageHeader`
+- **`app/layout.tsx`** — root layout replacing the scaffold default. Inter font (`next/font/google`), `antialiased` body. `flex min-h-screen` shell with `Sidebar` left and `<main className="flex-1 overflow-auto">` right. Metadata: title `"Cream — Payment Control Plane"`
+- **`components/shared/status-badge.tsx`** — `StatusBadge` wrapping shadcn `Badge` with `statusColor()` and human-readable label (`pending_approval` → `"pending approval"` via `replace(/_/g, " ")`)
+- **`components/shared/empty-state.tsx`** — `EmptyState` with `icon: LucideIcon`, `title`, `description`, optional `action` node. Centred, `py-20`, zinc-toned icon and text
+- **`components/shared/page-header.tsx`** — thin `PageHeader` wrapper over `Header` for page-level use. Keeps pages decoupled from the layout component import path
+- **`components/shared/data-table.tsx`** — generic `DataTable<T extends { id?: string }>` with typed `Column<T>[]` prop. Uses `row.id ?? i` as React key (no key collisions without requiring all types to have `id`). Renders `EmptyState` automatically when `data.length === 0` — eliminates per-page empty state conditionals in table pages. Server-rendered static in Phase 10; Phase 15 may extract a client wrapper for sort/filter interactions
+- **9 placeholder pages** — all Server Components, correct structure, typed empty state, Phase 15 wiring comments:
+  - `app/page.tsx` — Overview: 4 summary cards (Total Payments, Active Agents, Total Spend, Pending Review) with `"—"` placeholder values
+  - `app/transactions/page.tsx` — `DataTable<PaymentResponse>` with 5 columns (ID, Status, Amount, Agent, Created). Empty state: `"No transactions yet"`
+  - `app/escalations/page.tsx` — `EmptyState` with pending count in description. Phase 15 note: approve/reject actions require a `"use client"` `EscalationTable` subtree + Server Action
+  - `app/agents/page.tsx` — `EmptyState`. Phase 15 note: requires a `GET /v1/agents` list endpoint not present in Phase 8 API — this gap is documented here
+  - `app/agents/[id]/page.tsx` — async page, `await params`. Four spend limit cards (Daily, Weekly, Monthly, Per Transaction) with `0%` progress bars. `EmptyState` for recent transactions
+  - `app/policies/page.tsx` — `EmptyState`
+  - `app/audit/page.tsx` — `DataTable<AuditEntry>` with 5 columns (Entry, Status, Decision, Agent, Time)
+  - `app/providers/page.tsx` — renders `EmptyState` when no data; ready to render provider health cards (circuit state badge, error rate, p50/p99 latency) when `ProviderHealth[]` is non-empty
+  - `app/settings/page.tsx` — disabled webhook registration form (Endpoint URL input, Signing Secret input, Register button all `disabled`). HTTPS-in-production note in `CardDescription`
+- **`frontend/.env.local.example`** — documents `NEXT_PUBLIC_API_URL=http://localhost:3001` (client-safe, controls API base URL) and `CREAM_API_KEY=your-api-key-here` (server-only, never `NEXT_PUBLIC_` prefixed — would expose operator credential to browser bundle)
+
+### Modified
+
+- **`frontend/.gitignore`** — added `!.env.local.example` negation to the `.env*` glob rule so the example file is committed to git (documentation) while all actual env files remain ignored
+- **`frontend/next.config.ts`** — added `reactStrictMode: true` and `typescript: { ignoreBuildErrors: false }` to catch double-render bugs and type regressions in production builds
+- **`justfile`** (monorepo root) — added `fe-install` (`npm install`), updated `fe-dev` to `--port 3000`, added `fe-type-check` (`npx tsc --noEmit`). Pre-existing `fe-dev`, `fe-build`, `fe-lint` entries updated/retained
+
+### Known gaps (scoped to Phase 15)
+
+- **No `GET /v1/agents` endpoint** — Phase 8 API has per-agent `GET /v1/agents/{id}/policy` but no list-all endpoint. The `/agents` page documents this; Phase 15 must add the endpoint to the Rust API crate or derive agent IDs from the audit log
+- **Escalation actions deferred** — approve/reject button handlers require a Server Action + `"use client"` component subtree. Structure is noted in `escalations/page.tsx` with a Phase 15 comment
+- **`cream-logo.svg` deferred** — sidebar renders wordmark as plain text. Logo asset is a Phase 15 concern
+- **Static → dynamic transition** — all 8 pages prerender as static (`○`) in Phase 10. Once `getApiClient()` calls with `cache: "no-store"` are added in Phase 15, Next.js will automatically mark them as dynamic (`ƒ`) — no structural changes needed
+
+### Design decisions
+
+- **Server Components by default** — every page is an RSC; only `sidebar.tsx` is `"use client"` (requires `usePathname()`). Client boundary is the smallest possible subtree. Phase 15 will add a second client subtree for escalation action buttons
+- **`CREAM_API_KEY` server-only** — API key for the dashboard service account must never be prefixed `NEXT_PUBLIC_`. Only accessible in Server Components and Route Handlers. Using `NEXT_PUBLIC_CREAM_API_KEY` would bundle it into the client JS and expose it to any browser user
+- **shadcn v4 deviations** — CLI renamed `default` style to `base-nova` and removed the `--base-color` flag; default `baseColor` is `neutral` (plan specified `zinc`). Both are cool-gray palettes with identical CSS variable structure — no functional difference for a dashboard UI
+- **Next.js 16 (plan specified 15)** — `create-next-app` resolved to 16.2.2 (latest at time of scaffold). App Router, RSC, Turbopack, and `cache: "no-store"` semantics are unchanged. Turbopack is now the default bundler (noted in build output header)
+- **Nested `.git` removed** — `create-next-app` initialised a git repo inside `frontend/`. Removed `frontend/.git` immediately to keep all history under the monorepo root
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `npx tsc --noEmit` | ✅ Zero errors |
+| `npm run build` | ✅ Zero errors — 11 routes compiled (9 pages + `/_not-found` + root) |
+| All routes correct structure | ✅ Static prerender for all except `/agents/[id]` (dynamic by URL param) |
+| No `CREAM_API_KEY` in client bundle | ✅ No `NEXT_PUBLIC_CREAM_API_KEY` anywhere in codebase |
+| `.env.local` gitignored | ✅ `.env*` glob in `.gitignore`, `.env.local.example` whitelisted via negation |
+| Nested `frontend/.git` removed | ✅ Monorepo git owns all history |
 
 ---
 
