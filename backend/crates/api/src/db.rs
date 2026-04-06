@@ -140,7 +140,7 @@ impl PaymentRow {
         // Reconstruct Payment via JSON round-trip to respect the custom Deserialize
         // that validates state machine invariants.
         let payment_json = serde_json::json!({
-            "id": self.id.to_string(),
+            "id": PaymentId::from_uuid(self.id).to_string(),
             "request": serde_json::to_value(&request)
                 .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize request: {e}")))?,
             "status": self.status,

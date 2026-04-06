@@ -86,6 +86,92 @@ struct AgentProfileRow {
     updated_at: DateTime<Utc>,
 }
 
+/// Look up an agent and its profile by agent ID. Used by the approve flow and any
+/// path that needs full agent context without an API key (e.g. after human review).
+pub(crate) async fn lookup_agent_by_id(
+    pool: &PgPool,
+    agent_id: &AgentId,
+) -> Result<Option<(Agent, AgentProfile)>, ApiError> {
+    let agent_row: Option<AgentRow> = sqlx::query_as(
+        "SELECT id, profile_id, name, status, created_at, updated_at
+         FROM agents WHERE id = $1",
+    )
+    .bind(agent_id.as_uuid())
+    .fetch_optional(pool)
+    .await?;
+
+    let agent_row = match agent_row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let profile_row: AgentProfileRow = sqlx::query_as(
+        "SELECT id, name, version, max_per_transaction, max_daily_spend,
+                max_weekly_spend, max_monthly_spend, allowed_categories,
+                allowed_rails, geographic_restrictions, escalation_threshold,
+                timezone, created_at, updated_at
+         FROM agent_profiles WHERE id = $1",
+    )
+    .bind(agent_row.profile_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        ApiError::Internal(anyhow::anyhow!(
+            "agent profile {} not found for agent {}",
+            agent_row.profile_id,
+            agent_row.id
+        ))
+    })?;
+
+    let agent_json = serde_json::json!({
+        "id": format!("agt_{}", agent_row.id),
+        "profile_id": format!("prof_{}", agent_row.profile_id),
+        "name": agent_row.name,
+        "status": agent_row.status,
+        "created_at": agent_row.created_at,
+        "updated_at": agent_row.updated_at,
+    });
+    let agent: Agent = serde_json::from_value(agent_json)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize agent: {e}")))?;
+
+    let profile_json = serde_json::json!({
+        "id": format!("prof_{}", profile_row.id),
+        "name": profile_row.name,
+        "version": profile_row.version,
+        "max_per_transaction": profile_row.max_per_transaction,
+        "max_daily_spend": profile_row.max_daily_spend,
+        "max_weekly_spend": profile_row.max_weekly_spend,
+        "max_monthly_spend": profile_row.max_monthly_spend,
+        "allowed_categories": profile_row.allowed_categories,
+        "allowed_rails": profile_row.allowed_rails,
+        "geographic_restrictions": profile_row.geographic_restrictions,
+        "escalation_threshold": profile_row.escalation_threshold,
+        "timezone": profile_row.timezone,
+        "created_at": profile_row.created_at,
+        "updated_at": profile_row.updated_at,
+    });
+    let profile: AgentProfile = serde_json::from_value(profile_json)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize profile: {e}")))?;
+
+    Ok(Some((agent, profile)))
+}
+
+/// Look up only the AgentProfileId for a given agent. Lightweight alternative when
+/// only the profile ID is needed (reject flow, escalation timeout audit entries).
+pub(crate) async fn lookup_profile_id_for_agent(
+    pool: &PgPool,
+    agent_id: &AgentId,
+) -> Result<Option<AgentProfileId>, ApiError> {
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT profile_id FROM agents WHERE id = $1",
+    )
+    .bind(agent_id.as_uuid())
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|(id,)| AgentProfileId::from_uuid(id)))
+}
+
 async fn lookup_agent_by_key_hash(
     pool: &PgPool,
     key_hash: &str,

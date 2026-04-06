@@ -133,6 +133,21 @@ impl IntoResponse for ApiError {
             "details": details,
         });
 
+        // For RateLimited, set the Retry-After header per RFC 7231 §7.1.3.
+        // HTTP clients and agent frameworks use this header to schedule retries
+        // without needing to parse the JSON body.
+        if let Self::RateLimited { retry_after_secs } = &self {
+            let mut response = (status, axum::Json(body)).into_response();
+            if let Ok(value) =
+                axum::http::HeaderValue::from_str(&retry_after_secs.to_string())
+            {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+            return response;
+        }
+
         (status, axum::Json(body)).into_response()
     }
 }
@@ -250,6 +265,17 @@ mod tests {
             retry_after_secs: 30,
         };
         assert_eq!(err.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn rate_limited_includes_retry_after_header() {
+        let err = ApiError::RateLimited {
+            retry_after_secs: 45,
+        };
+        let response = err.into_response();
+        let header = response.headers().get(axum::http::header::RETRY_AFTER);
+        assert!(header.is_some(), "Retry-After header must be present on 429");
+        assert_eq!(header.unwrap(), "45");
     }
 
     #[test]

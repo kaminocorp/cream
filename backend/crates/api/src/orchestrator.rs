@@ -67,7 +67,7 @@ impl PaymentOrchestrator {
             PolicyAction::Block => {
                 payment.transition(PaymentStatus::Blocked)?;
                 self.state.payment_repo.update_payment(&payment).await?;
-                self.write_audit(&payment, agent, &decision, None, None)
+                self.write_audit(&payment, agent, &decision, None, None, 0)
                     .await?;
                 if let Err(e) = self
                     .state
@@ -109,7 +109,7 @@ impl PaymentOrchestrator {
                         );
                     }
                 }
-                self.write_audit(&payment, agent, &decision, None, None)
+                self.write_audit(&payment, agent, &decision, None, None, 0)
                     .await?;
                 // Don't release idempotency — the payment is still in progress.
                 return Ok(PaymentResponse::from(&payment));
@@ -137,7 +137,7 @@ impl PaymentOrchestrator {
             Err(e) => {
                 payment.transition(PaymentStatus::Failed).ok();
                 self.state.payment_repo.update_payment(&payment).await.ok();
-                self.write_audit(&payment, agent, &decision, None, None)
+                self.write_audit(&payment, agent, &decision, None, None, 0)
                     .await
                     .ok();
                 if let Err(rel_err) = self
@@ -156,7 +156,7 @@ impl PaymentOrchestrator {
             }
         };
 
-        let provider_response = match self
+        let (provider_response, provider_latency_ms) = match self
             .execute_with_failover(&mut payment, &request, &routing)
             .await
         {
@@ -166,7 +166,7 @@ impl PaymentOrchestrator {
                     payment.transition(PaymentStatus::Failed).ok();
                     self.state.payment_repo.update_payment(&payment).await.ok();
                 }
-                self.write_audit(&payment, agent, &decision, Some(&routing), None)
+                self.write_audit(&payment, agent, &decision, Some(&routing), None, 0)
                     .await
                     .ok();
                 if let Err(rel_err) = self
@@ -234,6 +234,7 @@ impl PaymentOrchestrator {
             &decision,
             Some(&routing),
             Some(&provider_response),
+            provider_latency_ms,
         )
         .await?;
 
@@ -290,7 +291,7 @@ impl PaymentOrchestrator {
             Err(e) => {
                 payment.transition(PaymentStatus::Failed).ok();
                 self.state.payment_repo.update_payment(&payment).await.ok();
-                self.write_audit(&payment, agent, &decision, None, None)
+                self.write_audit(&payment, agent, &decision, None, None, 0)
                     .await
                     .ok();
                 // Release idempotency key so the agent can retry.
@@ -310,7 +311,7 @@ impl PaymentOrchestrator {
             }
         };
 
-        let provider_response = match self
+        let (provider_response, provider_latency_ms) = match self
             .execute_with_failover(&mut payment, &request, &routing)
             .await
         {
@@ -320,7 +321,7 @@ impl PaymentOrchestrator {
                     payment.transition(PaymentStatus::Failed).ok();
                     self.state.payment_repo.update_payment(&payment).await.ok();
                 }
-                self.write_audit(&payment, agent, &decision, Some(&routing), None)
+                self.write_audit(&payment, agent, &decision, Some(&routing), None, 0)
                     .await
                     .ok();
                 // Release idempotency key so the agent can retry.
@@ -387,6 +388,7 @@ impl PaymentOrchestrator {
             &decision,
             Some(&routing),
             Some(&provider_response),
+            provider_latency_ms,
         )
         .await?;
 
@@ -448,7 +450,7 @@ impl PaymentOrchestrator {
         payment: &mut Payment,
         request: &PaymentRequest,
         routing: &RoutingDecision,
-    ) -> Result<ProviderPaymentResponse, ApiError> {
+    ) -> Result<(ProviderPaymentResponse, u64), ApiError> {
         let normalized = NormalizedPaymentRequest {
             payment_id: payment.id,
             amount: request.amount,
@@ -507,6 +509,8 @@ impl PaymentOrchestrator {
             // Attempt payment.
             match provider.initiate_payment(&normalized).await {
                 Ok(response) => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+
                     if let Err(e) = self
                         .state
                         .circuit_breaker
@@ -527,11 +531,11 @@ impl PaymentOrchestrator {
 
                     tracing::info!(
                         provider = %candidate.provider_id,
-                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        elapsed_ms,
                         "payment executed successfully"
                     );
 
-                    return Ok(response);
+                    return Ok((response, elapsed_ms));
                 }
                 Err(e) if e.is_retryable() => {
                     if let Err(cb_err) = self
@@ -586,6 +590,7 @@ impl PaymentOrchestrator {
         decision: &cream_policy::PolicyDecision,
         routing: Option<&RoutingDecision>,
         provider_response: Option<&ProviderPaymentResponse>,
+        provider_latency_ms: u64,
     ) -> Result<(), ApiError> {
         let request_json = serde_json::to_value(&payment.request)
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize request: {e}")))?;
@@ -613,10 +618,16 @@ impl PaymentOrchestrator {
                     .cloned()
                     .unwrap_or_else(|| ProviderId::new("unknown")),
                 transaction_id: r.provider_transaction_id.clone(),
-                status: format!("{:?}", r.status),
+                // Use serde serialization (snake_case) rather than Debug (PascalCase).
+                // TransactionStatus has #[serde(rename_all = "snake_case")], so
+                // to_value produces "settled", "requires_action", etc.
+                status: serde_json::to_value(r.status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("{:?}", r.status)),
                 amount_settled: r.amount_settled,
                 currency: r.currency,
-                latency_ms: 0,
+                latency_ms: provider_latency_ms,
             }),
             final_status: payment.status(),
             human_review: None,
@@ -693,14 +704,13 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                     tracing::warn!(payment_id = %payment_id, "escalation timed out, payment blocked");
 
                     // Look up the agent's actual profile_id for a correct audit entry.
-                    let profile_id = match sqlx::query_as::<_, (uuid::Uuid,)>(
-                        "SELECT profile_id FROM agents WHERE id = $1",
+                    let profile_id = match crate::extractors::auth::lookup_profile_id_for_agent(
+                        &state.db,
+                        &payment.request.agent_id,
                     )
-                    .bind(payment.request.agent_id.as_uuid())
-                    .fetch_optional(&state.db)
                     .await
                     {
-                        Ok(Some(row)) => AgentProfileId::from_uuid(row.0),
+                        Ok(Some(pid)) => pid,
                         Ok(None) => {
                             tracing::warn!(
                                 agent_id = %payment.request.agent_id,

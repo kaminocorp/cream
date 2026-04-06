@@ -198,75 +198,12 @@ pub async fn approve(
     }
 
     // Look up the agent + profile for audit and routing.
-    let agent_row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT profile_id FROM agents WHERE id = $1")
-            .bind(payment.request.agent_id.as_uuid())
-            .fetch_optional(&state.db)
-            .await?;
-
-    let profile_id = agent_row
-        .ok_or_else(|| ApiError::NotFound("agent".to_string()))?
-        .0;
-
-    let agent_json = serde_json::json!({
-        "id": payment.request.agent_id.to_string(),
-        "profile_id": format!("prof_{}", profile_id),
-        "name": "system-approved",
-        "status": "active",
-        "created_at": Utc::now(),
-        "updated_at": Utc::now(),
-    });
-    let agent: Agent = serde_json::from_value(agent_json)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize agent: {e}")))?;
-
-    let profile_row = sqlx::query_as::<
-        _,
-        (
-            uuid::Uuid,
-            String,
-            i32,
-            Option<rust_decimal::Decimal>,
-            Option<rust_decimal::Decimal>,
-            Option<rust_decimal::Decimal>,
-            Option<rust_decimal::Decimal>,
-            serde_json::Value,
-            serde_json::Value,
-            serde_json::Value,
-            Option<rust_decimal::Decimal>,
-            Option<String>,
-            chrono::DateTime<Utc>,
-            chrono::DateTime<Utc>,
-        ),
-    >(
-        "SELECT id, name, version, max_per_transaction, max_daily_spend,
-                max_weekly_spend, max_monthly_spend, allowed_categories,
-                allowed_rails, geographic_restrictions, escalation_threshold,
-                timezone, created_at, updated_at
-         FROM agent_profiles WHERE id = $1",
+    let (agent, profile) = crate::extractors::auth::lookup_agent_by_id(
+        &state.db,
+        &payment.request.agent_id,
     )
-    .bind(profile_id)
-    .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| ApiError::NotFound("agent profile".to_string()))?;
-
-    let profile_json = serde_json::json!({
-        "id": format!("prof_{}", profile_row.0),
-        "name": profile_row.1,
-        "version": profile_row.2,
-        "max_per_transaction": profile_row.3,
-        "max_daily_spend": profile_row.4,
-        "max_weekly_spend": profile_row.5,
-        "max_monthly_spend": profile_row.6,
-        "allowed_categories": profile_row.7,
-        "allowed_rails": profile_row.8,
-        "geographic_restrictions": profile_row.9,
-        "escalation_threshold": profile_row.10,
-        "timezone": profile_row.11,
-        "created_at": profile_row.12,
-        "updated_at": profile_row.13,
-    });
-    let profile: AgentProfile = serde_json::from_value(profile_json)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize profile: {e}")))?;
+    .ok_or_else(|| ApiError::NotFound("agent".to_string()))?;
 
     let auth_agent = crate::extractors::auth::AuthenticatedAgent { agent, profile };
 
@@ -372,14 +309,12 @@ pub async fn reject(
     }
 
     // Look up the agent's actual profile_id for a correct audit entry.
-    let agent_row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT profile_id FROM agents WHERE id = $1")
-            .bind(payment.request.agent_id.as_uuid())
-            .fetch_optional(&state.db)
-            .await?;
-    let profile_id = agent_row
-        .ok_or_else(|| ApiError::NotFound("agent".to_string()))?
-        .0;
+    let profile_id = crate::extractors::auth::lookup_profile_id_for_agent(
+        &state.db,
+        &payment.request.agent_id,
+    )
+    .await?
+    .ok_or_else(|| ApiError::NotFound("agent".to_string()))?;
 
     // Write audit entry with human review record.
     let review = HumanReviewRecord {
@@ -398,7 +333,7 @@ pub async fn reject(
         id: AuditEntryId::new(),
         timestamp: Utc::now(),
         agent_id: payment.request.agent_id,
-        agent_profile_id: AgentProfileId::from_uuid(profile_id),
+        agent_profile_id: profile_id,
         payment_id: Some(payment.id),
         request: request_json,
         justification: justification_json,

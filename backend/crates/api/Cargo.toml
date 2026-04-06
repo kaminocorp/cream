@@ -36,3 +36,5 @@ hex = { workspace = true }
 mockall = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
+# Integration test dependencies
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chrono", "rust_decimal", "json", "migrate"] }

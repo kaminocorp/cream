@@ -46,6 +46,13 @@ pub async fn register(
             "webhook URL must start with https:// or http://".into(),
         ));
     }
+    if body.url.starts_with("http://") {
+        tracing::warn!(
+            url = %body.url,
+            "webhook URL uses plaintext HTTP — HTTPS is required in production; \
+             event payloads (payment IDs, amounts, agent IDs) will be transmitted unencrypted"
+        );
+    }
     if body.secret.is_empty() {
         return Err(ApiError::ValidationError(
             "webhook secret cannot be empty".into(),

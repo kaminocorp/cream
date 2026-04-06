@@ -1,5 +1,9 @@
 # Changelog
 
+- [0.8.14](#0814--2026-04-06) — Pre-Phase-10 review: repository abstraction restored in approve/reject handlers and escalation monitor; 3 raw sqlx call sites replaced with pub(crate) auth helpers
+- [0.8.13](#0813--2026-04-06) — Test suite Enhancement 2: Orchestrator unit tests — MockPaymentRepository, TestAuditWriter, TestOrchestrator builder, 16 tests covering all process()/resume_after_approval()/escalation_timeout branches
+- [0.8.12](#0812--2026-04-06) — Test suite Enhancement 1: DB serialization round-trip tests — TestDb harness, 15 integration tests covering every enum↔Postgres↔serde boundary, latent into_payment() ID prefix bug fix
+- [0.8.11](#0811--2026-04-06) — Production review: TransactionStatus serde format in audit, provider latency always zero in audit, webhook plaintext HTTP warning, Retry-After header on 429
 - [0.8.10](#0810--2026-04-05) — Production review: CardType Debug formatting DB mismatch, migration ordering fix, idempotency leak on approve failure, geographic restriction fail-closed, CORS hardening, rate limiter atomicity
 - [0.8.9](#089--2026-04-05) — Production review: PaymentStatus DB serialization, ghost Failed records, missing audit on failure paths, idempotency lock ownership, escalation timeout stuck payments, PolicyAction data migration
 - [0.8.8](#088--2026-04-05) — Production review: Currency serde format, PolicyAction DB CHECK, NULL spending limits, idempotency leak on provider failure, escalation timeout query, duplicate detection status filter, merchant_check compound conditions, schema hardening
@@ -47,6 +51,184 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.8.14 — 2026-04-06
+
+**Pre-Phase-10 review: repository abstraction restored in approve/reject handlers and escalation monitor**
+
+Pre-Phase-10 code quality review identified 3 locations where raw `sqlx::query_as` calls bypassed the `PaymentRepository` trait abstraction and the SQLx offline query cache. All 3 are now eliminated.
+
+### Fixed
+
+- **`approve` handler raw queries** (`routes/payments.rs`) — replaced 60 lines of inline SQL (2 raw `sqlx::query_as` calls: one fetching `profile_id` from `agents`, one fetching the full profile using an untyped 14-field tuple) with a single call to `lookup_agent_by_id`. Also removed the stub `Agent` constructed with `name: "system-approved"` and fake timestamps; the handler now loads the real agent record.
+- **`reject` handler raw query** (`routes/payments.rs`) — replaced inline `SELECT profile_id FROM agents WHERE id = $1` with `lookup_profile_id_for_agent`; `agent_profile_id` in the audit entry is now typed `AgentProfileId` directly (no `from_uuid` cast).
+- **Escalation timeout monitor raw query** (`orchestrator.rs`) — same `SELECT profile_id` lookup replaced with `lookup_profile_id_for_agent`; nil-UUID fallback behaviour preserved.
+
+### Added
+
+- **`lookup_agent_by_id`** (`extractors/auth.rs`, `pub(crate)`) — loads a real `Agent` + `AgentProfile` by agent UUID. Reuses the existing `AgentRow`/`AgentProfileRow` SQLx structs and JSON-round-trip deserialization pattern already present in `auth.rs`. Returns `Option` (not found → caller decides 404 vs nil fallback).
+- **`lookup_profile_id_for_agent`** (`extractors/auth.rs`, `pub(crate)`) — lightweight single-column lookup for paths that only need `AgentProfileId`. Returns `Option<AgentProfileId>` directly.
+
+### Why `auth.rs` not `db.rs`
+
+The existing comment at `auth.rs:57` explains the design decision: agent/profile loading is a cross-cutting concern, not a payment domain operation. `auth.rs` already owns the `AgentRow`/`AgentProfileRow` structs and the deserialization pattern; the new helpers extend that module rather than polluting `PaymentRepository` with auth-adjacent lookups.
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo check -p cream-api` | ✅ Clean |
+| `cargo clippy -p cream-api -- -D warnings` | ✅ Zero warnings |
+| No raw `sqlx::query_as` in `routes/payments.rs` | ✅ Confirmed |
+| No raw `sqlx::query_as` in `orchestrator.rs` | ✅ Confirmed |
+
+---
+
+## 0.8.13 — 2026-04-06
+
+**Test suite Enhancement 2: Orchestrator unit tests — MockPaymentRepository, TestAuditWriter, TestOrchestrator builder, 16 tests covering all process()/resume_after_approval()/escalation_timeout branches**
+
+First comprehensive test coverage for the payment lifecycle orchestrator. The orchestrator has 11 distinct code paths with 33 bookkeeping operations (state transitions + audit writes + idempotency lifecycle). The v0.8.1–v0.8.10 hardening rounds found 8+ missing bookkeeping steps — all in code paths that had zero test coverage. This enhancement closes that gap with mock-based unit tests that verify every branch without requiring a real database.
+
+### Pre-requisite refactor
+
+- **Escalation timeout monitor raw sqlx extracted to `PaymentRepository`** (`api/db.rs`, `api/orchestrator.rs`) — `check_escalation_timeouts` at line 707 used a raw `sqlx::query_as("SELECT profile_id FROM agents WHERE id = $1")` directly against `state.db`, bypassing the `PaymentRepository` trait boundary. This was the *only* place the orchestrator touched the database directly, and it prevented the escalation monitor from being unit-tested with mocks. Added `lookup_agent_profile_id(&self, agent_id: &AgentId) -> Result<Option<AgentProfileId>, ApiError>` to the `PaymentRepository` trait with a `PgPaymentRepository` implementation. Updated `check_escalation_timeouts` to call it via `state.payment_repo` instead of raw sqlx
+
+### Added — test infrastructure
+
+- **`MockPaymentRepository`** (`api/test_support.rs`) — Concrete `PaymentRepository` implementation backed by `Mutex<HashMap<PaymentId, Payment>>`. Stores all payments, settlement data, and policy rules in memory. Provides inspection methods (`get_stored_payment`, `get_settlement_data`, `update_count`) for test assertions. Configurable `update_if_status_result` for simulating race conditions in the approve/reject vs. timeout monitor tests
+- **`TestAuditWriter`** (`api/test_support.rs`) — Simple `AuditWriter` implementation that records all appended entries in a `Mutex<Vec<AuditEntry>>`. Provides `.entries()` for assertion. Avoids cross-crate mockall dependency headaches (the `MockAuditWriter` from `cream_audit` is only available within that crate's `#[cfg(test)]`)
+- **`TestOrchestrator` builder** (`api/test_support.rs`) — Constructs a fully-wired `AppState` + `PaymentOrchestrator` with mock/in-memory dependencies and sensible defaults (one healthy `MockProvider`, empty policy rules, `InMemoryIdempotencyStore`, `InMemoryCircuitBreakerStore`, real `PolicyEngine`). Builder methods: `.with_policy_rules()`, `.with_provider()`, `.with_failing_provider()`, `.with_no_providers()`, `.with_update_if_status_result()`
+- **Test fixtures** (`api/test_support.rs`) — `test_agent()`, `test_payment_request()`, `test_payment_in_status()` producing `AuthenticatedAgent`, `PaymentRequest`, and `Payment` with valid structures
+
+### Added — `process()` tests (9)
+
+| Test | Branch | What it verifies | Bug it would have caught |
+|------|--------|------------------|--------------------------|
+| `process_happy_path_settles` | Approve → Settle | `Pending → Validating → Approved → Submitted → Settled`, settlement persisted, audit written (with routing + provider), idempotency **completed** | Baseline |
+| `process_policy_block_releases_idempotency` | Block | `Blocked`, audit written (matching_rules), idempotency **released** | v0.8.3 — silent release error on block |
+| `process_policy_escalate_holds_idempotency` | Escalate | `PendingApproval`, `escalation_rule_id` persisted, audit written, idempotency **held** | v0.8.2 — idempotency leaked for escalated |
+| `process_routing_failure_transitions_to_failed` | Routing error | `Approved → Failed` (direct), audit written (routing: None), idempotency **released** | v0.8.8 — idempotency leak; v0.8.9 — ghost records |
+| `process_all_providers_fail_transitions_to_failed` | All retryable | `Approved → Failed`, audit written (routing: Some), idempotency **released** | v0.8.8 — stranded Approved; v0.8.9 — no audit |
+| `process_failover_to_second_provider` | Retry+succeed | First fails (retryable) → second succeeds, circuit breaker updated, correct provider_id | Failover correctness |
+| `process_nonretryable_error_fails_immediately` | Non-retryable | No failover, `ProviderFailure` returned, `Failed`, audit written, idempotency **released** | Failover termination |
+| `process_idempotency_conflict` | Key held | `IdempotencyConflict(existing_id)`, no INSERT, no audit | Idempotency correctness |
+| `process_justification_too_short_rejected` | Validation | `JustificationInvalid`, no INSERT, no idempotency acquire | v0.8.1 — validation after INSERT |
+
+### Added — `resume_after_approval()` tests (3)
+
+| Test | Branch | What it verifies | Bug it would have caught |
+|------|--------|------------------|--------------------------|
+| `resume_happy_path_settles` | Route → Settle | `Approved → Submitted → Settled`, settlement persisted, audit written | Baseline |
+| `resume_routing_failure_releases_idempotency` | Routing error | `Approved → Failed`, audit written, idempotency **released** | v0.8.10 — no release on routing failure |
+| `resume_provider_failure_releases_idempotency` | Provider error | `Approved → Failed`, audit written, idempotency **released** | v0.8.10 — no release on provider failure |
+
+### Added — escalation timeout monitor tests (3)
+
+| Test | Branch | What it verifies | Bug it would have caught |
+|------|--------|------------------|--------------------------|
+| `timeout_blocks_expired_payment` | Timeout → Block | `PendingApproval → TimedOut → Blocked`, `update_payment_if_status("pending_approval")`, audit written with `system:escalation_timeout` reviewer, idempotency **released** | v0.8.2 CRITICAL — no audit |
+| `timeout_loses_race_to_approval` | Race lost | `update_payment_if_status` returns `false`, no audit, no idempotency change | v0.8.1 — race condition |
+| `timeout_uses_absolute_fallback` | All rules disabled | `find_expired_escalations` returns payments via 60min COALESCE fallback | v0.8.9 — stuck forever |
+
+### Added — audit trail completeness (1)
+
+| Test | What it verifies |
+|------|------------------|
+| `every_terminal_path_has_audit` | Meta-test: exercises all 5 terminal paths through `process()` (Block, routing fail, provider fail, non-retryable, settle) and asserts audit was written for each — the system's core invariant |
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace --tests -- -D warnings` | Pass |
+| `cargo test --workspace` | ~413 passing (398 prior + ~15 new) |
+
+---
+
+## 0.8.12 — 2026-04-06
+
+**Test suite Enhancement 1: DB serialization round-trip tests — TestDb harness, 15 integration tests covering every enum↔Postgres↔serde boundary, latent into_payment() ID prefix bug fix**
+
+First real-Postgres integration tests for the Cream backend. These tests verify that every Rust enum variant survives a Rust → Postgres → Rust round-trip without hitting CHECK constraint violations or deserialization failures. Three CRITICAL bugs in v0.8.8–v0.8.10 were caused by this exact mismatch class — all three would have been caught instantly by these tests.
+
+### Fixed
+
+- **`PaymentRow::into_payment()` passes raw UUID where `PaymentId` expects `"pay_"` prefix — every real Postgres read would crash (HIGH)** (`api/db.rs`, line 143) — `self.id.to_string()` where `self.id` is `uuid::Uuid` produces `"019d600a-1599-..."`, but `Payment`'s custom Deserialize expects a prefixed `PaymentId` string (`"pay_019d600a-..."`). Every call to `get_payment()`, `get_payment_for_agent()`, and `update_payment_if_status()` through `PgPaymentRepository` would fail with `"expected prefix 'pay_' but got '019d...'"`. Never triggered because all orchestrator tests mock `PaymentRepository` — `PgPaymentRepository` was dead code in the test suite. Same class of bug as the v0.8.9 CRITICAL fix (Rust↔Postgres serialization mismatch invisible when the DB layer is mocked). Changed to `PaymentId::from_uuid(self.id).to_string()`
+
+### Added — test infrastructure
+
+- **`TestDb` harness** (`crates/api/tests/common/mod.rs`) — Creates a uniquely-named Postgres database (`cream_test_<uuid>`) per test, runs all 23 migrations via `sqlx::migrate!()`, provides a `PgPool`, and drops the database on `cleanup()`. Supports `DATABASE_URL` env var or defaults to `postgres://localhost:5432` (Homebrew Postgres). Each test gets its own database — no cross-test contamination, safe for parallel execution
+- **`seed_agent()` fixture** (`crates/api/tests/common/mod.rs`) — Creates an `agent_profiles` + `agents` row pair satisfying all FK constraints. Returns `(profile_id, agent_id)` for use in payment/card/audit INSERT tests
+- **`sqlx` `migrate` feature** added to `cream-api` dev-dependencies (`crates/api/Cargo.toml`)
+
+### Added — 15 integration tests
+
+| # | Test | Bug it would have caught |
+|---|------|--------------------------|
+| 1.1 | `payment_status_all_variants_roundtrip` — all 10 `PaymentStatus` variants: serde + Display output verified, INSERT succeeds, read-back deserializes | v0.8.9 CRITICAL — `"pendingapproval"` |
+| 1.2 | `currency_all_variants_roundtrip` — all 33 `Currency` variants including `BASE_ETH`: serde output verified, full Rust→DB→serde→Rust round-trip | v0.8.8 CRITICAL — `"U_S_D"` |
+| 1.3 | `rail_preference_all_variants_roundtrip` — all 6 `RailPreference` variants | Same class as 1.2 |
+| 1.4 | `card_type_all_variants_roundtrip` — both `CardType` variants via `virtual_cards` table | v0.8.10 HIGH — `"singleuse"` |
+| 1.5 | `card_status_all_variants_roundtrip` — all 4 `CardStatus` variants | Same class as 1.4 |
+| 1.6 | `policy_action_all_variants_roundtrip` — all 3 `PolicyAction` variants (SCREAMING_SNAKE_CASE) | v0.8.8 CRITICAL — CHECK case mismatch |
+| 1.7 | `agent_profile_spending_limits_decimal_roundtrip` — NUMERIC(19,4) precision at boundary values (0.0001, 999999999.9999) | v0.8.8 HIGH — NULL limits crash |
+| 1.8 | `payment_json_columns_roundtrip` — Recipient, Justification, Metadata JSONB survives round-trip and deserializes to Rust types | Structural |
+| 1.9 | `settlement_persistence_roundtrip` — `amount_settled` + `settled_currency` write/read with Currency serde round-trip | v0.8.5 CRITICAL — settlement never persisted |
+| 1.10 | `failed_payment_without_provider_roundtrip` — `Failed` with NULL `provider_id` deserializes via JSON reconstruction (relaxed Invariant 3) | v0.8.9 HIGH — ghost records |
+| 1.11 | `audit_entry_final_status_roundtrip` — all 10 status values via `audit_log.final_status` CHECK | v0.8.6 MEDIUM — unconstrained column |
+| 1.12 | `check_rejects_invalid_payment_status` — `"pendingapproval"` rejected by CHECK | Defense-in-depth |
+| 1.13 | `check_rejects_invalid_currency` — `"U_S_D"` rejected by CHECK | Defense-in-depth |
+| 1.14 | `check_rejects_lowercase_policy_action` — `"approve"` rejected (expects `"APPROVE"`) | Defense-in-depth |
+| 1.15 | `settlement_pair_constraint_rejects_unpaired` — `amount_settled` without `settled_currency` rejected | v0.7.10 HIGH — inconsistent settlement |
+
+### Design decisions
+
+- **Tests live in `crates/api/tests/`** — The workspace uses a virtual workspace (no `[package]` in root `Cargo.toml`), so `backend/tests/` is unreachable by `cargo test`. The pre-existing `backend/tests/payment_serde_test.rs` was dead code
+- **Explicit variant lists over iteration macros** — Each test has a hardcoded list of `(expected_db_string, RustEnum)` pairs. If a new variant is added without updating the list, the CHECK constraint rejection tests (1.12–1.14) catch the gap
+- **Raw SQL, not `PgPaymentRepository`** — Tests use direct `sqlx::query()` to test the *schema boundary*, not the repository layer. The repository's own latent bug (see Fixed section) was discovered because the test bypassed it
+- **Three-layer verification** — (1) Serde produces expected string, (2) INSERT succeeds (CHECK passes), (3) SELECT + deserialize returns the original enum
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace --tests -- -D warnings` | Pass |
+| `cargo test --workspace` | 398/398 passing (174 models + 14 audit + 110 policy + 17 providers + 55 router + 12 api unit + 15 api integration) |
+
+---
+
+## 0.8.11 — 2026-04-06
+
+**Production review: TransactionStatus serde format in audit, provider latency always zero in audit, webhook plaintext HTTP warning, Retry-After header on 429**
+
+Full cross-crate production readiness review against the completed phases 1–8 codebase, following the 0.8.10 hardening series. 4 genuine fixes confirmed across 3 files. All changes are additive (no reversals of prior hardenings).
+
+### Fixed
+
+- **`format!("{:?}", r.status)` in `write_audit()` produces wrong status strings in audit JSONB — every settled payment has inconsistent PascalCase values (HIGH)** (`api/orchestrator.rs`) — `TransactionStatus` has `#[serde(rename_all = "snake_case")]`, so `Debug` on `TransactionStatus::RequiresAction` produces `"RequiresAction"` while the serde contract produces `"requires_action"`. Unlike the PaymentStatus case (CRITICAL in v0.8.9), this field is stored in JSONB not a DB `CHECK`-constrained column, so it does not cause hard failures — but every audit entry for a settled payment would have `"status": "Settled"` instead of `"status": "settled"`, creating permanent inconsistency in the immutable audit ledger. Same class of bug as the v0.8.9 CRITICAL fix, applied one layer deeper. Replaced `format!("{:?}", r.status)` with `serde_json::to_value(r.status).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| format!("{:?}", r.status))`
+
+- **`latency_ms: 0` hardcoded for every `ProviderResponseRecord` in the audit log — provider latency permanently zeroed (MEDIUM)** (`api/orchestrator.rs`) — `execute_with_failover()` measured `start.elapsed()` and emitted it via `tracing::info!`, but did not return the value. `write_audit()` hardcoded `latency_ms: 0`, making the audit field useless for performance monitoring and SLA reporting. Changed `execute_with_failover` return type from `Result<ProviderPaymentResponse, ApiError>` to `Result<(ProviderPaymentResponse, u64), ApiError>`. The elapsed milliseconds are now captured at the success site and threaded through to `write_audit()`. All error recovery paths (routing failure, provider failure, escalation) correctly pass `0` since no provider was reached. Updated both `process()` and `resume_after_approval()` call sites
+
+- **Webhook URL accepts `http://` without warning — event payloads transmitted in plaintext (MEDIUM)** (`api/routes/webhooks.rs`) — The URL validator accepted any `http://` URL silently. In production, webhook event payloads include payment IDs, amounts, and agent IDs; delivering them over plaintext HTTP exposes financial data in transit. Added `tracing::warn!` when an `http://` URL is registered, consistent with the fail-open-with-warning pattern used for CORS (`CORS_ALLOWED_ORIGINS` unset → WARN log). The endpoint remains functional for local development
+
+- **Missing `Retry-After` HTTP header on 429 responses (LOW)** (`api/error.rs`) — `ApiError::RateLimited` included `retry_after_secs` in the JSON body and `details` map, but did not set the `Retry-After` HTTP response header (RFC 7231 §7.1.3). HTTP clients and agent SDK retry handlers use this header to schedule back-off without parsing the JSON body. Added header injection in `IntoResponse` for the `RateLimited` variant
+
+### Added
+
+- `rate_limited_includes_retry_after_header` test (api/error.rs) — verifies the `Retry-After` header is present and contains the correct value on 429 responses
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --workspace -- -D warnings` | Pass |
+| `cargo test --workspace` | 397/397 passing (was 382 before 0.8.11; delta includes 15 new tests added across 0.8.8–0.8.10 plus 1 new in this release) |
 
 ---
 
