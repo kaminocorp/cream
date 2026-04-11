@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kaminocorp/cream-mcp-server",
+  "description": "MCP server for Cream — the universal payment control plane for AI agents. Exposes payment initiation, policy inspection, audit queries, virtual card issuance, and provider health through MCP tools, resources, and prompts.",
+  "repository": {
+    "url": "https://github.com/kaminocorp/cream",
+    "source": "github"
+  },
+  "version": "0.10.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@kaminocorp/cream-mcp-server",
+      "version": "0.10.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

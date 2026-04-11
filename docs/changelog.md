@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.10.1](#0101--2026-04-11) — npm publishing prep: scoped package `@kaminocorp/cream-mcp-server`, bin entry + shebang, publishConfig, mcpName for MCP registry, package README, LICENSE, server.json, 26.6 kB tarball verified via dry-run
 - [0.10.0](#0100--2026-04-11) — Phase 9: MCP server — TypeScript sidecar using @modelcontextprotocol/sdk v1.29, 6 tools + 3 resources + 2 prompts, stdio + Streamable HTTP transports, Jest suite (22 tests), standalone Dockerfile, end-to-end runtime verified against real MCP protocol
 - [0.9.0](#090--2026-04-06) — Frontend skeleton: Next.js 16 App Router, shadcn/ui, TypeScript type surface mirroring Rust models, typed API client, shared component primitives, 9 placeholder pages, production build passing
 - [0.8.14](#0814--2026-04-06) — Pre-Phase-10 review: repository abstraction restored in approve/reject handlers and escalation monitor; 3 raw sqlx call sites replaced with pub(crate) auth helpers
@@ -53,6 +54,76 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.10.1 — 2026-04-11
+
+**npm Package & MCP Registry Publishing Readiness**
+
+Prepares the Phase 9 MCP server (shipped in v0.10.0 as commit `47bcb8e`) for publication to npm as `@kaminocorp/cream-mcp-server` and submission to the official MCP registry at `registry.modelcontextprotocol.io`. This release is packaging metadata only — zero behavioral changes to the MCP server itself, no new tools, no new transports. The server runs identically to v0.10.0. What's new is the surface that makes it *installable* and *discoverable*: a scoped npm package identity, a `bin` field so `npx @kaminocorp/cream-mcp-server` works out of the box, a package README that will render on npmjs.com, an MCP registry `server.json` entry, and an executable shebang so the compiled output runs under the `bin` field without a node wrapper.
+
+No code has been pushed to npm or the MCP registry yet. The final `npm publish` and `mcp-publisher publish` commands require operator authentication (npm 2FA + GitHub OAuth) and are documented as a runbook in `docs/completions/phase-9-completion.md`. This release gets everything that *can* be in the repo into the repo; the actual publish is an operator action taken after this commit lands on main.
+
+### Added
+
+- **`backend/mcp-server/README.md`** — the content that will display on the `@kaminocorp/cream-mcp-server` page on npmjs.com. Sections: what the server is, prerequisites (Cream Rust API must be reachable), Claude Desktop installation with the exact JSON config snippet, other MCP clients (LangChain, LangGraph, custom agents via `npx -y`), Docker installation note, full tool/resource/prompt listings with titles and one-line descriptions, environment variable table (`CREAM_API_URL`, `CREAM_API_KEY`, `MCP_TRANSPORT`, `MCP_HTTP_PORT`), brief 8-step architecture overview explaining how Cream's payment pipeline works, issue tracker link, license notice
+- **`backend/mcp-server/LICENSE`** — verbatim copy of the root Apache 2.0 `LICENSE` (11,357 bytes). npm packages must have their own `LICENSE` in the package root so the `files` allowlist can ship it in the tarball. Symlinks break on Windows, and relative paths pointing outside the package root are forbidden by the `files` field, so file copy is the only cross-platform approach
+- **`backend/mcp-server/server.json`** — MCP registry submission metadata matching the `https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json` schema. Fields: `name: "io.github.kaminocorp/cream-mcp-server"` (reverse-DNS GitHub namespace — the registry enforces that this matches `package.json.mcpName` exactly as its namespace-ownership verification mechanism), `description`, `repository.url` pointing at the monorepo, `version: "0.10.0"` (the npm package version this entry describes), and a `packages[0]` entry with `registryType: "npm"`, `identifier: "@kaminocorp/cream-mcp-server"`, `transport: { type: "stdio" }`. Only stdio transport is listed — HTTP mode is a runtime operator choice via `MCP_TRANSPORT=http` on the same installed package, not a separate distribution
+
+### Modified
+
+- **`backend/mcp-server/package.json`** — rewritten for publishing, not just patched:
+  - `name` changed from unscoped `cream-mcp-server` to scoped `@kaminocorp/cream-mcp-server`. Scoped packages can only be published by the org owner, structurally preventing name-squatting on npmjs.com for generic terms
+  - `private: true` **removed** — npm refuses to publish packages with this field present. Must be explicitly deleted, which is why it's called out here
+  - `version` bumped from `"0.9.0"` to `"0.10.0"` — aligns with the v0.10.0 feature release that this publishing prep corresponds to. The mcp-server package was still at the pre-Phase-9 scaffold version; this is the first time its `package.json` version catches up to the project version
+  - `license: "Apache-2.0"` added (SPDX identifier matching the root `LICENSE`)
+  - `author`, `homepage`, `bugs` — GitHub org identity and issue tracker URLs
+  - `repository` added as a full object with `type`, `url`, and critically `directory: "backend/mcp-server"` — the last field tells npm the package lives in a monorepo subfolder, so the npm package page links correctly back to the source path rather than the repo root
+  - `keywords` array with 12 discovery terms: `mcp`, `model-context-protocol`, `modelcontextprotocol`, `claude`, `anthropic`, `payments`, `agentic-commerce`, `ai-agents`, `payment-control-plane`, `cream`, `policy-engine`, `audit-ledger`
+  - `bin: { "cream-mcp-server": "dist/index.js" }` — lets `npx @kaminocorp/cream-mcp-server` and a global install's `cream-mcp-server` command work. Pairs with the new shebang in `src/index.ts`
+  - `files: ["dist", "README.md", "LICENSE"]` — opt-in allowlist of tarball contents. Cleaner than `.npmignore` because it's a whitelist not a denylist; accidentally leaking source or tests into a published tarball is structurally impossible
+  - `engines: { "node": ">=18" }` — matches the MCP SDK's minimum Node floor
+  - `scripts.prepublishOnly: "npm run build && npm test"` — npm runs this hook before every publish attempt. If build or tests fail, the publish aborts without uploading anything. Makes it structurally impossible to ship a broken build short of `--ignore-scripts`
+  - `publishConfig: { "access": "public" }` — **required** for scoped packages. Without it `npm publish` fails with HTTP 402 Payment Required because npm defaults scoped packages to private (paid plan only). Explicit opt-in is the intended UX for open-source scoped packages
+  - `mcpName: "io.github.kaminocorp/cream-mcp-server"` — the MCP registry's namespace-ownership field. `mcp-publisher publish` reads this at submission time and refuses to proceed if it doesn't match the `name` in `server.json` exactly. The `io.github.<org>/<pkg>` format is how the registry verifies ownership via GitHub OAuth — you log in as a `kaminocorp` org member, and the registry grants you namespace rights to `io.github.kaminocorp/*`
+- **`backend/mcp-server/src/index.ts`** — two line-level changes:
+  - `#!/usr/bin/env node` added as line 1. TypeScript preserves shebangs verbatim in the emitted JS, so this reaches `dist/index.js` unchanged and the `bin` field can execute it directly. Without the shebang, running `cream-mcp-server` from the command line after a global install fails with `exec format error`
+  - `McpServer` constructor `version` field bumped from `"0.9.0"` to `"0.10.0"` to match `package.json`. This is the version string the MCP client sees in the `initialize` handshake response — drift between it and the package version confuses MCP inspector tools
+
+### Verified tarball contents (via `npm publish --dry-run`)
+
+```
+@kaminocorp/cream-mcp-server@0.10.0
+  LICENSE         11.4 kB    ← Apache 2.0 full text
+  README.md        7.0 kB    ← npm package page content
+  package.json     1.9 kB    ← with bin, files, publishConfig, mcpName
+  dist/            72 files  ← compiled .js + .d.ts + .map for 15 source modules
+  ───────────────
+  75 files total
+  26.6 kB packed
+  99.3 kB unpacked
+```
+
+Confirmed excluded from the tarball: `src/`, `tests/`, `tsconfig.json`, `.env*`, `Dockerfile`, `server.json` (not needed in the npm package — used only by the `mcp-publisher` CLI for registry submission), `node_modules/`. All 22 Jest tests pass after the changes (`npx jest`: 3 suites green in ~0.5s). `dist/index.js` contains `#!/usr/bin/env node` as line 1 after rebuild — confirmed.
+
+### Publishing Runbook
+
+Not executed — `npm publish` and `mcp-publisher publish` both require operator auth. The full runbook with verification commands lives in `docs/completions/phase-9-completion.md`. Action sequence:
+
+1. Commit and push v0.10.1 to main
+2. `npm login` and (if needed) `npm org create kaminocorp` — one-time setup
+3. `cd backend/mcp-server && npm publish` — `prepublishOnly` hook auto-runs build + tests before upload
+4. Install the `mcp-publisher` CLI (prebuilt release from `modelcontextprotocol/registry` GitHub releases, or `make publisher` from source)
+5. `mcp-publisher login github` — GitHub OAuth device flow verifying `kaminocorp` org membership
+6. `cd backend/mcp-server && mcp-publisher publish` — submits `server.json` to `registry.modelcontextprotocol.io`
+7. Test from Claude Desktop with the config block in `README.md`
+
+### Design decisions
+
+- **Scoped package name over unscoped** — `@kaminocorp/cream-mcp-server` is permanently tied to the `kaminocorp` npm org, structurally preventing name-squatting for generic terms. Unscoped would have been slightly shorter in install commands but would expose the name to loss via account mishap (forgotten 2FA, typo squatter). npm does not arbitrate naming disputes for generic terms; scoping is the only structural defence
+- **Version string maintained in three places** — `package.json`, `server.json` (both `version` and `packages[0].version`), and the `McpServer` constructor in `src/index.ts`. Temporarily manual. Can be automated later via a small `scripts/bump-version.js` helper or the `np` tool; at the current release cadence the manual coordination is cheaper than maintaining a bump script
+- **MCP registry entry only lists stdio transport** — the server also supports Streamable HTTP, but HTTP mode is a runtime operator choice via `MCP_TRANSPORT=http` on the same installed package, not a separate distribution channel. The registry doesn't need a second package entry for one installable unit
 
 ---
 

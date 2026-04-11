@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Cream MCP Server — entry point.
 //
 // Thin TypeScript sidecar that translates MCP tool calls into Rust REST API
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
 
   const server = new McpServer({
     name: "cream-mcp-server",
-    version: "0.9.0",
+    version: "0.10.0",
   });
 
   // Register all MCP capabilities.
