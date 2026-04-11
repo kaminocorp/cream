@@ -1,0 +1,6 @@
+# Build output
+dist/
+
+# Environment (local only)
+.env
+.env.local

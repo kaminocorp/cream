@@ -50,8 +50,25 @@ test-integration:
 run-api:
     cargo run --manifest-path backend/Cargo.toml -p cream-api
 
-run-mcp:
-    cd backend/mcp-server && npx ts-node src/index.ts
+# ── MCP Server ──────────────────────────────────
+
+mcp-install:
+    cd backend/mcp-server && npm install
+
+mcp-dev:
+    cd backend/mcp-server && npm run dev
+
+mcp-build:
+    cd backend/mcp-server && npm run build
+
+mcp-test:
+    cd backend/mcp-server && npm test
+
+mcp-lint:
+    cd backend/mcp-server && npm run lint
+
+mcp-start:
+    cd backend/mcp-server && npm run start
 
 # ── Frontend ────────────────────────────────────
 

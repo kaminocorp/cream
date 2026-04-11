@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.10.0](#0100--2026-04-11) — Phase 9: MCP server — TypeScript sidecar using @modelcontextprotocol/sdk v1.29, 6 tools + 3 resources + 2 prompts, stdio + Streamable HTTP transports, Jest suite (22 tests), standalone Dockerfile, end-to-end runtime verified against real MCP protocol
 - [0.9.0](#090--2026-04-06) — Frontend skeleton: Next.js 16 App Router, shadcn/ui, TypeScript type surface mirroring Rust models, typed API client, shared component primitives, 9 placeholder pages, production build passing
 - [0.8.14](#0814--2026-04-06) — Pre-Phase-10 review: repository abstraction restored in approve/reject handlers and escalation monitor; 3 raw sqlx call sites replaced with pub(crate) auth helpers
 - [0.8.13](#0813--2026-04-06) — Test suite Enhancement 2: Orchestrator unit tests — MockPaymentRepository, TestAuditWriter, TestOrchestrator builder, 16 tests covering all process()/resume_after_approval()/escalation_timeout branches
@@ -52,6 +53,87 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.10.0 — 2026-04-11
+
+**Phase 9: MCP Server — TypeScript Sidecar, 6 Tools + 3 Resources + 2 Prompts, stdio + Streamable HTTP Transports**
+
+Implements the `backend/mcp-server/` TypeScript sidecar — a thin protocol adapter that translates MCP tool calls into HTTP requests against the Rust REST API. Zero business logic lives here; all payment processing, policy evaluation, and routing happens in the Rust API. The sidecar exposes 6 tools, 3 resources, and 2 prompts to any MCP-compatible agent (Claude, GPT-4, LangGraph, etc.), with both stdio transport (for Claude Desktop and locally-spawned agents) and Streamable HTTP transport (for remote agents connecting over the network). End-to-end protocol traffic was verified against a live server in both transport modes.
+
+### Added
+
+- **`backend/mcp-server/package.json`** — replaces the v0.9.0 scaffold. Specifies `@modelcontextprotocol/sdk ^1.29.0`, `zod ^4.0.0` (explicit peer dep so clean installs are reproducible — see Design Decisions), plus `jest`, `ts-jest`, `@types/jest` in devDependencies. Adds `test`, `test:watch`, and `lint` scripts. Jest config embedded via `"jest"` field in `package.json` (preset `ts-jest`, `testEnvironment: "node"`, `testMatch: ["**/tests/**/*.test.ts"]`)
+- **`backend/mcp-server/.env.example`** — documents `CREAM_API_URL`, `CREAM_API_KEY`, `MCP_TRANSPORT`, `MCP_HTTP_PORT` with inline comments explaining stdio vs. http transport choice
+- **`backend/mcp-server/.gitignore`** — ignores `dist/` (build output) and `.env*` (local secrets). Added because the root `.gitignore` covers `node_modules/`/`target/`/`.next/` but not `dist/`, so the mcp-server tree needs its own ignore file to prevent compiled JS from being committed
+- **`backend/mcp-server/src/config.ts`** — `loadConfig()` function reads env vars into a typed `Config` interface. Throws on missing `CREAM_API_URL` or `CREAM_API_KEY`, strips trailing slash from base URL, validates port in `1..=65535`, defaults transport to `stdio` and port to `3002`. Pure function — no I/O, no retries, no hot reload
+- **`backend/mcp-server/src/types.ts`** — minimal TypeScript types mirroring the Rust API's JSON responses. Subset of the full domain model: only fields tools and resources actually read. `PaymentStatus` (10 variants), `PaymentRequest`/`PaymentResponse`/`PaymentDetail`, `AgentProfile`/`PolicyRule`/`AgentPolicyResponse`, `AuditEntry`, `ProviderHealth`, `VirtualCard`, `ApiErrorBody`, and `ApiError` class extending `Error` with `status` + `errorCode`. Monetary fields typed as `string` throughout — never `number` — mirroring Rust `Decimal` serialization and avoiding IEEE 754 drift. Authoritative shape remains in `backend/crates/models/`
+- **`backend/mcp-server/src/api-client.ts`** — `ApiClient` class with a private `request<T>()` helper handling Bearer auth header, JSON content-type, `ApiError` on non-2xx (with `UNKNOWN` errorCode fallback when the error body isn't parseable JSON), and 204 No Content returning `undefined`. Public methods cover the 6 endpoints actually consumed by tools: `initiatePayment`, `getPayment`, `getAgentPolicy`, `queryAudit` (with `URLSearchParams`-built query string), `createCard`, `getProviderHealth`. `createApiClient(config)` is a factory export for the entry point
+- **6 tool handlers + barrel** in `src/tools/`:
+  - `initiate-payment.ts` — POST /v1/payments. Maps 12 MCP inputs (amount, currency, recipient_type/identifier/name/country, justification_summary/category/task_id/expected_value, preferred_rail, idempotency_key) into the Rust request body shape. Auto-generates idempotency key via `randomUUID()` from `node:crypto` when omitted (explicit `node:crypto` import instead of the global `crypto.randomUUID()` for Node 18 type compatibility). `justification_summary` enforces 10-character minimum matching the Rust Phase 2 guard. `justification_category` enum matches the Rust `PaymentCategory` variants. Errors formatted via `formatError()` helper that special-cases `ApiError` for structured output
+  - `get-payment-status.ts` — GET /v1/payments/{id}. Single `payment_id` input, returns the full `PaymentDetail` (payment + audit entries) as JSON text
+  - `create-virtual-card.ts` — POST /v1/cards. Maps `card_type`, `currency`, `provider_id`, `max_per_transaction`, `max_per_cycle`, `allowed_mcc_codes` (default `[]`) into the nested `{ card_type, provider_id, controls: { ... } }` Rust request shape
+  - `get-my-policy.ts` — GET /v1/agents/{id}/policy. Single `agent_id` input, returns the agent/profile/rules bundle
+  - `get-audit-history.ts` — GET /v1/audit with filters. Accepts `status`, `from`, `to`, `min_amount`, `max_amount`, `category`, `limit` (1-100, default 20), `offset` (≥0, default 0). Filters are conditionally assembled into a `Record<string, string | number>` so absent fields don't become empty query params
+  - `check-provider-health.ts` — GET /v1/providers/health. Zero-argument tool (no `inputSchema`). Returns the `ProviderHealth[]` array as JSON
+  - `tools/index.ts` — `registerAllTools()` barrel imports and invokes all 6 registration functions. Adding a new tool is a two-step change: write the handler, import + call it here
+- **3 resource handlers + barrel** in `src/resources/`:
+  - `policy.ts` — `agent://policy/{agent_id}` resource using `ResourceTemplate`. Returns the same `AgentPolicyResponse` as the `get_my_policy` tool but addressed by URI, for MCP clients that want to surface declarative policy data as context. Errors are returned as structured JSON content blocks rather than thrown, so clients can inspect the error without the resource read failing entirely
+  - `balance.ts` — `agent://balance/{wallet_id}` resource, **STUB**. No `GET /v1/wallets/{id}/balance` endpoint exists in the Phase 8 API yet. Returns a stub JSON payload documenting the gap so MCP clients can still discover the URI scheme. When the endpoint is added, this handler should be wired to `api.getWalletBalance(walletId)`
+  - `audit.ts` — `agent://audit/{agent_id}` resource. Returns the 20 most recent audit entries via `api.queryAudit({ limit: 20 })`. For filtered queries, use the `get_audit_history` tool instead
+  - `resources/index.ts` — `registerAllResources()` barrel
+- **2 prompt handlers + barrel** in `src/prompts/`:
+  - `justification-template.ts` — `payment_justification_template` prompt. Guided template for producing a well-structured payment justification. Takes `task_description`, `amount`, `vendor`, `expected_outcome` and returns a user/assistant message pair that the agent can use as a scaffold for `justification_summary` + `justification_expected_value`
+  - `policy-summary.ts` — `policy_summary` prompt. Takes `policy_json` (output of `get_my_policy` or the `agent-policy` resource) and returns a user message asking the model to summarise spending limits, rails, restrictions, and escalation thresholds in plain English
+  - `prompts/index.ts` — `registerAllPrompts()` barrel
+- **`backend/mcp-server/src/index.ts`** — entry point replacing the v0.9.0 placeholder scaffold. Loads config, constructs `ApiClient`, instantiates `McpServer` with name `"cream-mcp-server"` and version `"0.9.0"`, registers all tools/resources/prompts, and selects transport. In **stdio mode**, uses `StdioServerTransport` and writes the startup banner to `process.stderr` exclusively — `stdout` is the MCP wire protocol in stdio mode and any `console.log` to it would corrupt the protocol stream. In **http mode**, creates a `StreamableHTTPServerTransport` with `sessionIdGenerator: undefined` (stateless mode), wraps it in a plain `node:http` server bound to `config.httpPort`, and registers SIGTERM/SIGINT handlers for graceful shutdown. Fatal errors write to stderr and exit 1
+- **3 test suites** in `tests/` (Jest + ts-jest, 22 tests total):
+  - `config.test.ts` — 8 tests. Valid env → typed Config, trailing slash stripping, missing `CREAM_API_URL` throws, missing `CREAM_API_KEY` throws, `MCP_TRANSPORT=http` selects http mode, unknown transport values fall back to stdio, non-numeric `MCP_HTTP_PORT` throws, out-of-range (99999) port throws. Uses `beforeEach`/`afterEach` to snapshot and restore `process.env`
+  - `api-client.test.ts` — 6 tests. Mocks global `fetch`. Verifies Bearer Authorization header, `ApiError` on 404 with matching `status`+`errorCode`, `UNKNOWN` fallback when error body is unparseable JSON, 204 No Content path returns undefined, audit filter query string assembly, empty-filter case omits trailing `?`
+  - `tools.test.ts` — 8 tests. Uses a minimal `McpServer` mock that intercepts `registerTool()` and captures handler functions in a `Map`, plus a typed `ApiClient` mock with per-test `jest.fn()` overrides. Covers `initiate_payment` (success path with payment JSON returned, auto-generated idempotency key, user-supplied idempotency key preserved, `ApiError` surfaces as `isError: true` content block), `get_payment_status` (success + 404), `check_provider_health` (success + unreachable API). Two tests beyond the plan spec: explicit idempotency key preservation, and `ECONNREFUSED`-style network failure. All 22 tests pass in ~1s
+- **`backend/mcp-server/Dockerfile`** — multi-stage Node 22 Alpine build. Stage 1 (`builder`) installs all deps (including devDeps for `tsc`) and runs `npm run build` to emit `dist/`. Stage 2 copies only the production node_modules (`npm ci --omit=dev`) and `dist/`, sets `NODE_ENV=production`, exposes port 3002, runs `node dist/index.js`. Standalone-ready but not yet wired into docker-compose — see Known Gaps
+- **`justfile`** (monorepo root) — new `# ── MCP Server ──` block with `mcp-install`, `mcp-dev`, `mcp-build`, `mcp-test`, `mcp-lint`, `mcp-start` recipes. The pre-existing stale `run-mcp:` recipe (which pointed at the v0.9.0 scaffold via `npx ts-node`) was replaced by the new block; `run-api:` retained unchanged
+
+### Modified
+
+- **Replaced** `backend/mcp-server/src/index.ts` — was a 14-line `console.log("scaffold only")` placeholder from v0.9.0. Now the real entry point (described above)
+
+### Known gaps
+
+- **`agent://balance/{wallet_id}` is a stub** — no `GET /v1/wallets/{id}/balance` endpoint exists in the Phase 8 API. The resource is registered so clients can discover the URI scheme, but returns a stub payload explaining the gap. Wiring this is a follow-up once the API endpoint is added (not part of any current phase — the Phase 9 plan flagged it as a deferred concern)
+- **docker-compose integration deferred** — the Phase 9 plan specified adding the MCP server to `docker-compose.yml` as a service with `depends_on: [api]`, but no `api` service exists in compose yet (no `backend/Dockerfile` for the Rust API). Adding a compose service that references a non-existent dependency would break `docker compose up`. The standalone `backend/mcp-server/Dockerfile` is production-ready and self-contained; it will be wired into compose in the deployment-infrastructure phase alongside the Rust API Dockerfile. For local development, `just mcp-dev` runs the server via `ts-node` against a host-running API
+- **Claude Desktop configuration not committed** — the plan included example `claude_desktop_config.json` snippets for local development, but these are user-specific (they reference absolute paths to the repo). Users should copy from the Phase 9 plan doc and adjust paths to their local checkout
+- **Runtime integration test against Rust API skipped** — the verification checklist item "initiate_payment calls Rust API → returns PaymentResponse JSON" requires Postgres + Redis + the Rust API server running, which wasn't booted during this phase. The MCP server's protocol handshake, tool registration, schema conversion, and error handling were verified end-to-end with real MCP wire protocol traffic; the missing piece is proving that a real tool invocation successfully traverses the MCP → HTTP → orchestrator → mock-provider → audit pipeline. This is best covered by a follow-up end-to-end test once CI boots the full stack (Phase 11) or as part of Phase 18's cross-layer testing
+
+### Design decisions
+
+- **`zod ^4.0.0` instead of the plan's `^3.25.0`** — deviation from the Phase 9 plan doc. When the v0.9.0 scaffold ran `npm install` against the SDK's `"zod": "^3.25 || ^4.0"` peer dep, npm resolved zod to v4.3.6. Forcing a downgrade to v3 would invalidate the existing `node_modules` and add nothing — every zod API actually used in Phase 9 (`string`, `enum`, `optional`, `describe`, `default`, `min`, `max`, `int`, `array`, `number`) is stable across v3→v4. Validated end-to-end: the `tools/list` MCP response shows every tool has a correctly-converted JSON Schema with `description`, `enum`, `minLength`, `default`, and `required` fields intact, which means the SDK's `ZodRawShapeCompat` bridge handles v4 correctly
+- **`.js` extensions on all SDK subpath imports** — deviation from the plan's note that "Import paths do not use `.js` extensions in CommonJS mode." That guidance was correct for pre-`exports`-field packages but breaks for SDK v1.29, whose `package.json` maps `"./*"` → `"./dist/cjs/*"` *without* the `.js` extension. Node's CJS loader with `exports` maps is strict — it won't auto-append `.js` when the exports value omits it. TypeScript compiles cleanly (its `"types"` conditional points to `.d.ts` files via the same wildcard), but `node dist/index.js` throws `Cannot find module '.../dist/cjs/server/mcp'` at runtime. Fix: all SDK subpath imports (`./server/mcp`, `./server/stdio`, `./server/streamableHttp`) now include the `.js` extension. Local relative imports (`./config`, `./api-client`, `./tools`, etc.) don't need the extension because CJS module resolution still works for non-exports-mapped paths. This gotcha only surfaced because the verification checklist includes a runtime smoke test and not just `tsc --noEmit`
+- **`import { randomUUID } from "node:crypto"` instead of global `crypto.randomUUID()`** — the plan uses the global `crypto.randomUUID()` which only exists on the Web Crypto global in Node 19+. The SDK's engines floor is Node 18, and TypeScript's default `lib` doesn't know about the `crypto` global in all environments. Explicit import is one more line, typechecks everywhere, and works identically at runtime
+- **Stdio logging to stderr exclusively** — in stdio transport mode, `process.stdout` *is* the MCP wire protocol (newline-delimited JSON frames). Any `console.log` or `process.stdout.write` of non-protocol content would corrupt the protocol stream and break the MCP connection. All diagnostic output (startup banner, shutdown log, fatal errors) is written to `process.stderr`. This includes the fatal error handler in `main().catch()`
+- **Streamable HTTP in stateless mode** — `sessionIdGenerator: undefined` means each HTTP request creates a fresh MCP session with no cross-request state. This is the simplest configuration, works with any HTTP-capable MCP client, and matches the plan's recommendation. Stateful HTTP sessions would require session ID tracking and are not needed for the Phase 9 use cases
+- **No Claude Desktop config file committed** — absolute paths make the config user-specific. Users should copy from the Phase 9 plan doc (section 10) and adjust `/path/to/cream/` to their local checkout path
+
+### Verification
+
+End-to-end verification was performed against real MCP protocol traffic in both transport modes.
+
+| Check | Result |
+|-------|--------|
+| `npm install` (with new jest/ts-jest/@types/jest) | ✅ 267 packages added, zero install errors |
+| `npx tsc --noEmit` after each step batch | ✅ Zero type errors at every checkpoint |
+| `npx tsc` production build | ✅ `dist/` emitted with all 4 top-level files + 6 tools + 3 resources + 2 prompts + 3 barrels (complete `.js` + `.d.ts` + `.map` set) |
+| `npx jest` test suite | ✅ 3 suites, 22 tests, ~1s runtime, zero failures |
+| HTTP mode startup | ✅ `cream-mcp-server: Streamable HTTP on port 3099` on stderr, TCP bind successful |
+| HTTP mode `initialize` handshake | ✅ `HTTP 200`, returned `protocolVersion: "2024-11-05"`, `capabilities: { tools, resources, prompts }`, `serverInfo: { name: "cream-mcp-server", version: "0.9.0" }` as Server-Sent Events |
+| Stdio mode startup | ✅ `cream-mcp-server: running on stdio` on stderr, no stdout pollution |
+| Stdio mode `initialize` handshake | ✅ Clean JSON-RPC frame on stdout with correct capabilities and server info |
+| Stdio mode `tools/list` | ✅ All 6 tools returned with titles, descriptions, and full JSON Schemas |
+| Zod → JSON Schema conversion | ✅ `type`/`properties`/`required`/`enum`/`minLength`/`default` all present and correct; `initiate_payment` `required` array correctly excludes optional fields (`recipient_name`, `recipient_country`, `justification_task_id`, `justification_expected_value`, `idempotency_key`); `preferred_rail`, `limit`, `offset`, `allowed_mcc_codes` defaults preserved |
+| stdout clean in stdio mode | ✅ Only protocol JSON frames; banner is on stderr |
+
+Two moderate severity vulnerabilities reported by `npm audit` are in transitive dev dependencies (Jest's tool chain) and do not affect production deployments. Noted but not addressed in this phase.
 
 ---
 
