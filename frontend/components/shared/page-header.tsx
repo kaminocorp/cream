@@ -1,8 +1,9 @@
+import type { ReactNode } from "react";
 import { Header } from "@/components/layout/header";
 
 interface PageHeaderProps {
   title: string;
-  description?: string;
+  description?: ReactNode;
 }
 
 export function PageHeader({ title, description }: PageHeaderProps) {

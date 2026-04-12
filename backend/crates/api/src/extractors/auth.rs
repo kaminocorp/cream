@@ -16,6 +16,114 @@ pub struct AuthenticatedAgent {
     pub profile: AgentProfile,
 }
 
+/// Resolved operator identity. In Phase 15.1 the operator is a single shared
+/// secret without an internal identity — there is no operator table, no
+/// multi-user tracking, no roles. Phase 16-A replaces this with a real
+/// identity (`operator_id`, roles) and a proper sign-in flow; callers
+/// pattern-matching on [`AuthenticatedPrincipal::Operator`] keep working
+/// unchanged because the variant is an opaque struct.
+///
+/// Intentionally carries no fields: 16-A can add them without any handler
+/// churn because all current handlers only care about the fact that the
+/// caller is an operator, not who the operator is.
+#[derive(Debug, Clone, Default)]
+pub struct AuthenticatedOperator {
+    // Phase 16-A: add operator_id, roles, email, etc.
+}
+
+/// Either an authenticated agent or an authenticated operator.
+///
+/// Handlers that should be callable by *both* principals accept this enum
+/// and pattern-match on the variant to decide what data to expose (operators
+/// see cross-agent data; agents are hard-scoped to themselves). Handlers
+/// that should be callable by *only one* principal keep their original
+/// extractor signature.
+///
+/// Note: `Agent` carries the full `AuthenticatedAgent` (profile + agent)
+/// while `Operator` is currently empty. Clippy flags the size disparity
+/// via `large_enum_variant`, but boxing would force every call site to
+/// deref through a `Box` and add a heap allocation per authenticated
+/// request. Since this type lives for one request only and is immediately
+/// moved into the handler, the size difference is irrelevant.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum AuthenticatedPrincipal {
+    Agent(AuthenticatedAgent),
+    Operator(AuthenticatedOperator),
+}
+
+impl AuthenticatedPrincipal {
+    /// If this principal is an agent, return a reference to it. Otherwise None.
+    pub fn as_agent(&self) -> Option<&AuthenticatedAgent> {
+        match self {
+            Self::Agent(a) => Some(a),
+            Self::Operator(_) => None,
+        }
+    }
+
+    /// True if this principal is an operator (dashboard / admin caller).
+    pub fn is_operator(&self) -> bool {
+        matches!(self, Self::Operator(_))
+    }
+
+    /// Return the agent this principal is allowed to act on when a specific
+    /// agent ID is named in the request path. Operators may target any agent;
+    /// agents may only target themselves.
+    ///
+    /// Use this from handlers with a `{id}` path segment to avoid hand-rolling
+    /// the check every time.
+    pub fn authorize_target_agent(&self, target: &AgentId) -> Result<(), ApiError> {
+        match self {
+            Self::Operator(_) => Ok(()),
+            Self::Agent(a) if &a.agent.id == target => Ok(()),
+            Self::Agent(_) => Err(ApiError::NotFound(format!("agent {target}"))),
+        }
+    }
+}
+
+/// Constant-time comparison for the operator API key. Avoids timing-oracle
+/// leakage of key bytes via response latency. Not strictly necessary at
+/// current volumes, but cheap and correct.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Extract the bearer token from the Authorization header, or return Unauthorized.
+fn bearer_token(parts: &Parts) -> Result<&str, ApiError> {
+    let header = parts
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ApiError::Unauthorized)?;
+
+    let token = header
+        .strip_prefix("Bearer ")
+        .ok_or(ApiError::Unauthorized)?;
+
+    if token.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+
+    Ok(token)
+}
+
+/// Check whether the token matches the configured operator key. Returns
+/// `false` (not an error) when the operator key is unset — callers fall
+/// through to agent lookup.
+fn token_is_operator(state: &AppState, token: &str) -> bool {
+    match state.config.operator_api_key.as_deref() {
+        Some(expected) => constant_time_eq(expected.as_bytes(), token.as_bytes()),
+        None => false,
+    }
+}
+
 /// Axum extractor that authenticates an agent via `Authorization: Bearer <api_key>`.
 ///
 /// 1. Extracts the bearer token from the header.
@@ -23,8 +131,10 @@ pub struct AuthenticatedAgent {
 /// 3. Verifies the agent is `active`.
 /// 4. Loads the associated `AgentProfile`.
 ///
-/// Handlers that include `AuthenticatedAgent` as a parameter automatically
-/// require authentication; handlers that omit it are public.
+/// **Does not match the operator key** — this extractor is only for handlers
+/// that must be agent-scoped (e.g., `POST /v1/payments`, anything called by
+/// MCP). For handlers that accept either principal, use
+/// [`AuthenticatedPrincipal`].
 impl FromRequestParts<AppState> for AuthenticatedAgent {
     type Rejection = ApiError;
 
@@ -32,17 +142,13 @@ impl FromRequestParts<AppState> for AuthenticatedAgent {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let header = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(ApiError::Unauthorized)?;
+        let token = bearer_token(parts)?;
 
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(ApiError::Unauthorized)?;
-
-        if token.is_empty() {
+        // Defence in depth: if someone configures the operator key and then
+        // tries to call an agent-only endpoint with it, reject cleanly
+        // rather than falling through to a DB lookup that would return
+        // Unauthorized anyway.
+        if token_is_operator(state, token) {
             return Err(ApiError::Unauthorized);
         }
 
@@ -50,6 +156,54 @@ impl FromRequestParts<AppState> for AuthenticatedAgent {
 
         let (agent, profile) = lookup_agent_by_key_hash(&state.db, &key_hash).await?;
         Ok(AuthenticatedAgent { agent, profile })
+    }
+}
+
+/// Axum extractor that authenticates an operator via the shared
+/// `OPERATOR_API_KEY`. Returns 401 if the header is missing, malformed,
+/// or does not match the configured operator key. Also returns 401 when
+/// the operator key is unset in config (safe default).
+impl FromRequestParts<AppState> for AuthenticatedOperator {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(parts)?;
+
+        if token_is_operator(state, token) {
+            Ok(AuthenticatedOperator::default())
+        } else {
+            Err(ApiError::Unauthorized)
+        }
+    }
+}
+
+/// Axum extractor that resolves the caller as either an operator (if the
+/// token matches the shared operator key) or an agent (if the token matches
+/// an `api_key_hash` in the `agents` table). Rejects with 401 otherwise.
+///
+/// Use this on handlers that should be callable by both principals — the
+/// handler then branches on the variant to decide what data to expose.
+impl FromRequestParts<AppState> for AuthenticatedPrincipal {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(parts)?;
+
+        // Operator path first — constant-time check against the shared key.
+        if token_is_operator(state, token) {
+            return Ok(Self::Operator(AuthenticatedOperator::default()));
+        }
+
+        // Fall through to agent lookup.
+        let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        let (agent, profile) = lookup_agent_by_key_hash(&state.db, &key_hash).await?;
+        Ok(Self::Agent(AuthenticatedAgent { agent, profile }))
     }
 }
 

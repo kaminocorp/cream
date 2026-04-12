@@ -1,12 +1,17 @@
 import {
   AgentPolicyResponse,
+  AgentSummary,
   AuditEntry,
   AuditQueryFilters,
   ApiError,
   ApiErrorResponse,
+  CreateAgentRequest,
+  CreateAgentResponse,
   PaymentDetail,
   PaymentResponse,
   ProviderHealth,
+  RotateKeyResponse,
+  UpdateAgentRequest,
   VirtualCard,
   CardControls,
   CardType,
@@ -95,6 +100,53 @@ export class CreamApiClient {
 
   // --- Agents ---
 
+  /**
+   * List all agents with their profile summary. Operator-only
+   * (`OPERATOR_API_KEY` required). Returns up to 500 agents ordered
+   * `created_at DESC`.
+   */
+  async listAgents(): Promise<AgentSummary[]> {
+    return request(this.baseUrl, this.apiKey, "GET", "/v1/agents");
+  }
+
+  /**
+   * Create a new agent with a freshly minted API key. Operator-only.
+   *
+   * The response body contains the plaintext `api_key` EXACTLY ONCE —
+   * the backend persists only its SHA-256 hash, so there is no code path
+   * that can retrieve it again. Callers MUST surface the key to the
+   * operator via a one-shot copy-to-clipboard UX.
+   */
+  async createAgent(req: CreateAgentRequest): Promise<CreateAgentResponse> {
+    return request(this.baseUrl, this.apiKey, "POST", "/v1/agents", req);
+  }
+
+  /**
+   * Update an agent's name, status, or profile assignment. Operator-only.
+   * All fields optional; only those present are changed (COALESCE semantics
+   * on the server).
+   */
+  async updateAgent(
+    agentId: string,
+    update: UpdateAgentRequest,
+  ): Promise<AgentSummary> {
+    return request(this.baseUrl, this.apiKey, "PATCH", `/v1/agents/${agentId}`, update);
+  }
+
+  /**
+   * Rotate an agent's API key. Operator-only. Generates a new key,
+   * persists its hash, invalidates the old key, and returns the new
+   * plaintext EXACTLY ONCE. Same one-shot UX as `createAgent`.
+   */
+  async rotateAgentKey(agentId: string): Promise<RotateKeyResponse> {
+    return request(
+      this.baseUrl,
+      this.apiKey,
+      "POST",
+      `/v1/agents/${agentId}/rotate-key`,
+    );
+  }
+
   async getAgentPolicy(agentId: string): Promise<AgentPolicyResponse> {
     return request(this.baseUrl, this.apiKey, "GET", `/v1/agents/${agentId}/policy`);
   }
@@ -113,6 +165,8 @@ export class CreamApiClient {
     if (filters.category)    params.set("category", filters.category);
     if (filters.min_amount)  params.set("min_amount", filters.min_amount);
     if (filters.max_amount)  params.set("max_amount", filters.max_amount);
+    if (filters.q)           params.set("q", filters.q);
+    if (filters.agent_id)    params.set("agent_id", filters.agent_id);
     if (filters.limit)       params.set("limit", filters.limit.toString());
     if (filters.offset)      params.set("offset", filters.offset.toString());
     const qs = params.toString();

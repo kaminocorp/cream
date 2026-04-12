@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::error::ApiError;
-use crate::extractors::auth::AuthenticatedAgent;
+use crate::extractors::auth::{AuthenticatedAgent, AuthenticatedOperator};
 use crate::extractors::json::ValidatedJson;
 use crate::orchestrator::PaymentOrchestrator;
 use crate::state::AppState;
@@ -157,10 +157,16 @@ pub async fn get_status(
 
 /// `POST /v1/payments/{id}/approve` — human-approve an escalated payment.
 ///
-/// No agent authentication — this endpoint is for human reviewers
-/// (dashboard auth in Phase 10). The `reviewer_id` is passed in the body.
+/// **Operator-only.** Phase 15.1 closes a pre-existing security gap where
+/// this endpoint was entirely unauthenticated — anyone reaching the API
+/// could approve any pending payment. The caller must present the shared
+/// `OPERATOR_API_KEY` via `Authorization: Bearer …`. The `reviewer_id` in
+/// the body is still free-text and stored verbatim in the audit ledger for
+/// accountability; 16-A will replace it with the authenticated operator's
+/// identity automatically.
 pub async fn approve(
     State(state): State<AppState>,
+    _op: AuthenticatedOperator,
     Path(id): Path<String>,
     ValidatedJson(body): ValidatedJson<ApproveRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
@@ -271,8 +277,12 @@ pub async fn approve(
 }
 
 /// `POST /v1/payments/{id}/reject` — human-reject an escalated payment.
+///
+/// **Operator-only** — see the security note on [`approve`]. Same Phase 15.1
+/// auth gate applies.
 pub async fn reject(
     State(state): State<AppState>,
+    _op: AuthenticatedOperator,
     Path(id): Path<String>,
     ValidatedJson(body): ValidatedJson<RejectRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {

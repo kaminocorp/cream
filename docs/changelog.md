@@ -1,5 +1,7 @@
 # Changelog
 
+- [0.12.0](#0120--2026-04-12) — Phase 15.2–15.8: dashboard full implementation — 13 pages wired, escalation queue, agent management, audit log UX, provider health charts, policy editor, responsive sidebar, 12/12 loading/error coverage
+- [0.11.0](#0110--2026-04-11) — Phase 15.1: operator auth + agent lifecycle — `AuthenticatedPrincipal` enum, 4 new endpoints, audit cross-agent visibility + `q` search, approve/reject auth fix, 416 tests
 - [0.10.1](#0101--2026-04-11) — npm publishing prep: scoped package `@kaminocorp/cream-mcp-server`, bin entry + shebang, publishConfig, mcpName for MCP registry, package README, LICENSE, server.json, 26.6 kB tarball verified via dry-run
 - [0.10.0](#0100--2026-04-11) — Phase 9: MCP server — TypeScript sidecar using @modelcontextprotocol/sdk v1.29, 6 tools + 3 resources + 2 prompts, stdio + Streamable HTTP transports, Jest suite (22 tests), standalone Dockerfile, end-to-end runtime verified against real MCP protocol
 - [0.9.0](#090--2026-04-06) — Frontend skeleton: Next.js 16 App Router, shadcn/ui, TypeScript type surface mirroring Rust models, typed API client, shared component primitives, 9 placeholder pages, production build passing
@@ -54,6 +56,152 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.12.0 — 2026-04-12
+
+**Phase 15.2–15.8: Frontend Full Implementation — 13 Dashboard Pages, Live Data, Agent Management, Audit Investigation, Policy Editor**
+
+Completes the Cream operator dashboard. Every page fetches real data from the Rust API. No placeholder data remains anywhere. The dashboard is a fully functional operator tool for managing agents, investigating transactions, approving escalations, monitoring provider health, and editing policy profiles — backed by the Phase 15.1 operator auth endpoints.
+
+Eight sub-phases shipped as one release: data wiring (15.2), escalation queue interactivity (15.3), agent management (15.4), audit log UX (15.5), provider health live view (15.6), policy editor (15.7), and polish (15.8).
+
+### Added
+
+#### 15.2 — Data wiring (replace all placeholders)
+
+- **`frontend/components/shared/polling-refresh.tsx`** — client component that calls `router.refresh()` on a configurable interval (default 10s). Pauses when the browser tab is hidden via `visibilitychange` listener and does an immediate refresh when the tab regains focus. Used by transactions, escalations, overview, and (pre-15.6) providers pages. This is the Phase 15 plan's alternative to WebSocket/SSE streaming — one HTTP request per interval, zero client-side state management
+- **`frontend/components/shared/error-fallback.tsx`** — shared error boundary shell consumed by every route's `error.tsx`. Shows the error message (operator-safe, no stack trace), the error digest for cross-referencing server logs, and a "Try again" button wired to Next 16's `unstable_retry` callback. All 12 routes delegate to this component with a custom title string
+- **`frontend/components/ui/skeleton.tsx`** — shadcn-compatible `Skeleton` primitive (`animate-pulse` + `bg-zinc-100`). Used by all 12 `loading.tsx` files
+- **`frontend/app/layout.tsx`** — `export const dynamic = "force-dynamic"` added at root layout level, cascading to all child routes. Without this, Next.js attempts to prerender pages at build time, which fails because `getApiClient()` reads env vars not populated during build
+- **All 9 existing pages** rewritten from `const x: T[] = []` placeholders to async server components calling the Rust API. Overview page computes 4 real metrics (active agents, pending escalations, healthy providers, 24h event count) via `Promise.all`. Transactions, escalations, audit, and providers pages poll via `<PollingRefresh>`
+- **`loading.tsx` + `error.tsx`** added to every route directory (8 loading + 8 error files in 15.2; remaining 4+4 added in 15.8)
+
+#### 15.3 — Escalation queue interactivity
+
+- **`frontend/app/escalations/actions.ts`** — Server Actions file (`"use server"` directive). Two functions: `approveEscalation(paymentId, reviewerId)` and `rejectEscalation(paymentId, reviewerId, reason?)`. Both return a plain `ActionResult` type (`{ ok: true } | { ok: false; message: string }`) — not throwing on failure — because Server Functions must return serializable values across the server/client boundary. Both call `revalidatePath` on success
+- **`frontend/components/escalations/escalation-table.tsx`** — client component receiving `AuditEntry[]` from the server page. Uses React 19's `useOptimistic` with a reducer for instant row removal on approve/reject, `useTransition` for pending state, and `router.refresh()` for server-side resync. Error display via inline banner with 5-second auto-dismiss. Approve button green-tinted, reject red-tinted, both `variant="outline"` with `Loader2` spinner during pending
+
+#### 15.4 — Agent management UI
+
+- **`frontend/app/agents/actions.ts`** — three Server Actions: `createAgent(name, profileId)` returns `CreateAgentResult` with `agentId` + `apiKey`; `updateAgent(agentId, update)` returns `ActionResult`; `rotateAgentKey(agentId)` returns `RotateKeyResult` with `apiKey`. Create and rotate carry the plaintext API key in their success variant — intentional since the key must cross the server/client boundary exactly once for display
+- **`frontend/components/agents/agent-form.tsx`** — shared create/edit form (client component). Differentiated by `mode` prop. Profile dropdown derived from existing agents list (no dedicated `listProfiles()` endpoint exists). Post-create: swaps form for `<ApiKeyDisplay>` showing the one-time key. Edit mode: diff-and-send (only changed fields sent to backend). Inline validation: name required + max 100 chars, profile required for create
+- **`frontend/components/agents/api-key-display.tsx`** — one-time API key display reusable across create and rotate flows. Amber warning banner, monospace key with `select-all` + `break-all`, copy-to-clipboard button with check icon feedback (2s auto-reset), "I've copied it" acknowledgment button as the sole dismissal path
+- **`frontend/components/agents/rotate-key-dialog.tsx`** — three-stage credential rotation dialog: confirm (red warning that current key will be invalidated) → loading (spinner) → display (key via `<ApiKeyDisplay>`, dialog close blocked until acknowledged). Error stage with retry. Dialog's `showCloseButton` and `onOpenChange` are suppressed during the display stage to prevent accidental key loss
+- **`frontend/app/agents/new/page.tsx`** — server page that fetches agents list to derive profile options, renders `<AgentForm mode="create">`
+- **`frontend/app/agents/[id]/edit/page.tsx`** — server page that fetches agent policy + agents list in parallel, renders pre-populated `<AgentForm mode="edit">`
+
+#### 15.5 — Audit log UX
+
+- **`frontend/components/audit/audit-filter-bar.tsx`** — client component with 8 filter controls across 2 rows. Row 1: free-text search (`q`, fires on Enter/blur), status dropdown, category dropdown, agent dropdown (receives `AgentOption[]` from server page). Row 2: from/to datetime-local inputs, min/max amount inputs, "Clear filters" button. All filters read from and write to URL search params via `useSearchParams()` + `router.push()`. Offset resets on any filter change. Select "All" uses `__all__` sentinel mapped to param deletion
+- **`frontend/components/audit/audit-detail-panel.tsx`** — structured detail view for expanded audit rows. Up to 7 sections: Request (amount, currency, rail, recipient), Justification (summary, category, task_id, expected_value), Policy Evaluation (decision badge, latency, rules), Routing (provider, rail, candidates with scores), Provider Response (transaction ID, status, latency), On-Chain (TX hash), Human Review (reviewer, decision, reason). Sections only render when data exists. `DL` helper auto-filters null/empty values
+- **`frontend/components/audit/audit-table.tsx`** — client component with expandable rows. Each row is a `<Fragment>` wrapping two `<tr>` elements (summary + detail via `colSpan={8}`). Expansion state: `Set<string>` of entry IDs. Prev/next pagination via URL `offset` param. Page size: 50 entries. "Has more" signal: entries.length === PAGE_SIZE
+
+#### 15.6 — Provider health live view
+
+- **`frontend/app/providers/actions.ts`** — Server Action `fetchProviderHealth()` for client-side polling. Returns `ProviderHealth[]` from the Rust API
+- **`frontend/components/providers/health-chart.tsx`** — Recharts `LineChart` wrapper accepting `data`, `lines` (series definitions with key/name/color), `yLabel`, `yDomain`, `yFormat`. Waits for 2+ data points before rendering (shows "Collecting data..." placeholder). Animation disabled (`isAnimationActive={false}`) to avoid distracting redraws on each 10-second data append
+- **`frontend/components/providers/provider-health-dashboard.tsx`** — client component that owns its own polling loop (not `<PollingRefresh>` — needs to accumulate history, not replace it). Ring buffer: `Map<string, Snapshot[]>` capped at 60 entries per provider (10 minutes at 10s intervals). Tab-aware: `visibilitychange` listener pauses polling when hidden, immediate refresh + restart when visible. Mount time captured in `useEffect` (not `useRef(Date.now())`) to satisfy React 19 purity rules. Each provider card shows: health dot + circuit breaker badge, 4-metric summary grid, error rate line chart (red, 0-100%), latency line chart (p50 blue, p99 amber)
+- **`recharts`** added as production dependency (~65kB gzipped, tree-shakes to `LineChart`, `Line`, `XAxis`, `YAxis`, `Tooltip`, `ResponsiveContainer`)
+
+#### 15.7 — Policy editor
+
+- **`frontend/app/agents/[id]/policy/page.tsx`** — server page that fetches agent policy, renders `<PolicyEditor>` with back-to-agent link and profile version display
+- **`frontend/app/agents/[id]/policy/actions.ts`** — Server Action `updatePolicy(agentId, input)` for saving profile-level settings
+- **`frontend/components/policy/policy-editor.tsx`** — parent component with two tabs: "Profile Settings" (editable form) and "Rules" (read-only list with count badge)
+- **`frontend/components/policy/profile-form.tsx`** — editable profile settings form. Spending limits: 4 number inputs (per-transaction, daily, weekly, monthly) + escalation threshold. Allowed categories: `TagToggle` component — row of clickable buttons toggling set membership (8 categories visible at once). Allowed rails: same `TagToggle` (6 rails). Geographic restrictions: `GeoTags` component — tag input for ISO country codes with add/remove, auto-uppercase. Diff-and-send strategy: only changed fields included in the `PUT` request body. Success/error inline messages
+- **`frontend/components/policy/condition-tree.tsx`** — recursive `PolicyCondition` renderer. `classify()` helper normalizes the Rust serde enum representation to a tagged variant. `All` → indigo `ALL` badge + indigo left border + indented children. `Any` → amber `ANY` badge + amber left border. `Not` → red `NOT` badge + red left border + single child. `FieldCheck` → inline `field` (code box) + operator symbol (`GreaterThan` → `>`, etc.) + `value` (blue code box). `formatValue()` handles arrays (truncated at 5), objects (JSON stringified), primitives. Nests arbitrarily deep, matching backend's 32-level limit
+- **`frontend/components/policy/rule-list.tsx`** — read-only expandable rule list (client component). Rules sorted ascending by priority. Each card shows: priority number, human-readable rule type label (12 registered types mapped), action badge (green/red/yellow), disabled badge (50% opacity), escalation config summary. Click expands to show the full condition tree + rule ID
+
+#### 15.8 — Polish
+
+- **8 new loading/error files** for routes added in 15.4–15.7: `agents/new`, `agents/[id]/edit`, `agents/[id]/policy`, `settings`. Every route in the app (12/12) now has both `loading.tsx` and `error.tsx`
+- **`frontend/components/layout/sidebar.tsx`** rewritten:
+  - **Sub-route active state**: `isActive(pathname, href)` uses `startsWith(href + "/")` for non-root routes. Overview `/` uses exact match. Previously `/agents/new` left "Agents" unhighlighted
+  - **Responsive collapse**: Desktop (≥1024px / `lg:`) shows static sidebar. Mobile (<1024px) hides sidebar, shows hamburger toggle at top-left. Overlay with dimmed backdrop. Nav link click closes drawer
+
+### Modified
+
+- **`frontend/app/agents/page.tsx`** — "New Agent" button added (links to `/agents/new`), empty state updated from "use POST /v1/agents endpoint" to "Create your first agent" with CTA button
+- **`frontend/app/agents/[id]/page.tsx`** — Edit + Rotate Key buttons added to detail header. "edit policy →" link replaces inline rule list's stale "ships in Phase 15.7" text
+- **`frontend/app/audit/page.tsx`** — full rewrite: reads all URL search params, parallel fetches (audit entries + agents list), wires `AuditFilterBar` + `AuditTable`
+- **`frontend/app/providers/page.tsx`** — rewritten as thin server wrapper passing initial snapshot to `<ProviderHealthDashboard>`. `<PollingRefresh>` removed (client component owns its own polling)
+- **`frontend/app/escalations/page.tsx`** — `<DataTable>` replaced with `<EscalationTable>` client component + `<PollingRefresh intervalMs={5_000}>`
+- **`frontend/app/policies/page.tsx`** — agent cards now link to `/agents/{id}/policy` (was `/agents/{id}`). Stale "ships in Phase 15.7" footer removed
+- **`frontend/app/settings/page.tsx`** — "Register (Phase 15)" → "Register (Phase 16-A)"
+- **`frontend/lib/api.ts`** — `listAgents()`, `createAgent()`, `updateAgent()`, `rotateAgentKey()` methods added in 15.2
+- **`frontend/lib/types.ts`** — `AgentSummary`, `CreateAgentRequest`, `CreateAgentResponse`, `UpdateAgentRequest`, `RotateKeyResponse` types added in 15.2
+
+### Design decisions
+
+- **No zod/react-hook-form for agent forms** — the plan suggested these dependencies, but forms have 2-3 fields and the established codebase pattern is raw React state + `useTransition`. Adding two packages for minimal validation would be inconsistent. Inline validation covers the cases adequately
+- **Profile dropdown derived from agents list, not a dedicated endpoint** — no `GET /v1/profiles` exists. Extracting unique `(profile_id, profile_name)` pairs from the agents list is pragmatic for Beta. Falls back to text input if no agents exist
+- **URL params as single source of truth for audit filters** — filter state is shareable (paste a URL) and survives navigation. Offset resets on filter change. This is the cleanest pattern for filters in Next.js App Router
+- **Client-side ring buffer for provider health** — `getProviderHealth()` returns a snapshot, not history. The client accumulates 60 samples (10 min) in a `Map<string, Snapshot[]>`. This required the providers page to break from the `<PollingRefresh>` pattern and own its own polling via Server Action
+- **Policy rules are read-only** — the backend's `PUT /v1/agents/{id}/policy` only accepts profile-level fields (spending limits, categories, rails, geo, escalation threshold). There are no rule CRUD endpoints. The recursive condition tree renderer is the hard frontend architecture; adding mutation controls is straightforward once endpoints exist
+- **No toast system** — every form already shows inline success/error messages. Adding a global toast provider (Sonner or shadcn Toast) requires a new dependency + root layout provider + wiring across all Server Actions — disproportionate to Beta value
+- **No SVG logo or favicon** — requires designed assets that don't exist. The text wordmark "cream" is clean and adequate
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `npx tsc --noEmit` | Zero errors |
+| `npx eslint .` | Zero errors, zero warnings |
+| `npx next build` | Clean — 13 routes, all `ƒ (Dynamic)` |
+| Loading/error coverage | 12/12 pages have both |
+| Stale "Phase 15" UI text | None remaining (only internal comments) |
+
+### Stats
+
+| Metric | Value |
+|--------|-------|
+| Files created | ~45 |
+| Files modified | ~15 |
+| New components | 15 (7 client, 8 server/shared) |
+| New Server Functions | 8 |
+| New routes | 3 (`/agents/new`, `/agents/[id]/edit`, `/agents/[id]/policy`) |
+| New dependencies | 1 (`recharts`) |
+| Lines of TypeScript | ~3,500 |
+
+---
+
+## 0.11.0 — 2026-04-11
+
+**Phase 15.1: Operator Auth Principal + Agent Lifecycle Endpoints — `AuthenticatedPrincipal`, 4 New Endpoints, Audit Cross-Agent Visibility, Security Fix**
+
+Backend-only prerequisite for the Phase 15 dashboard. Introduces the `AuthenticatedPrincipal` enum so the Cream API can distinguish between agent callers (scoped to their own data) and operator callers (cross-agent visibility). Adds 4 new agent lifecycle endpoints, extends audit querying with cross-agent visibility and free-text search, and closes a pre-existing security gap where `approve`/`reject` were entirely unauthenticated.
+
+### Added
+
+- **`AuthenticatedOperator` extractor** — matches bearer token against `OPERATOR_API_KEY` env var via constant-time comparison. Intentionally empty struct (Phase 16-A will add `OperatorId`, roles). `MIN_OPERATOR_KEY_LEN = 32` enforced at startup
+- **`AuthenticatedPrincipal` enum** — `Agent(AuthenticatedAgent) | Operator(AuthenticatedOperator)`. `authorize_target_agent()` helper encapsulates "agent scoped to self; operator can target anyone" in one place. Used by every handler with a `{id}` path segment
+- **`GET /v1/agents`** — operator-only. Returns up to 500 agents ordered `created_at DESC`, each with profile name joined. Returns 403 for agent callers
+- **`POST /v1/agents`** — operator-only. Creates agent with `{ name, profile_id }`, generates 32-byte hex API key via `OsRng`, stores SHA-256 hash, returns plaintext key exactly once in the response body
+- **`PATCH /v1/agents/{id}`** — operator-only. Updates name, status, profile_id (all optional, COALESCE semantics)
+- **`POST /v1/agents/{id}/rotate-key`** — operator-only. Generates new key, hashes + stores, invalidates old key, returns new plaintext once
+- **`AuditQuery::q()` builder** — case-insensitive `ILIKE '%q%'` on `justification->>'summary'` with `escape_ilike_pattern()` for SQL metacharacter safety. `MAX_AUDIT_QUERY_TEXT_LEN = 256` bounds input
+- **Audit cross-agent visibility** — when caller is `Operator`, `agent_id` query param is optional (defaults to all agents). When caller is `Agent`, `agent_id` is forced to the caller's own ID
+- **`backend/crates/api/tests/phase_15_1_operator_endpoints.rs`** — 9 integration tests covering agent lifecycle SQL, cross-agent audit, `q` search with metacharacter escaping
+
+### Modified
+
+- **`backend/crates/api/src/config.rs`** — `operator_api_key: Option<String>` loaded from `OPERATOR_API_KEY`. Startup warning when unset. Mutex-serialized env-var test harness
+- **`backend/crates/api/src/extractors/auth.rs`** — three new `FromRequestParts` impls sharing `bearer_token()` + `token_is_operator()` helpers. Defence-in-depth rejection of operator token on `AuthenticatedAgent` extractor
+- **`backend/crates/api/src/routes/agents.rs`** — `get_policy` and `update_policy` now accept `AuthenticatedPrincipal`. `AgentPolicyResponse` extended with `agent` field so the dashboard gets name + status without a second round-trip
+- **`backend/crates/api/src/routes/audit.rs`** — rewritten for `AuthenticatedPrincipal`-based scoping with optional `agent_id` and `q` params
+- **`backend/crates/api/src/routes/payments.rs`** — `approve` and `reject` now require `AuthenticatedOperator` (**security fix**: previously entirely unauthenticated — anyone who could reach the API could approve any escalated payment)
+- **`backend/crates/audit/src/reader.rs`** — `push_ilike_clause`, `escape_ilike_pattern` helpers, 4 new unit tests
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `cargo test -p cream-api` | 416 tests green (392 unit + 15 pre-existing integration + 9 new) |
+| `cargo clippy --all-targets` | Zero warnings |
+| `curl` with operator key → `GET /v1/agents` | Returns agent list |
+| `curl` with agent key → `GET /v1/agents` | Returns 403 |
 
 ---
 

@@ -34,6 +34,19 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Audit (Vision Section 8)
         .route("/v1/audit", get(routes::audit::query))
+        // Agent Management (Phase 15.1 — operator-only lifecycle endpoints)
+        .route(
+            "/v1/agents",
+            get(routes::agents::list_agents).post(routes::agents::create_agent),
+        )
+        .route(
+            "/v1/agents/{id}",
+            patch(routes::agents::update_agent),
+        )
+        .route(
+            "/v1/agents/{id}/rotate-key",
+            post(routes::agents::rotate_agent_key),
+        )
         // Agent Policy (Vision Section 4.3)
         .route(
             "/v1/agents/{id}/policy",

@@ -1,24 +1,32 @@
 import { PageHeader } from "@/components/shared/page-header";
-import { EmptyState } from "@/components/shared/empty-state";
-import { AlertTriangle } from "lucide-react";
-// Phase 15: import EscalationTable (client component with approve/reject handlers)
+import { PollingRefresh } from "@/components/shared/polling-refresh";
+import { EscalationTable } from "@/components/escalations/escalation-table";
+import { getApiClient } from "@/lib/api";
 
-export default function EscalationsPage() {
-  // Phase 15: const pending = await getApiClient().queryAudit({ status: "pending_approval" })
-  const pendingCount: number = 0;
+/**
+ * Escalation queue. Server component fetches the pending-approval entries
+ * and passes them to the `<EscalationTable>` client component which owns
+ * the approve/reject buttons, optimistic UI, and error display.
+ *
+ * Polled every 5 seconds — escalation management is the highest-urgency
+ * operator workflow in the dashboard.
+ */
+export default async function EscalationsPage() {
+  const api = getApiClient();
+  const pending = await api.queryAudit({
+    status: "pending_approval",
+    limit: 200,
+  });
 
   return (
     <div>
+      <PollingRefresh intervalMs={5_000} />
       <PageHeader
         title="Escalations"
-        description={`${pendingCount} payment${pendingCount !== 1 ? "s" : ""} awaiting human approval`}
+        description={`${pending.length} payment${pending.length !== 1 ? "s" : ""} awaiting human approval`}
       />
       <div className="p-6">
-        <EmptyState
-          icon={AlertTriangle}
-          title="No pending escalations"
-          description="Payments flagged for human review will appear here with approve and reject controls."
-        />
+        <EscalationTable entries={pending} />
       </div>
     </div>
   );

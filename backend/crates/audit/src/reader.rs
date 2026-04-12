@@ -16,6 +16,12 @@ use crate::error::AuditError;
 // Query filter
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed length of a free-text search query. Longer values are
+/// truncated rather than rejected — the caller asked to find something;
+/// we do our best. Prevents pathological ILIKE patterns and bounds the
+/// request body footprint for attack scenarios.
+pub const MAX_AUDIT_QUERY_TEXT_LEN: usize = 256;
+
 /// Filter parameters for querying the audit ledger.
 ///
 /// All fields are optional — an empty `AuditQuery` returns the most recent
@@ -35,6 +41,12 @@ pub struct AuditQuery {
     category: Option<PaymentCategory>,
     min_amount: Option<Decimal>,
     max_amount: Option<Decimal>,
+    /// Free-text case-insensitive search against `justification.summary`.
+    /// Stored as the raw user-provided pattern; the reader escapes ILIKE
+    /// metacharacters before binding. Phase 15.5 upgrade path: move to
+    /// a GIN tsvector index when the table grows large enough for ILIKE
+    /// to become a bottleneck.
+    q: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
 }
@@ -77,6 +89,27 @@ impl AuditQuery {
 
     pub fn max_amount(mut self, amount: Decimal) -> Self {
         self.max_amount = Some(amount);
+        self
+    }
+
+    /// Free-text search against `justification->>'summary'`. Case-insensitive
+    /// substring match. Input is trimmed and truncated to
+    /// `MAX_AUDIT_QUERY_TEXT_LEN`. Empty strings (after trimming) are ignored —
+    /// equivalent to not calling this method at all.
+    ///
+    /// ILIKE metacharacters (`%`, `_`, `\`) in the input are escaped by the
+    /// reader before the query runs, so user input is matched literally.
+    pub fn q<S: Into<String>>(mut self, q: S) -> Self {
+        let trimmed = q.into().trim().to_string();
+        if trimmed.is_empty() {
+            return self;
+        }
+        let truncated = if trimmed.len() > MAX_AUDIT_QUERY_TEXT_LEN {
+            trimmed.chars().take(MAX_AUDIT_QUERY_TEXT_LEN).collect()
+        } else {
+            trimmed
+        };
+        self.q = Some(truncated);
         self
     }
 
@@ -185,6 +218,16 @@ impl QueryBuilder {
         self.binds.push(value);
     }
 
+    /// Push an `ILIKE` clause. Used for case-insensitive substring search.
+    /// The bind value should already be wrapped in `%…%` by the caller so
+    /// the clause reads `column ILIKE $n`.
+    fn push_ilike_clause(&mut self, column: &str, value: BindValue) {
+        self.bind_idx += 1;
+        self.sql
+            .push_str(&format!(" AND {} ILIKE ${}", column.trim(), self.bind_idx));
+        self.binds.push(value);
+    }
+
     fn push_limit_offset(&mut self, limit: i64, offset: i64) {
         self.bind_idx += 1;
         let limit_idx = self.bind_idx;
@@ -200,6 +243,27 @@ impl QueryBuilder {
     fn finish(self) -> (String, Vec<BindValue>) {
         (self.sql, self.binds)
     }
+}
+
+/// Escape ILIKE metacharacters (`%`, `_`, `\`) in a user-provided search
+/// string so it is matched literally. The escape character is `\` (the
+/// Postgres default for LIKE/ILIKE); we do NOT emit `ESCAPE '\'` because
+/// that is already the default.
+///
+/// Example: `50%_off` → `50\%\_off`, which when wrapped as `%…%` matches
+/// the literal substring `50%_off` anywhere in the summary.
+fn escape_ilike_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Serialize a serde-able enum to its string representation.
@@ -320,6 +384,15 @@ impl AuditReader for PgAuditReader {
             qb.push_clause(
                 "(request->>'amount')::numeric <=",
                 BindValue::Decimal(*max_amount),
+            );
+        }
+        if let Some(ref q) = filters.q {
+            // Escape metacharacters so user input is matched literally,
+            // then wrap in `%…%` for substring semantics.
+            let pattern = format!("%{}%", escape_ilike_pattern(q));
+            qb.push_ilike_clause(
+                "justification->>'summary'",
+                BindValue::String(pattern),
             );
         }
 
@@ -516,6 +589,33 @@ mod tests {
         let q = AuditQuery::new().limit(200).offset(10);
         assert_eq!(q.effective_limit(), 200);
         assert_eq!(q.effective_offset(), 10);
+    }
+
+    #[test]
+    fn audit_query_q_trims_and_stores() {
+        let q = AuditQuery::new().q("  hello  ");
+        assert_eq!(q.q.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn audit_query_q_empty_ignored() {
+        let q = AuditQuery::new().q("   ");
+        assert!(q.q.is_none());
+    }
+
+    #[test]
+    fn audit_query_q_truncated_to_max_len() {
+        let long = "a".repeat(MAX_AUDIT_QUERY_TEXT_LEN + 100);
+        let q = AuditQuery::new().q(long);
+        assert_eq!(q.q.as_deref().map(str::len), Some(MAX_AUDIT_QUERY_TEXT_LEN));
+    }
+
+    #[test]
+    fn escape_ilike_pattern_escapes_metachars() {
+        assert_eq!(escape_ilike_pattern("50%_off"), "50\\%\\_off");
+        assert_eq!(escape_ilike_pattern("plain"), "plain");
+        assert_eq!(escape_ilike_pattern("\\n"), "\\\\n");
+        assert_eq!(escape_ilike_pattern(""), "");
     }
 
     #[test]

@@ -1,31 +1,76 @@
+import { Suspense } from "react";
 import { PageHeader } from "@/components/shared/page-header";
-import { DataTable, Column } from "@/components/shared/data-table";
-import { StatusBadge } from "@/components/shared/status-badge";
-import { AuditEntry } from "@/lib/types";
-import { formatDate } from "@/lib/utils";
+import { AuditFilterBar, AgentOption } from "@/components/audit/audit-filter-bar";
+import { AuditTable, PAGE_SIZE } from "@/components/audit/audit-table";
+import { getApiClient } from "@/lib/api";
+import { AuditQueryFilters, PaymentStatus } from "@/lib/types";
 
-const columns: Column<AuditEntry>[] = [
-  { key: "id",        header: "Entry",   cell: (r) => <span className="font-mono text-xs">{r.id.slice(0, 18)}…</span> },
-  { key: "status",    header: "Status",  cell: (r) => <StatusBadge status={r.final_status} /> },
-  { key: "decision",  header: "Decision",cell: (r) => r.policy_evaluation.final_decision },
-  { key: "agent",     header: "Agent",   cell: (r) => <span className="font-mono text-xs">{r.agent_id}</span> },
-  { key: "time",      header: "Time",    cell: (r) => formatDate(r.timestamp) },
-];
+interface Props {
+  searchParams: Promise<Record<string, string | undefined>>;
+}
 
-export default function AuditPage() {
-  // Phase 15: const entries = await getApiClient().queryAudit({ limit: 100 })
-  const entries: AuditEntry[] = [];
+/**
+ * Audit log page — the operator's primary investigation tool.
+ *
+ * All filter state lives in URL search params so audit views are
+ * shareable and bookmarkable. The filter bar (client component) reads
+ * and writes params; this server page reads them and fetches accordingly.
+ */
+export default async function AuditPage({ searchParams }: Props) {
+  const params = await searchParams;
+  const api = getApiClient();
+
+  // Build query filters from URL search params.
+  const filters: AuditQueryFilters = {
+    limit: PAGE_SIZE,
+  };
+  if (params.q)          filters.q = params.q;
+  if (params.status)     filters.status = params.status as PaymentStatus;
+  if (params.category)   filters.category = params.category;
+  if (params.agent_id)   filters.agent_id = params.agent_id;
+  if (params.from)       filters.from = params.from;
+  if (params.to)         filters.to = params.to;
+  if (params.min_amount) filters.min_amount = params.min_amount;
+  if (params.max_amount) filters.max_amount = params.max_amount;
+  if (params.offset)     filters.offset = parseInt(params.offset, 10);
+
+  // Fetch audit entries and agent list in parallel.
+  const [entries, agents] = await Promise.all([
+    api.queryAudit(filters),
+    api.listAgents(),
+  ]);
+
+  // Derive agent options for the filter dropdown.
+  const agentOptions: AgentOption[] = agents.map((a) => ({
+    id: a.id,
+    name: a.name,
+  }));
+
+  // If we got exactly PAGE_SIZE results, there may be more.
+  const hasMore = entries.length === PAGE_SIZE;
+
+  const activeFilterCount = [
+    params.q, params.status, params.category, params.agent_id,
+    params.from, params.to, params.min_amount, params.max_amount,
+  ].filter(Boolean).length;
 
   return (
     <div>
-      <PageHeader title="Audit Log" description="Immutable record of all payment lifecycle events" />
-      <div className="p-6">
-        <DataTable
-          columns={columns}
-          data={entries}
-          emptyTitle="Audit log is empty"
-          emptyDescription="Every payment event — request, policy decision, routing, settlement — is recorded here."
-        />
+      <PageHeader
+        title="Audit Log"
+        description={
+          activeFilterCount > 0
+            ? `${entries.length} entries matching ${activeFilterCount} filter${activeFilterCount !== 1 ? "s" : ""}`
+            : `${entries.length} most recent entries across all agents`
+        }
+      />
+      <div className="space-y-4 p-6">
+        <Suspense>
+          <AuditFilterBar agents={agentOptions} />
+        </Suspense>
+        <Suspense>
+          <AuditTable entries={entries} hasMore={hasMore} />
+        </Suspense>
       </div>
     </div>
   );

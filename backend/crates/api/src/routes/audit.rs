@@ -5,7 +5,7 @@ use cream_models::prelude::*;
 use serde::Deserialize;
 
 use crate::error::ApiError;
-use crate::extractors::auth::AuthenticatedAgent;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -16,19 +16,61 @@ pub struct AuditQueryParams {
     pub category: Option<String>,
     pub min_amount: Option<String>,
     pub max_amount: Option<String>,
+    /// Free-text case-insensitive search against `justification.summary`.
+    /// Trimmed, truncated to the reader's max length, ILIKE-escaped.
+    pub q: Option<String>,
+    /// Operator-only: scope results to a specific agent. Ignored (and a
+    /// validation error surfaced) when the caller is an agent — agents are
+    /// always hard-scoped to themselves.
+    pub agent_id: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
 
 /// `GET /v1/audit` — query the audit log with filters.
 ///
-/// The agent can only see their own audit entries (scoped by authenticated agent_id).
+/// Visibility rules:
+///
+/// - **Agent caller** — hard-scoped to their own `agent_id`. Passing an
+///   `agent_id` query param different from the caller's is a 400 (rather
+///   than silently ignoring it, which would leak whether filtering "worked").
+/// - **Operator caller** — sees every agent's entries by default. Passing
+///   `agent_id` scopes to that one agent; omitting it returns everything
+///   subject to `limit`/`offset`.
 pub async fn query(
     State(state): State<AppState>,
-    agent: AuthenticatedAgent,
+    principal: AuthenticatedPrincipal,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<Vec<AuditEntry>>, ApiError> {
-    let mut query = AuditQuery::new().agent_id(agent.agent.id);
+    let mut query = AuditQuery::new();
+
+    // Resolve agent_id scoping based on principal.
+    match &principal {
+        AuthenticatedPrincipal::Agent(agent) => {
+            // Agents are hard-scoped to themselves. If they passed an
+            // `agent_id` param, verify it matches — otherwise 400.
+            if let Some(ref requested) = params.agent_id {
+                let requested_id = requested.parse::<AgentId>().map_err(|e| {
+                    ApiError::ValidationError(format!("invalid agent_id: {e}"))
+                })?;
+                if requested_id != agent.agent.id {
+                    return Err(ApiError::ValidationError(
+                        "agents may only query their own audit entries".to_string(),
+                    ));
+                }
+            }
+            query = query.agent_id(agent.agent.id);
+        }
+        AuthenticatedPrincipal::Operator(_) => {
+            // Operators see all agents by default; optional narrow-scope.
+            if let Some(ref requested) = params.agent_id {
+                let requested_id = requested.parse::<AgentId>().map_err(|e| {
+                    ApiError::ValidationError(format!("invalid agent_id: {e}"))
+                })?;
+                query = query.agent_id(requested_id);
+            }
+        }
+    }
 
     if let Some(ref from) = params.from {
         let ts = from
@@ -68,6 +110,10 @@ pub async fn query(
             .parse()
             .map_err(|e| ApiError::ValidationError(format!("invalid max_amount: {e}")))?;
         query = query.max_amount(amt);
+    }
+
+    if let Some(q) = params.q {
+        query = query.q(q);
     }
 
     if let Some(limit) = params.limit {

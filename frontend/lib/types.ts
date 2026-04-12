@@ -307,6 +307,59 @@ export interface AuditQueryFilters {
   category?: string;
   min_amount?: string;
   max_amount?: string;
+  /** Free-text case-insensitive search against `justification.summary`. */
+  q?: string;
+  /** Operator-only: scope results to a specific agent. */
+  agent_id?: AgentId;
   limit?: number;
   offset?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15.1 — Agent lifecycle types (operator-only endpoints)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lightweight agent summary returned by `GET /v1/agents`. Excludes
+ * `api_key_hash` (never exposed) and the full profile (too heavy for list
+ * view). Mirrors `cream_api::routes::agents::AgentSummary`.
+ */
+export interface AgentSummary {
+  id: AgentId;
+  profile_id: AgentProfileId;
+  profile_name: string;
+  name: string;
+  status: AgentStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Request body for `POST /v1/agents`. */
+export interface CreateAgentRequest {
+  name: string;
+  profile_id: AgentProfileId;
+}
+
+/**
+ * Response for `POST /v1/agents`. The `api_key` plaintext is returned
+ * EXACTLY ONCE — the backend stores only its SHA-256 hash. The UI must
+ * surface a copy-to-clipboard flow and warn the operator that the key
+ * cannot be retrieved again.
+ */
+export interface CreateAgentResponse {
+  agent: AgentSummary;
+  api_key: string;
+}
+
+/** Request body for `PATCH /v1/agents/{id}`. All fields optional. */
+export interface UpdateAgentRequest {
+  name?: string;
+  status?: AgentStatus;
+  profile_id?: AgentProfileId;
+}
+
+/** Response for `POST /v1/agents/{id}/rotate-key`. Same one-shot contract. */
+export interface RotateKeyResponse {
+  agent_id: AgentId;
+  api_key: string;
 }

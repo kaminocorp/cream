@@ -25,7 +25,7 @@ export default function SettingsPage() {
               <label className="text-sm font-medium">Signing Secret</label>
               <Input type="password" placeholder="Minimum 16 characters" disabled />
             </div>
-            <Button disabled>Register (Phase 15)</Button>
+            <Button disabled>Register (Phase 16-A)</Button>
           </CardContent>
         </Card>
       </div>
