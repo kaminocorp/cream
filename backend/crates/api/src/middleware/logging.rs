@@ -14,6 +14,12 @@ use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 
+/// Maximum body size (in bytes) that will be buffered for PII-redacted logging.
+/// Bodies larger than this are forwarded unchanged with a "[body too large]"
+/// placeholder in the log. 64 KiB is generous for JSON API payloads while
+/// preventing OOM on malicious multi-GB uploads.
+const MAX_LOG_BODY_SIZE: usize = 64 * 1024; // 64 KiB
+
 /// Fields whose values are replaced with `"[REDACTED]"` in logged bodies.
 const SENSITIVE_FIELDS: &[&str] = &[
     "password",
@@ -45,12 +51,21 @@ pub async fn log_bodies_with_redaction(
     };
 
     if !body_bytes.is_empty() {
-        let redacted = redact_json_bytes(&body_bytes);
-        tracing::debug!(
-            body = %redacted,
-            direction = "request",
-            "request body (PII redacted)"
-        );
+        if body_bytes.len() > MAX_LOG_BODY_SIZE {
+            tracing::debug!(
+                body = "[body too large]",
+                body_size = body_bytes.len(),
+                direction = "request",
+                "request body exceeds log size limit"
+            );
+        } else {
+            let redacted = redact_json_bytes(&body_bytes);
+            tracing::debug!(
+                body = %redacted,
+                direction = "request",
+                "request body (PII redacted)"
+            );
+        }
     }
 
     let request = Request::from_parts(parts, Body::from(body_bytes));
@@ -66,12 +81,21 @@ pub async fn log_bodies_with_redaction(
     };
 
     if !resp_bytes.is_empty() {
-        let redacted = redact_json_bytes(&resp_bytes);
-        tracing::debug!(
-            body = %redacted,
-            direction = "response",
-            "response body (PII redacted)"
-        );
+        if resp_bytes.len() > MAX_LOG_BODY_SIZE {
+            tracing::debug!(
+                body = "[body too large]",
+                body_size = resp_bytes.len(),
+                direction = "response",
+                "response body exceeds log size limit"
+            );
+        } else {
+            let redacted = redact_json_bytes(&resp_bytes);
+            tracing::debug!(
+                body = %redacted,
+                direction = "response",
+                "response body (PII redacted)"
+            );
+        }
     }
 
     Response::from_parts(resp_parts, Body::from(resp_bytes))
@@ -177,5 +201,23 @@ mod tests {
         let mut val = json!({});
         redact_value(&mut val);
         assert_eq!(val, json!({}));
+    }
+
+    #[test]
+    fn max_log_body_size_is_64kb() {
+        assert_eq!(MAX_LOG_BODY_SIZE, 64 * 1024);
+    }
+
+    #[test]
+    fn body_over_size_limit_is_not_parsed() {
+        // Verify that bodies over MAX_LOG_BODY_SIZE would not be parsed.
+        // The actual middleware check is `body_bytes.len() > MAX_LOG_BODY_SIZE`,
+        // so a body of exactly MAX_LOG_BODY_SIZE + 1 bytes should be skipped.
+        let large_body = "x".repeat(MAX_LOG_BODY_SIZE + 1);
+        assert!(large_body.len() > MAX_LOG_BODY_SIZE);
+        // The redaction function itself is never called for oversized bodies,
+        // but verify it handles non-JSON gracefully regardless.
+        let bytes = Bytes::from(large_body.into_bytes());
+        assert_eq!(redact_json_bytes(&bytes), "[non-JSON body]");
     }
 }

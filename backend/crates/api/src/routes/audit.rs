@@ -57,15 +57,14 @@ impl FlatAuditRow {
         let amount = entry
             .request
             .get("amount")
-            .and_then(|v| v.as_str().or_else(|| v.as_f64().map(|_| "")))
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                entry
-                    .request
-                    .get("amount")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default()
-            });
+            .map(|v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string()
+                }
+            })
+            .unwrap_or_default();
 
         let currency = entry
             .request
@@ -482,5 +481,39 @@ mod tests {
     #[test]
     fn sync_export_row_cap_is_10000() {
         assert_eq!(SYNC_EXPORT_ROW_CAP, 10_000);
+    }
+
+    #[test]
+    fn csv_handles_numeric_amount_values() {
+        use chrono::Utc;
+        use cream_models::prelude::*;
+
+        let entry = AuditEntry {
+            id: AuditEntryId::new(),
+            timestamp: Utc::now(),
+            agent_id: AgentId::from_uuid(uuid::Uuid::nil()),
+            agent_profile_id: AgentProfileId::from_uuid(uuid::Uuid::nil()),
+            payment_id: None,
+            // amount is a JSON number, not a string
+            request: serde_json::json!({ "amount": 149.99, "currency": "SGD" }),
+            justification: serde_json::json!({ "summary": "test" }),
+            policy_evaluation: PolicyEvaluationRecord {
+                rules_evaluated: vec![],
+                matching_rules: vec![],
+                final_decision: PolicyAction::Approve,
+                decision_latency_ms: 1,
+            },
+            routing_decision: None,
+            provider_response: None,
+            final_status: PaymentStatus::Settled,
+            human_review: None,
+            on_chain_tx_hash: None,
+        };
+
+        let row = FlatAuditRow::from_entry(&entry);
+        assert_eq!(row.amount, "149.99", "numeric JSON amounts must not be empty");
+
+        let csv = entries_to_csv(&[entry]).expect("CSV should succeed");
+        assert!(csv.contains("149.99"), "CSV body must contain the numeric amount");
     }
 }

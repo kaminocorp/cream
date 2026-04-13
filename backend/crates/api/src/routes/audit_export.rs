@@ -73,6 +73,16 @@ pub async fn create_export(
         )));
     }
 
+    // Enforce concurrency cap on active export jobs.
+    let active = audit_export::count_active_exports(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("check active exports: {e}")))?;
+    if active >= audit_export::MAX_CONCURRENT_EXPORTS {
+        return Err(ApiError::ValidationError(format!(
+            "too many active export jobs ({active}); wait for existing exports to complete before starting a new one"
+        )));
+    }
+
     // Verify S3 is configured.
     if state.config.audit_export_s3_bucket.is_none() && body.destination.bucket.is_none() {
         return Err(ApiError::Internal(anyhow::anyhow!(

@@ -17,6 +17,13 @@ use crate::config::AppConfig;
 /// Chunk size for streaming audit rows during export.
 const EXPORT_CHUNK_SIZE: u32 = 1_000;
 
+/// Hard cap on total rows per export job. Prevents OOM on unbounded exports.
+/// Operators needing more should narrow their filters or run multiple exports.
+const MAX_EXPORT_ROWS: usize = 500_000;
+
+/// Maximum number of concurrent export jobs (pending + running).
+pub const MAX_CONCURRENT_EXPORTS: i64 = 3;
+
 /// Flatten an AuditEntry into a vector of string fields for CSV export.
 /// Column order: entry_id, timestamp, agent_id, payment_id, amount, currency,
 /// status, decision, provider, justification_summary.
@@ -130,6 +137,16 @@ impl ExportFormat {
 // ---------------------------------------------------------------------------
 // Job creation
 // ---------------------------------------------------------------------------
+
+/// Check how many export jobs are currently pending or running.
+pub async fn count_active_exports(db: &PgPool) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_exports WHERE status IN ('pending', 'running')",
+    )
+    .fetch_one(db)
+    .await?;
+    Ok(row.0)
+}
 
 /// Create a new export job record and return its ID.
 pub async fn create_export_job(
@@ -292,6 +309,49 @@ async fn run_export_inner(
         Utc::now().format("%Y%m%dT%H%M%SZ"),
     );
 
+    // Parse and validate all filters once before entering the chunk loop.
+    // Invalid filters fail the export immediately rather than being silently dropped.
+    let parsed_from = filters
+        .from
+        .as_deref()
+        .map(|s| {
+            s.parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|e| anyhow::anyhow!("invalid 'from' filter: {e}"))
+        })
+        .transpose()?;
+    let parsed_to = filters
+        .to
+        .as_deref()
+        .map(|s| {
+            s.parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|e| anyhow::anyhow!("invalid 'to' filter: {e}"))
+        })
+        .transpose()?;
+    let parsed_agent_id = filters
+        .agent_id
+        .as_deref()
+        .map(|s| {
+            s.parse::<AgentId>()
+                .map_err(|e| anyhow::anyhow!("invalid 'agent_id' filter: {e}"))
+        })
+        .transpose()?;
+    let parsed_status = filters
+        .status
+        .as_deref()
+        .map(|s| {
+            serde_json::from_value::<PaymentStatus>(serde_json::json!(s))
+                .map_err(|e| anyhow::anyhow!("invalid 'status' filter: {e}"))
+        })
+        .transpose()?;
+    let parsed_category = filters
+        .category
+        .as_deref()
+        .map(|s| {
+            serde_json::from_value::<PaymentCategory>(serde_json::json!(s))
+                .map_err(|e| anyhow::anyhow!("invalid 'category' filter: {e}"))
+        })
+        .transpose()?;
+
     // Stream chunks and accumulate output.
     let mut all_rows: Vec<AuditEntry> = Vec::new();
     let mut offset: u32 = 0;
@@ -301,36 +361,32 @@ async fn run_export_inner(
             .limit(EXPORT_CHUNK_SIZE)
             .offset(offset);
 
-        if let Some(ref from) = filters.from {
-            if let Ok(ts) = from.parse::<chrono::DateTime<chrono::Utc>>() {
-                q = q.from(ts);
-            }
+        if let Some(ts) = parsed_from {
+            q = q.from(ts);
         }
-        if let Some(ref to) = filters.to {
-            if let Ok(ts) = to.parse::<chrono::DateTime<chrono::Utc>>() {
-                q = q.to(ts);
-            }
+        if let Some(ts) = parsed_to {
+            q = q.to(ts);
         }
-        if let Some(ref agent_id) = filters.agent_id {
-            if let Ok(id) = agent_id.parse::<AgentId>() {
-                q = q.agent_id(id);
-            }
+        if let Some(id) = parsed_agent_id {
+            q = q.agent_id(id);
         }
-        if let Some(ref status) = filters.status {
-            if let Ok(s) = serde_json::from_value::<PaymentStatus>(serde_json::json!(status)) {
-                q = q.status(s);
-            }
+        if let Some(ref s) = parsed_status {
+            q = q.status(*s);
         }
-        if let Some(ref category) = filters.category {
-            if let Ok(c) = serde_json::from_value::<PaymentCategory>(serde_json::json!(category)) {
-                q = q.category(c);
-            }
+        if let Some(ref c) = parsed_category {
+            q = q.category(c.clone());
         }
 
         let chunk = audit_reader.query(q).await?;
         let chunk_len = chunk.len() as u32;
         all_rows.extend(chunk);
         offset += chunk_len;
+
+        if all_rows.len() > MAX_EXPORT_ROWS {
+            anyhow::bail!(
+                "export exceeded maximum row limit ({MAX_EXPORT_ROWS}); narrow your filters or run multiple exports"
+            );
+        }
 
         if chunk_len < EXPORT_CHUNK_SIZE {
             break;

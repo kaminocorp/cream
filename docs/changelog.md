@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.21.9](#0219--2026-04-13) — Post-Phase-17 hardening (round 2): 5 critical/high fixes — CSV numeric amount data loss, async export DoS + silent filter bypass, alert engine windowed evaluation, PII redaction body size cap — 538 tests
 - [0.21.8](#0218--2026-04-13) — Post-Phase-17 hardening: 7 fixes — 4 uninstrumented metrics wired, PII redaction middleware, write_audit tracing span, OpenAPI PATCH alert body — 533 tests
 - [0.21.7](#0217--2026-04-13) — Phase 17-H: documentation — 7 Markdown guides, API reference (39 endpoints), 3 doc coverage validation tests, 523 tests — **Phase 17 complete**
 - [0.21.6](#0216--2026-04-13) — Phase 17-G: alerting rules engine — configurable alert rules, background evaluator, 4 built-in presets, CRUD endpoints, Slack/email dispatch, 520 tests
@@ -84,6 +85,39 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.9 — 2026-04-13
+
+**Post-Phase-17 Hardening (Round 2)**
+
+5 targeted fixes from production-readiness review: 2 data correctness, 2 DoS prevention, 1 semantic correctness. 538 backend tests pass (up from 533). Zero clippy warnings.
+
+### Data Correctness Fixes
+
+- **CSV audit export: numeric amount extraction fixed** — `FlatAuditRow::from_entry` had a broken `.and_then()` chain: `v.as_f64().map(|_| "")` returned `Some("")` for numeric JSON amounts, causing them to export as empty strings. Replaced with the same `if let Some(s) = v.as_str() { s } else { v.to_string() }` pattern already correct in the async export path (`audit_export.rs:flatten_entry`). Numeric amounts like `149.99` now export correctly in CSV. (`backend/crates/api/src/routes/audit.rs`)
+
+- **Async export filter validation: fail-fast instead of silent drop** — `run_export_inner()` used `if let Ok(...)` for all 5 filter fields (`from`, `to`, `agent_id`, `status`, `category`), silently dropping invalid values and running unfiltered. An operator setting `from: "last-tuesday"` would get an unfiltered full-table export. Replaced with explicit `map_err` that fails the export job immediately with a descriptive error message. Filters are now parsed once before the chunk loop (hoisted out of the per-chunk iteration) for both correctness and efficiency. (`backend/crates/api/src/audit_export.rs`)
+
+### DoS Prevention Fixes
+
+- **Async export: row cap + concurrency limit** — `run_export_inner()` accumulated all matching rows into a `Vec<AuditEntry>` with no upper bound. A broad filter on a large audit table could cause OOM. Added `MAX_EXPORT_ROWS = 500,000` hard cap — the export job fails with a descriptive error if exceeded. Additionally, `POST /v1/audit/export` now checks `SELECT COUNT(*) FROM audit_exports WHERE status IN ('pending', 'running')` and rejects new jobs when `MAX_CONCURRENT_EXPORTS = 3` active jobs exist, preventing concurrent OOM via parallel exports. (`backend/crates/api/src/audit_export.rs`, `backend/crates/api/src/routes/audit_export.rs`)
+
+- **PII redaction: body size cap** — `log_bodies_with_redaction` middleware called `body.collect().await` with no size limit. With `LOG_BODIES=true`, a malicious multi-GB request body would be fully buffered in memory before redaction. Added `MAX_LOG_BODY_SIZE = 64 KiB` — bodies exceeding this are forwarded unchanged with a `"[body too large]"` placeholder in the log. Applied to both request and response body paths. Zero overhead when `LOG_BODIES` is not enabled (the default). (`backend/crates/api/src/middleware/logging.rs`)
+
+### Semantic Correctness Fixes
+
+- **Alert engine: delta-based windowed evaluation** — `evaluate_alerts()` previously read cumulative counter totals from the Prometheus text output, making `window_seconds` effectively dead code. A rule "errors > 10 in 5 minutes" actually fired on "errors > 10 since process start." Replaced with delta-based windowing: the worker now maintains an in-memory `HashMap<String, MetricSnapshot>` keyed by `rule_id:metric_name`, stores the previous counter value and timestamp, and evaluates `current - previous` over the configured window. First observation stores a baseline and skips evaluation (needs two data points). When elapsed time < window, the delta is rate-extrapolated to the full window to avoid false negatives on early ticks. Snapshot resets when the window fully elapses. Also: threshold parse failures now `continue` (skip the rule) instead of silently defaulting to `0.0`, which would have caused the alert to fire on any positive metric value. Cooldown elapsed calculation now uses `.max(0)` to handle clock drift. (`backend/crates/api/src/alert_engine.rs`)
+
+### Tests
+
+5 new tests (total: 538):
+- `csv_handles_numeric_amount_values` — numeric JSON amounts round-trip correctly through CSV export
+- `max_log_body_size_is_64kb` — size cap constant is 64 KiB
+- `body_over_size_limit_is_not_parsed` — oversized bodies produce placeholder, not redacted output
+- `metric_snapshot_delta_computation` — delta-based windowing computes correct delta after window elapses
+- `threshold_parse_failure_skips_rule` — empty/invalid threshold strings are rejected
 
 ---
 
