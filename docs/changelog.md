@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.21.10](#02110--2026-04-13) — Post-Phase-17 hardening (round 3): 5 medium fixes — PII substring matching + access_token, resume_after_approval metrics, circuit breaker gauge reset, payment duration scope, alert update validation — 539 tests
 - [0.21.9](#0219--2026-04-13) — Post-Phase-17 hardening (round 2): 5 critical/high fixes — CSV numeric amount data loss, async export DoS + silent filter bypass, alert engine windowed evaluation, PII redaction body size cap — 538 tests
 - [0.21.8](#0218--2026-04-13) — Post-Phase-17 hardening: 7 fixes — 4 uninstrumented metrics wired, PII redaction middleware, write_audit tracing span, OpenAPI PATCH alert body — 533 tests
 - [0.21.7](#0217--2026-04-13) — Phase 17-H: documentation — 7 Markdown guides, API reference (39 endpoints), 3 doc coverage validation tests, 523 tests — **Phase 17 complete**
@@ -85,6 +86,35 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.10 — 2026-04-13
+
+**Post-Phase-17 Hardening (Round 3)**
+
+5 medium-severity fixes from production-readiness review: 1 security, 2 metrics correctness, 1 metrics scope, 1 validation gap. 539 backend tests pass (up from 538). Zero clippy warnings.
+
+### Security Fixes
+
+- **PII redaction: substring matching + expanded sensitive fields** — Redaction logic switched from exact-match (`key_lower == s`) to substring-match (`key_lower.contains(s)`). Previously, compound field names like `provider_api_key`, `new_password`, or `stripe_secret_key` bypassed redaction entirely. Also added `access_token`, `credential`, `authorization`, `card_number`, `cvv`, and `pan` to the sensitive list. JWT access tokens in login/refresh response bodies are now redacted. Constant renamed from `SENSITIVE_FIELDS` to `SENSITIVE_SUBSTRINGS` to reflect the new semantics. (`backend/crates/api/src/middleware/logging.rs`)
+
+### Metrics Fixes
+
+- **`resume_after_approval()` now records payment metrics** — Payments that complete via the human-approval escalation path (`resume_after_approval`) previously recorded zero Prometheus metrics — no `cream_payments_total`, no `cream_provider_request_duration_seconds`. These payments were invisible to dashboards and alerting. Added the same `PAYMENTS_TOTAL` counter and `PROVIDER_REQUEST_DURATION_SECONDS` histogram recording block from `process()`. (`backend/crates/api/src/orchestrator.rs`)
+
+- **Circuit breaker gauge resets stale state labels** — `emit_circuit_breaker_gauge` previously set `gauge("state" => current_state) = 1.0` without zeroing previous states. After a state transition (e.g., closed → open), Prometheus would show both `state="closed"` and `state="open"` at 1.0 simultaneously, making the metric useless for alerting. Now explicitly sets all three state labels to 0.0 before setting the current state to 1.0. (`backend/crates/api/src/orchestrator.rs`)
+
+- **`cream_payment_duration_seconds` now measures full orchestration** — Previously recorded the same value as `cream_provider_request_duration_seconds` (provider-only time). Now captures `Instant::now()` at the top of `process()` and records `orchestration_start.elapsed()` — covering policy evaluation, routing, provider execution, and audit write. `cream_provider_request_duration_seconds` continues to measure provider-only time. The two metrics are now meaningfully distinct: operators can see overhead (orchestration - provider) as a derived metric. (`backend/crates/api/src/orchestrator.rs`)
+
+### Validation Fixes
+
+- **Alert update handler: matching validation with create handler** — `PATCH /v1/alerts/{id}` accepted `window_seconds: -1`, `cooldown_seconds: 0`, `name: ""`, and `metric: ""` without error — all of which `POST /v1/alerts` correctly rejected. Added the same positivity and non-empty checks for all optional fields when present. (`backend/crates/api/src/routes/alerts.rs`)
+
+### Tests
+
+1 new test (total: 539):
+- `redacts_compound_field_names` — verifies `provider_api_key`, `new_password`, `stripe_secret_key`, `card_number` are all redacted via substring matching while `agent_name` is preserved
 
 ---
 

@@ -4,8 +4,11 @@
 //! with sensitive fields replaced by `"[REDACTED]"`. When `LOG_BODIES` is not
 //! set (the default), this layer is a no-op pass-through.
 //!
-//! Sensitive field names (case-insensitive): `password`, `api_key`, `secret`,
-//! `refresh_token`, `api_key_hash`, `token`.
+//! Sensitive field names (case-insensitive, **substring** match): `password`,
+//! `api_key`, `secret`, `refresh_token`, `api_key_hash`, `token`,
+//! `access_token`, `authorization`, `credential`, `card_number`, `cvv`, `pan`.
+//! Substring matching ensures compound names like `provider_api_key` or
+//! `new_password` are also caught.
 
 use axum::body::Body;
 use axum::http::Request;
@@ -20,14 +23,19 @@ use http_body_util::BodyExt;
 /// preventing OOM on malicious multi-GB uploads.
 const MAX_LOG_BODY_SIZE: usize = 64 * 1024; // 64 KiB
 
-/// Fields whose values are replaced with `"[REDACTED]"` in logged bodies.
-const SENSITIVE_FIELDS: &[&str] = &[
+/// Substrings whose presence in a field name (case-insensitive) triggers
+/// redaction. Using `contains` instead of exact-match so compound names
+/// like `provider_api_key`, `new_password`, `stripe_secret_key` are caught.
+const SENSITIVE_SUBSTRINGS: &[&str] = &[
     "password",
     "api_key",
     "secret",
-    "refresh_token",
-    "api_key_hash",
-    "token",
+    "token",        // catches refresh_token, access_token, token
+    "credential",
+    "authorization",
+    "card_number",
+    "cvv",
+    "pan",
 ];
 
 /// Axum middleware that logs request and response bodies with PII redacted.
@@ -119,7 +127,7 @@ fn redact_value(value: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
                 let key_lower = key.to_ascii_lowercase();
-                if SENSITIVE_FIELDS.iter().any(|&s| key_lower == s) {
+                if SENSITIVE_SUBSTRINGS.iter().any(|&s| key_lower.contains(s)) {
                     *val = serde_json::Value::String("[REDACTED]".to_string());
                 } else {
                     redact_value(val);
@@ -166,11 +174,11 @@ mod tests {
 
     #[test]
     fn redacts_refresh_token() {
-        let mut val = json!({"refresh_token": "rt_xyz", "access_token": "visible"});
+        let mut val = json!({"refresh_token": "rt_xyz", "access_token": "at_visible"});
         redact_value(&mut val);
         assert_eq!(val["refresh_token"], "[REDACTED]");
-        // access_token is not in SENSITIVE_FIELDS — kept as-is.
-        assert_eq!(val["access_token"], "visible");
+        // access_token now caught by substring match on "token".
+        assert_eq!(val["access_token"], "[REDACTED]");
     }
 
     #[test]
@@ -201,6 +209,24 @@ mod tests {
         let mut val = json!({});
         redact_value(&mut val);
         assert_eq!(val, json!({}));
+    }
+
+    #[test]
+    fn redacts_compound_field_names() {
+        let mut val = json!({
+            "provider_api_key": "sk_live_123",
+            "new_password": "hunter3",
+            "stripe_secret_key": "rk_live_456",
+            "card_number": "4111111111111111",
+            "agent_name": "my-agent"
+        });
+        redact_value(&mut val);
+        assert_eq!(val["provider_api_key"], "[REDACTED]");
+        assert_eq!(val["new_password"], "[REDACTED]");
+        assert_eq!(val["stripe_secret_key"], "[REDACTED]");
+        assert_eq!(val["card_number"], "[REDACTED]");
+        // agent_name does NOT contain any sensitive substring.
+        assert_eq!(val["agent_name"], "my-agent");
     }
 
     #[test]

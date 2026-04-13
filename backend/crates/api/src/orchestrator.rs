@@ -52,14 +52,28 @@ fn apply_settlement_transitions(
 }
 
 /// Read the current circuit breaker state for a provider and emit it as a
-/// Prometheus gauge. The gauge uses numeric encoding: 0 = closed, 1 = open,
-/// 2 = half_open. Called after every `record_success` / `record_failure` so
-/// the metric tracks state transitions in near-real-time.
+/// Prometheus gauge. Zeros all three state labels first, then sets the current
+/// state to 1.0. Without the explicit zeroing, Prometheus would show multiple
+/// states as 1.0 simultaneously after a state transition — making the metric
+/// useless for alerting.
 async fn emit_circuit_breaker_gauge(
     circuit_breaker: &CircuitBreaker,
     provider_id: &cream_models::prelude::ProviderId,
 ) {
     if let Ok(state) = circuit_breaker.state(provider_id).await {
+        let provider_str = provider_id.as_str().to_string();
+
+        // Zero all state labels first to clear the previous state.
+        for label in ["closed", "open", "half_open"] {
+            ::metrics::gauge!(
+                metrics::CIRCUIT_BREAKER_STATE,
+                "provider" => provider_str.clone(),
+                "state" => label,
+            )
+            .set(0.0);
+        }
+
+        // Set current state to 1.0.
         let state_label = match state {
             cream_models::prelude::CircuitState::Closed => "closed",
             cream_models::prelude::CircuitState::Open => "open",
@@ -67,7 +81,7 @@ async fn emit_circuit_breaker_gauge(
         };
         ::metrics::gauge!(
             metrics::CIRCUIT_BREAKER_STATE,
-            "provider" => provider_id.as_str().to_string(),
+            "provider" => provider_str,
             "state" => state_label,
         )
         .set(1.0);
@@ -103,6 +117,8 @@ impl PaymentOrchestrator {
         agent: &AuthenticatedAgent,
         mut request: PaymentRequest,
     ) -> Result<PaymentResponse, ApiError> {
+        let orchestration_start = Instant::now();
+
         // Inject agent_id from the authenticated session.
         request.agent_id = agent.agent.id;
 
@@ -325,11 +341,13 @@ impl PaymentOrchestrator {
             "rail" => rail_label,
         )
         .increment(1);
+        // End-to-end orchestration time (policy eval → routing → provider → audit).
         ::metrics::histogram!(
             metrics::PAYMENT_DURATION_SECONDS,
             "provider" => provider_label.clone(),
         )
-        .record(provider_latency_ms as f64 / 1000.0);
+        .record(orchestration_start.elapsed().as_secs_f64());
+        // Provider-only time (just the external API call).
         ::metrics::histogram!(
             metrics::PROVIDER_REQUEST_DURATION_SECONDS,
             "provider" => provider_label,
@@ -474,6 +492,31 @@ impl PaymentOrchestrator {
 
         // Fire webhook for terminal status (settled or failed).
         self.fire_webhook(&payment).await;
+
+        // Record payment outcome metrics (same as process() — escalated
+        // payments must be visible to dashboards and alerting).
+        let status_label = match payment.status() {
+            PaymentStatus::Settled => "settled",
+            PaymentStatus::Failed => "failed",
+            _ => "other",
+        };
+        let provider_label = payment
+            .provider_id()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let rail_label = format!("{:?}", request.preferred_rail);
+        ::metrics::counter!(
+            metrics::PAYMENTS_TOTAL,
+            "status" => status_label,
+            "provider" => provider_label.clone(),
+            "rail" => rail_label,
+        )
+        .increment(1);
+        ::metrics::histogram!(
+            metrics::PROVIDER_REQUEST_DURATION_SECONDS,
+            "provider" => provider_label,
+        )
+        .record(provider_latency_ms as f64 / 1000.0);
 
         Ok(PaymentResponse::from(&payment))
     }

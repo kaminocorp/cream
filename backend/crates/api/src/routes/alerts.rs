@@ -169,12 +169,37 @@ pub async fn update_alert(
         .parse::<uuid::Uuid>()
         .map_err(|e| ApiError::ValidationError(format!("invalid alert ID: {e}")))?;
 
+    // Validate all provided fields — same rules as create_alert.
+    if let Some(ref name) = body.name {
+        if name.trim().is_empty() {
+            return Err(ApiError::ValidationError("name must not be empty".into()));
+        }
+    }
+    if let Some(ref metric) = body.metric {
+        if metric.trim().is_empty() {
+            return Err(ApiError::ValidationError("metric must not be empty".into()));
+        }
+    }
     if let Some(ref cond) = body.condition {
         if !VALID_CONDITIONS.contains(&cond.as_str()) {
             return Err(ApiError::ValidationError(format!(
                 "condition must be one of: {}",
                 VALID_CONDITIONS.join(", ")
             )));
+        }
+    }
+    if let Some(ws) = body.window_seconds {
+        if ws <= 0 {
+            return Err(ApiError::ValidationError(
+                "window_seconds must be positive".into(),
+            ));
+        }
+    }
+    if let Some(cs) = body.cooldown_seconds {
+        if cs <= 0 {
+            return Err(ApiError::ValidationError(
+                "cooldown_seconds must be positive".into(),
+            ));
         }
     }
 
