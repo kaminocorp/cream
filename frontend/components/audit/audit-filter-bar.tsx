@@ -151,7 +151,7 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             value={current.status || ALL}
             onValueChange={(v) => pushParams({ status: v === ALL ? "" : (v ?? "") })}
           >
-            <SelectTrigger className="w-[150px]">
+            <SelectTrigger className="w-full sm:w-[150px]">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -172,7 +172,7 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             value={current.category || ALL}
             onValueChange={(v) => pushParams({ category: v === ALL ? "" : (v ?? "") })}
           >
-            <SelectTrigger className="w-[170px]">
+            <SelectTrigger className="w-full sm:w-[170px]">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -194,7 +194,7 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
               value={current.agent_id || ALL}
               onValueChange={(v) => pushParams({ agent_id: v === ALL ? "" : (v ?? "") })}
             >
-              <SelectTrigger className="w-[170px]">
+              <SelectTrigger className="w-full sm:w-[170px]">
                 <SelectValue placeholder="All agents" />
               </SelectTrigger>
               <SelectContent>

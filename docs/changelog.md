@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.12.2](#0122--2026-04-13) — Pre-Phase-16 review: 5 frontend fixes — poll error visibility, keyboard accessibility, screen reader labels, defensive formatting, responsive filters
 - [0.12.1](#0121--2026-04-13) — Phase 15 production review: 24 fixes (3 critical, 4 high, 10 medium, 10 low) — security, data contract, accessibility, code quality
 - [0.12.0](#0120--2026-04-12) — Phase 15.2–15.8: dashboard full implementation — 13 pages wired, escalation queue, agent management, audit log UX, provider health charts, policy editor, responsive sidebar, 12/12 loading/error coverage
 - [0.11.0](#0110--2026-04-11) — Phase 15.1: operator auth + agent lifecycle — `AuthenticatedPrincipal` enum, 4 new endpoints, audit cross-agent visibility + `q` search, approve/reject auth fix, 416 tests
@@ -57,6 +58,28 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.12.2 — 2026-04-13
+
+**Pre-Phase-16 Review — 5 Frontend Fixes**
+
+Final sweep before Phase 16. Comprehensive code review scored backend at 9.0/10 and frontend at 8.0/10 pre-fix. These 5 targeted changes close the remaining gaps to bring frontend above 8.5. Backend unchanged — no issues found. 416 backend tests pass, frontend production build clean, zero TypeScript errors.
+
+### Medium — Fixed
+
+- **Provider health polling silently swallowed all errors** — `catch {}` in the poll callback meant operators had zero indication when the backend was unreachable; charts simply stopped updating. Added `consecutiveFailures` ref counter and `pollError` state. A yellow warning banner surfaces after 3 consecutive failures ("Unable to reach backend — health data may be stale") and auto-clears on the next successful poll. Single transient timeouts are still ignored to avoid flashing (`frontend/components/providers/provider-health-dashboard.tsx`)
+
+- **Policy rule list not keyboard-accessible** — `CardHeader` with `onClick` lacked `role="button"`, `tabIndex={0}`, `aria-expanded`, and `onKeyDown` handler. Keyboard-only users could not expand/collapse rules. Added all four attributes with Enter/Space key handling, matching the pattern already established in `audit-table.tsx` (`frontend/components/policy/rule-list.tsx`)
+
+- **Provider health dot was color-only** — Green/red status dot had `title` (tooltip on hover) but no `aria-label`, making it invisible to screen readers. Added `role="img"` and `aria-label` ("Healthy"/"Unhealthy") alongside the existing `title` (`frontend/components/providers/provider-health-dashboard.tsx`)
+
+### Low — Fixed
+
+- **`formatAmount` crashed on empty/undefined inputs** — If backend returned empty `amount` or `currency` strings (edge case on malformed audit entries), the formatter would render garbage like `"$ "` or `"undefined SGD"`. Added early guard: `if (!amount || !currency) return "—"` (`frontend/lib/utils.ts`)
+
+- **Audit filter bar select widths overflowed on mobile** — Status, Category, and Agent select triggers used fixed widths (`w-[150px]`, `w-[170px]`) that overflowed narrow viewports. Changed to `w-full sm:w-[150px]` / `w-full sm:w-[170px]` pattern so selects fill available width on mobile and snap to fixed width on `sm+` breakpoints (`frontend/components/audit/audit-filter-bar.tsx`)
 
 ---
 

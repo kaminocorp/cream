@@ -76,7 +76,16 @@ export function RuleList({ rules }: RuleListProps) {
           >
             <CardHeader
               className="cursor-pointer pb-2"
+              role="button"
+              tabIndex={0}
+              aria-expanded={isExpanded}
               onClick={() => toggle(rule.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  toggle(rule.id);
+                }
+              }}
             >
               <CardTitle className="flex items-center gap-2 text-sm">
                 {isExpanded ? (

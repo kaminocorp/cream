@@ -10,6 +10,7 @@ export function cn(...inputs: ClassValue[]) {
 // Format a Decimal-as-string with currency symbol.
 // Always display as string — never parse to float.
 export function formatAmount(amount: string, currency: string): string {
+  if (!amount || !currency) return "—";
   const fiatSymbols: Record<string, string> = {
     USD: "$", EUR: "€", GBP: "£", SGD: "S$", JPY: "¥", AUD: "A$", CAD: "C$",
   };

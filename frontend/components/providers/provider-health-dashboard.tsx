@@ -106,6 +106,8 @@ export function ProviderHealthDashboard({ initial }: Props) {
   );
   const [latest, setLatest] = useState<ProviderHealth[]>(initial);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const consecutiveFailures = useRef(0);
 
   // Capture mount time in effect to satisfy React purity rules.
   useEffect(() => {
@@ -121,8 +123,16 @@ export function ProviderHealthDashboard({ initial }: Props) {
       setHistory((prev) => pushSnapshot(prev, data, elapsed));
       setLatest(data);
       setLastUpdated(new Date());
+      consecutiveFailures.current = 0;
+      setPollError(null);
     } catch {
-      // Silently skip failed polls — the chart just doesn't get a new data point.
+      consecutiveFailures.current += 1;
+      // Surface error after 3 consecutive failures to avoid flashing on
+      // a single transient timeout while still informing the operator of
+      // sustained connectivity issues.
+      if (consecutiveFailures.current >= 3) {
+        setPollError("Unable to reach backend — health data may be stale");
+      }
     }
   }, []);
 
@@ -169,6 +179,11 @@ export function ProviderHealthDashboard({ initial }: Props) {
 
   return (
     <div className="space-y-4">
+      {pollError && (
+        <p className="rounded-md border border-yellow-200 bg-yellow-50 px-4 py-2 text-sm text-yellow-800">
+          {pollError}
+        </p>
+      )}
       <p className="text-xs text-zinc-400">
         Last updated: {lastUpdated ? lastUpdated.toLocaleTimeString() : "now"} · Polling every{" "}
         {POLL_INTERVAL_MS / 1000}s · Ring buffer:{" "}
@@ -193,6 +208,8 @@ export function ProviderHealthDashboard({ initial }: Props) {
                     className={`inline-block h-2 w-2 rounded-full ${
                       p.is_healthy ? "bg-green-500" : "bg-red-500"
                     }`}
+                    role="img"
+                    aria-label={p.is_healthy ? "Healthy" : "Unhealthy"}
                     title={p.is_healthy ? "Healthy" : "Unhealthy"}
                   />
                   {circuitBadge(p.circuit_state)}
