@@ -1,11 +1,11 @@
 import { getApiClient } from "@/lib/api";
-import { getSession } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shared/page-header";
 import { SettingsClient } from "./settings-client";
 import { WebhookResponse, ProviderKeyInfo } from "@/lib/types";
 
 export default async function SettingsPage() {
-  const session = await getSession();
+  const session = await requireAuth();
 
   let webhooks: WebhookResponse[] = [];
   let providerKeys: ProviderKeyInfo[] = [];

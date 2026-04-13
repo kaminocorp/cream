@@ -305,14 +305,17 @@ pub fn verify_slack_signature(
         return false;
     }
 
-    let sig_basestring = format!("v0:{}:{}", timestamp, String::from_utf8_lossy(body));
-
+    // Build the HMAC basestring from raw bytes to avoid lossy UTF-8 conversion.
+    // Slack's spec: sig_basestring = "v0:" + timestamp + ":" + body (raw bytes).
     let mut mac =
         match Hmac::<Sha256>::new_from_slice(signing_secret.as_bytes()) {
             Ok(m) => m,
             Err(_) => return false,
         };
-    mac.update(sig_basestring.as_bytes());
+    mac.update(b"v0:");
+    mac.update(timestamp.as_bytes());
+    mac.update(b":");
+    mac.update(body);
     let expected = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
 
     // Constant-time comparison.
@@ -384,20 +387,25 @@ mod tests {
         assert!(amount_field.contains("USD"));
     }
 
+    /// Helper: compute a Slack signature using raw bytes (matching the fixed
+    /// `verify_slack_signature` implementation).
+    fn compute_slack_sig(secret: &str, timestamp: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(b"v0:");
+        mac.update(timestamp.as_bytes());
+        mac.update(b":");
+        mac.update(body);
+        format!("v0={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
     #[test]
     fn verify_signature_valid() {
         let secret = "8f742231b10e8888abcd99yyyzzz85a5";
         let timestamp = &chrono::Utc::now().timestamp().to_string();
         let body = b"payload={\"token\":\"test\"}";
-
-        // Compute the expected signature.
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let sig_basestring = format!("v0:{}:{}", timestamp, String::from_utf8_lossy(body));
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(sig_basestring.as_bytes());
-        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
-
+        let signature = compute_slack_sig(secret, timestamp, body);
         assert!(verify_slack_signature(secret, timestamp, body, &signature));
     }
 
@@ -406,32 +414,16 @@ mod tests {
         let secret = "8f742231b10e8888abcd99yyyzzz85a5";
         let timestamp = &chrono::Utc::now().timestamp().to_string();
         let body = b"payload={\"token\":\"test\"}";
-
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let sig_basestring = format!("v0:{}:{}", timestamp, String::from_utf8_lossy(body));
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(sig_basestring.as_bytes());
-        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
-
-        // Different secret → should fail.
+        let signature = compute_slack_sig(secret, timestamp, body);
         assert!(!verify_slack_signature("wrong_secret_0000000000000000000", timestamp, body, &signature));
     }
 
     #[test]
     fn verify_signature_old_timestamp_rejected() {
         let secret = "8f742231b10e8888abcd99yyyzzz85a5";
-        // 10 minutes ago — beyond the 5-minute replay window.
         let old_timestamp = (chrono::Utc::now().timestamp() - 600).to_string();
         let body = b"payload={\"token\":\"test\"}";
-
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let sig_basestring = format!("v0:{}:{}", old_timestamp, String::from_utf8_lossy(body));
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(sig_basestring.as_bytes());
-        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
-
+        let signature = compute_slack_sig(secret, &old_timestamp, body);
         assert!(!verify_slack_signature(secret, &old_timestamp, body, &signature));
     }
 

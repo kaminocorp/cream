@@ -2,6 +2,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { PollingRefresh } from "@/components/shared/polling-refresh";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 import { Users, AlertTriangle, Activity, FileText } from "lucide-react";
 
 /**
@@ -33,6 +34,7 @@ function isoTimestampHoursAgo(hours: number): string {
 }
 
 export default async function DashboardPage() {
+  await requireAuth();
   const api = await getApiClient();
   const oneDayAgo = isoTimestampHoursAgo(24);
 

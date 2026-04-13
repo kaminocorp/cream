@@ -70,8 +70,13 @@ pub fn sign_payload(secret: &[u8], timestamp: i64, body: &[u8]) -> String {
     format!("t={timestamp},v1={hex}")
 }
 
+/// Maximum age (in seconds) of a webhook signature before it is rejected.
+/// Prevents replay attacks with old signatures.
+const SIGNATURE_MAX_AGE_SECS: i64 = 300; // 5 minutes
+
 /// Verify a Cream-Signature header against the expected secret and body.
-/// Returns `true` if the signature is valid.
+/// Returns `true` if the signature is valid and the timestamp is within
+/// the allowed window (±5 minutes).
 pub fn verify_signature(secret: &[u8], signature: &str, body: &[u8]) -> bool {
     // Parse "t=<ts>,v1=<hex>"
     let parts: Vec<&str> = signature.split(',').collect();
@@ -86,6 +91,13 @@ pub fn verify_signature(secret: &[u8], signature: &str, body: &[u8]) -> bool {
         Ok(t) => t,
         Err(_) => return false,
     };
+
+    // Reject signatures with timestamps outside the allowed window.
+    let now = Utc::now().timestamp();
+    if (now - ts_i64).unsigned_abs() > SIGNATURE_MAX_AGE_SECS as u64 {
+        return false;
+    }
+
     let expected = sign_payload(secret, ts_i64, body);
     // Constant-time comparison to prevent timing attacks.
     expected.len() == signature.len()
@@ -558,19 +570,22 @@ mod tests {
 
     #[test]
     fn verify_signature_valid() {
-        let sig = sign_payload(b"secret", 12345, b"hello world");
+        let now = Utc::now().timestamp();
+        let sig = sign_payload(b"secret", now, b"hello world");
         assert!(verify_signature(b"secret", &sig, b"hello world"));
     }
 
     #[test]
     fn verify_signature_wrong_secret() {
-        let sig = sign_payload(b"secret", 12345, b"hello world");
+        let now = Utc::now().timestamp();
+        let sig = sign_payload(b"secret", now, b"hello world");
         assert!(!verify_signature(b"wrong", &sig, b"hello world"));
     }
 
     #[test]
     fn verify_signature_wrong_body() {
-        let sig = sign_payload(b"secret", 12345, b"hello world");
+        let now = Utc::now().timestamp();
+        let sig = sign_payload(b"secret", now, b"hello world");
         assert!(!verify_signature(b"secret", &sig, b"tampered"));
     }
 
@@ -579,6 +594,22 @@ mod tests {
         assert!(!verify_signature(b"secret", "garbage", b"body"));
         assert!(!verify_signature(b"secret", "", b"body"));
         assert!(!verify_signature(b"secret", "t=abc,v1=def", b"body"));
+    }
+
+    #[test]
+    fn verify_signature_rejects_old_timestamp() {
+        // 10 minutes ago — beyond the 5-minute window.
+        let old_ts = Utc::now().timestamp() - 600;
+        let sig = sign_payload(b"secret", old_ts, b"hello world");
+        assert!(!verify_signature(b"secret", &sig, b"hello world"));
+    }
+
+    #[test]
+    fn verify_signature_rejects_future_timestamp() {
+        // 10 minutes in the future.
+        let future_ts = Utc::now().timestamp() + 600;
+        let sig = sign_payload(b"secret", future_ts, b"hello world");
+        assert!(!verify_signature(b"secret", &sig, b"hello world"));
     }
 
     // --- Event matching tests ---

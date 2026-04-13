@@ -3,7 +3,6 @@ use axum::http::StatusCode;
 use axum::Json;
 use cream_models::prelude::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -43,9 +42,12 @@ pub struct WebhookDeliveryResponse {
 }
 
 /// `POST /v1/webhooks` — register a webhook endpoint for payment events.
+///
+/// The endpoint is scoped to the authenticated agent — only events for this
+/// agent will be delivered. Operators can see all endpoints via `GET /v1/webhooks`.
 pub async fn register(
     State(state): State<AppState>,
-    _agent: AuthenticatedAgent,
+    agent: AuthenticatedAgent,
     ValidatedJson(body): ValidatedJson<RegisterWebhookRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), ApiError> {
     if body.url.is_empty() {
@@ -82,19 +84,24 @@ pub async fn register(
     }
 
     let id = WebhookEndpointId::new();
-    let secret_hash = hex::encode(Sha256::digest(body.secret.as_bytes()));
+    // Store the raw secret — it is the HMAC signing key used during delivery.
+    // Both Cream and the receiver need the same key for Stripe-compatible
+    // HMAC-SHA256 verification. This mirrors Stripe's own webhook secret
+    // storage model.
+    let secret_hash = body.secret.clone();
     let events = body.events.unwrap_or_else(|| vec!["*".to_string()]);
     let events_json = serde_json::to_value(&events)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize events: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO webhook_endpoints (id, url, secret_hash, events, status, created_at)
-         VALUES ($1, $2, $3, $4, 'active', now())",
+        "INSERT INTO webhook_endpoints (id, url, secret_hash, events, status, agent_id, created_at)
+         VALUES ($1, $2, $3, $4, 'active', $5, now())",
     )
     .bind(id.as_uuid())
     .bind(&body.url)
     .bind(&secret_hash)
     .bind(&events_json)
+    .bind(agent.agent.id.as_uuid())
     .execute(&state.db)
     .await?;
 

@@ -3,6 +3,7 @@ import { PollingRefresh } from "@/components/shared/polling-refresh";
 import { DataTable, Column } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 import { AuditEntry, Currency } from "@/lib/types";
 import { formatAmount, formatDate } from "@/lib/utils";
 
@@ -70,6 +71,7 @@ const columns: Column<AuditEntry>[] = [
  * payments, not just one.
  */
 export default async function TransactionsPage() {
+  await requireAuth();
   const api = await getApiClient();
   const entries = await api.queryAudit({ limit: 50 });
 

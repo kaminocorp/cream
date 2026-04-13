@@ -765,13 +765,24 @@ async fn check_escalation_reminders(state: &AppState) -> Result<(), ApiError> {
                 continue;
             }
 
+            // Compute real minutes remaining from the escalation timeout config.
+            let timeout_minutes = state
+                .payment_repo
+                .get_escalation_timeout_minutes(&payment_id)
+                .await
+                .unwrap_or(60) as i64;
+            let elapsed_secs = (Utc::now() - payment.updated_at)
+                .num_seconds()
+                .max(0);
+            let remaining = ((timeout_minutes * 60 - elapsed_secs) / 60).max(0) as u32;
+
             let notification = crate::notifications::ReminderNotification {
                 payment_id: payment.id,
                 amount: payment.request.amount,
                 currency: payment.request.currency,
                 recipient: payment.request.recipient.identifier.clone(),
                 agent_name: format!("agent:{}", payment.request.agent_id),
-                minutes_remaining: 0, // approximate — exact calc would need the timeout config
+                minutes_remaining: remaining,
                 kind: crate::notifications::ReminderKind::Reminder,
             };
 

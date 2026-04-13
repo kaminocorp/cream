@@ -1,9 +1,11 @@
 import { PageHeader } from "@/components/shared/page-header";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 import { AgentSummary, PolicyTemplate } from "@/lib/types";
 import { PoliciesClient } from "./policies-client";
 
 export default async function PoliciesPage() {
+  await requireAuth();
   const api = await getApiClient();
 
   let agents: AgentSummary[] = [];

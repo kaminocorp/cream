@@ -2,6 +2,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { PollingRefresh } from "@/components/shared/polling-refresh";
 import { EscalationTable } from "@/components/escalations/escalation-table";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 
 /**
  * Escalation queue. Server component fetches the pending-approval entries
@@ -12,6 +13,7 @@ import { getApiClient } from "@/lib/api";
  * operator workflow in the dashboard.
  */
 export default async function EscalationsPage() {
+  await requireAuth();
   const api = await getApiClient();
   const pending = await api.queryAudit({
     status: "pending_approval",

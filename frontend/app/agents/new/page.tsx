@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/shared/page-header";
 import { AgentForm, ProfileOption } from "@/components/agents/agent-form";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 
 /**
  * Create agent page. Fetches the agent list to derive available profiles
@@ -8,6 +9,7 @@ import { getApiClient } from "@/lib/api";
  * we extract unique (id, name) pairs from the agents table.
  */
 export default async function NewAgentPage() {
+  await requireAuth();
   const api = await getApiClient();
   const agents = await api.listAgents();
 

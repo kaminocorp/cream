@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.20.1](#0201--2026-04-13) — Production hardening: 15 fixes (6 security, 4 data integrity, 5 robustness) — login rate limiting + lockout, webhook HMAC raw secret + timestamp window, XSS-safe emails, Slack raw-byte HMAC, explicit JWT HS256, `requireAuth()` on all routes, transactional template apply, agent-scoped webhooks, real `minutes_remaining`, fail-fast encryption config, CSRF middleware, template rule validation, auth audit trail, multipart emails, 469 tests
 - [0.20.0](#0200--2026-04-13) — Phase 16-H: escalation monitor enhancement — reminder notifications at 50% timeout, timeout notifications on expiry, send_reminder() trait method for Slack + Email, reminder_sent_at idempotency column, 464 tests — **Phase 16 complete**
 - [0.19.0](#0190--2026-04-13) — Phase 16-G: policy template library — 3 built-in templates (Starter/Conservative/Compliance), list/get/apply endpoints, template library UI with agent selector, tabbed policies page, 463 tests
 - [0.18.0](#0180--2026-04-13) — Phase 16-F: settings UI + provider key storage — tabbed settings page (Webhooks/Provider Keys/Account), AES-256-GCM encrypted provider key storage, webhook CRUD + delivery log, account identity display, 461 tests
@@ -71,6 +72,63 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.20.1 — 2026-04-13
+
+**Post-Phase-16 Security Hardening (Tier 1)**
+
+15 fixes from a comprehensive production-readiness review of Phase 16 (A through H), covering security (6), data integrity (4), and robustness (5). 469 backend tests pass (up from 464). Zero clippy warnings. Frontend lint, typecheck, and production build clean.
+
+### Security Fixes
+
+- **Login rate limiting + account lockout** — Redis-backed rate limiting: 5 attempts per email per 60-second window (returns 429 with `Retry-After` header). After 10 consecutive failures, the account is temporarily locked for 15 minutes. Failure counter clears on successful login. Keys: `cream:login_rate:{email}`, `cream:login_lockout:{email}`, `cream:login_failures:{email}`. (`backend/crates/api/src/routes/auth.rs`)
+
+- **Webhook HMAC signs with raw secret, not its hash** — Previously the webhook registration SHA-256 hashed the secret and stored the digest, then the delivery worker used the *hash* as the HMAC-SHA256 key. Receivers could not verify signatures using the original secret they provided. Now the raw secret is stored directly (it is a symmetric signing key needed by both sides — same model as Stripe). (`backend/crates/api/src/routes/webhooks.rs`, `backend/crates/api/src/webhook_worker.rs`)
+
+- **Webhook signature timestamp window (replay protection)** — `verify_signature()` now rejects signatures with timestamps older or newer than 5 minutes (`SIGNATURE_MAX_AGE_SECS = 300`). Previously any timestamp was accepted, enabling indefinite replay attacks. (`backend/crates/api/src/webhook_worker.rs`)
+
+- **HTML-escaped email templates (XSS prevention)** — All user-controlled fields (`recipient`, `agent_name`, `justification_summary`, `payment_id`) are HTML-escaped before interpolation into escalation and reminder email templates. Prevents stored XSS via crafted agent names or recipient strings. Added `html_escape()` utility covering all 5 XML entities (`& < > " '`). (`backend/crates/api/src/notifications/email.rs`)
+
+- **Slack signature verification uses raw bytes** — `verify_slack_signature()` previously used `String::from_utf8_lossy(body)` to build the HMAC basestring, which could silently replace invalid UTF-8 sequences and cause HMAC mismatches or bypasses. Now computes HMAC directly on raw byte slices: `b"v0:" + timestamp + b":" + body`. (`backend/crates/api/src/notifications/slack.rs`)
+
+- **Explicit JWT algorithm `HS256`** — `issue_access_token()` now uses `Header::new(Algorithm::HS256)` instead of `Header::default()`. Prevents algorithm confusion if the `jsonwebtoken` crate changes its default in a future major version. (`backend/crates/api/src/routes/auth.rs`)
+
+### Frontend Fixes
+
+- **`requireAuth()` on all protected routes** — All 12 dashboard pages now call `await requireAuth()` as their first statement, which redirects to `/login` if no valid session cookie exists. Previously pages only called `getApiClient()`, which silently fell back to the legacy API key and rendered partial/empty data for unauthenticated users. Auth pages (`/login`, `/register`) are unaffected. (`frontend/app/**/page.tsx`)
+
+### Data Integrity Fixes
+
+- **Transactional template apply** — `POST /v1/policy-templates/{id}/apply/{agent_id}` now wraps all rule INSERTs and the operator_event audit log in a single PostgreSQL transaction. Previously, if any rule insertion failed mid-way, the agent would be left with a partial rule set. Now it's atomic: all rules succeed or none are written. (`backend/crates/api/src/routes/templates.rs`)
+
+- **Agent-scoped webhook registration** — `POST /v1/webhooks` now stores the authenticated agent's ID (`agent_id` column) on the webhook endpoint. Previously `_agent` was ignored and all endpoints defaulted to `agent_id = NULL` (broadcast), defeating the agent-scoping design. Events are now correctly delivered only to the registering agent's endpoints (or wildcard). (`backend/crates/api/src/routes/webhooks.rs`)
+
+- **Real `minutes_remaining` in reminder notifications** — The escalation reminder now computes the actual remaining minutes by querying the escalation timeout from the policy rule (or profile fallback, or 60-minute default) and subtracting elapsed time. Previously hardcoded to `0`, which produced misleading "0 minutes remaining" messages in Slack and email. Added `get_escalation_timeout_minutes()` to `PaymentRepository` trait. (`backend/crates/api/src/orchestrator.rs`, `backend/crates/api/src/db.rs`)
+
+- **Fail-fast on malformed encryption secret** — `PROVIDER_KEY_ENCRYPTION_SECRET` now fails startup with a clear error if set but not valid 64-char hex (32 bytes). Previously a malformed value was silently ignored with a WARN log, risking operators believing keys were encrypted when they were stored unprotected. (`backend/crates/api/src/config.rs`)
+
+### Robustness Fixes
+
+- **CSRF middleware** — New `frontend/middleware.ts` validates the `Origin` header against the request host for all state-changing requests (POST/PUT/PATCH/DELETE). Next.js 16 server actions already verify Origin automatically; this adds defense-in-depth covering any custom route handlers. Same-origin requests and non-browser clients (no Origin header) pass through. (`frontend/middleware.ts`)
+
+- **Template rule schema validation** — `POST /v1/policy-templates/{id}/apply/{agent_id}` now validates each rule's `rule_type` against the 12 registered policy engine evaluators and `action` against the valid set (APPROVE/BLOCK/ESCALATE) *before* insertion. Previously, malformed seed templates with typos (e.g. `amonut_cap`) would be silently applied and only fail at policy evaluation time. (`backend/crates/api/src/routes/templates.rs`)
+
+- **Auth event audit trail** — Register, login, logout, and refresh token reuse detection now write structured events to the `operator_events` table. The reuse detection event (`refresh_token_reuse_detected`) is security-critical for forensic analysis. All audit writes are best-effort (non-blocking) — DB failures are logged but don't break the auth flow. (`backend/crates/api/src/routes/auth.rs`)
+
+- **Multipart email (text/plain + text/html)** — SMTP emails now send as `multipart/alternative` with both a plaintext fallback (HTML tags stripped) and the HTML body. Previously, email clients that don't render HTML showed raw `<strong>` tags. Added `strip_html_tags()` utility for tag stripping with blank-line collapsing. (`backend/crates/api/src/notifications/email.rs`)
+
+- **Refresh token hash: SHA-256 documented as intentional** — Added documentation explaining why SHA-256 (not Argon2) is correct for refresh token hashing: tokens have 122 bits of randomness (UUIDv7), making brute-force infeasible; Argon2's per-hash salt makes DB lookups impossible. This matches industry standard (GitHub, Stripe, AWS). (`backend/crates/api/src/routes/auth.rs`)
+
+### Tests
+
+5 new tests (total: 469):
+- `verify_signature_rejects_old_timestamp` — signature 10 minutes old is rejected
+- `verify_signature_rejects_future_timestamp` — signature 10 minutes in future is rejected
+- `html_body_escapes_xss_in_recipient` — `<script>` and `<img>` tags in recipient/agent_name are escaped
+- `html_escape_covers_all_entities` — round-trip test for all 5 HTML entity substitutions
+- `strip_html_tags_produces_readable_text` — HTML tag stripping produces readable plaintext
 
 ---
 

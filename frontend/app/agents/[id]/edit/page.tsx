@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/shared/page-header";
 import { AgentForm, ProfileOption } from "@/components/agents/agent-form";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -12,6 +13,7 @@ interface Props {
  * (for the profile dropdown).
  */
 export default async function EditAgentPage({ params }: Props) {
+  await requireAuth();
   const { id } = await params;
   const api = await getApiClient();
 

@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { AuditFilterBar, AgentOption } from "@/components/audit/audit-filter-bar";
 import { AuditTable, PAGE_SIZE } from "@/components/audit/audit-table";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 import { AuditQueryFilters, PaymentStatus } from "@/lib/types";
 
 interface Props {
@@ -17,6 +18,7 @@ interface Props {
  * and writes params; this server page reads them and fetches accordingly.
  */
 export default async function AuditPage({ searchParams }: Props) {
+  await requireAuth();
   const params = await searchParams;
   const api = await getApiClient();
 

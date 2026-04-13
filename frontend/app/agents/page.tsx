@@ -5,6 +5,7 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { AgentStatusBadge } from "@/components/shared/agent-status-badge";
 import { Button } from "@/components/ui/button";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 import { AgentSummary } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 import { Plus, Users } from "lucide-react";
@@ -45,6 +46,7 @@ const columns: Column<AgentSummary>[] = [
 ];
 
 export default async function AgentsPage() {
+  await requireAuth();
   const api = await getApiClient();
   const agents = await api.listAgents();
 

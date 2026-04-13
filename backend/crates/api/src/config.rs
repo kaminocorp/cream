@@ -167,21 +167,28 @@ impl AppConfig {
         let dashboard_base_url =
             env::var("DASHBOARD_BASE_URL").ok().filter(|s| !s.trim().is_empty());
 
-        let provider_key_encryption_secret = env::var("PROVIDER_KEY_ENCRYPTION_SECRET")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .and_then(|hex_str| {
-                let bytes = hex::decode(hex_str.trim()).ok()?;
-                if bytes.len() == 32 {
-                    Some(bytes)
-                } else {
-                    tracing::warn!(
-                        "PROVIDER_KEY_ENCRYPTION_SECRET must be 64 hex chars (32 bytes), got {} bytes — ignoring",
-                        bytes.len()
-                    );
-                    None
+        // Provider key encryption secret: if set, MUST be valid. Silently
+        // ignoring a malformed secret could lead operators to believe their
+        // keys are encrypted when they're not.
+        let provider_key_encryption_secret = match env::var("PROVIDER_KEY_ENCRYPTION_SECRET") {
+            Ok(val) if !val.trim().is_empty() => {
+                let trimmed = val.trim();
+                let bytes = hex::decode(trimmed).map_err(|e| {
+                    ConfigError::Invalid(
+                        "PROVIDER_KEY_ENCRYPTION_SECRET",
+                        format!("must be valid hex: {e}"),
+                    )
+                })?;
+                if bytes.len() != 32 {
+                    return Err(ConfigError::Invalid(
+                        "PROVIDER_KEY_ENCRYPTION_SECRET",
+                        format!("must be 64 hex chars (32 bytes), got {} bytes", bytes.len()),
+                    ));
                 }
-            });
+                Some(bytes)
+            }
+            _ => None,
+        };
 
         if operator_api_key.is_none() && jwt_secret.is_none() {
             tracing::warn!(

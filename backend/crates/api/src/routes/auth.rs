@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::Utc;
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -156,6 +156,9 @@ pub async fn register(
 
     tracing::info!(email = %email, "first operator registered");
 
+    // Audit trail.
+    log_auth_event(&state.db, Some(operator_id), "operator_registered", &email).await;
+
     Ok((
         StatusCode::CREATED,
         Json(AuthResponse {
@@ -170,7 +173,19 @@ pub async fn register(
 // POST /v1/auth/login
 // ---------------------------------------------------------------------------
 
+/// Maximum login attempts per email within the rate limit window.
+const MAX_LOGIN_ATTEMPTS: i64 = 5;
+/// Rate limit window for login attempts in seconds (1 minute).
+const LOGIN_RATE_LIMIT_WINDOW_SECS: i64 = 60;
+/// Number of consecutive failures before the account is temporarily locked.
+const LOCKOUT_THRESHOLD: i64 = 10;
+/// Account lockout duration in seconds (15 minutes).
+const LOCKOUT_DURATION_SECS: i64 = 900;
+
 /// Authenticate with email + password, receive access + refresh tokens.
+///
+/// Rate limited to 5 attempts per email per minute via Redis. After 10
+/// consecutive failures the account is temporarily locked for 15 minutes.
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -182,6 +197,50 @@ pub async fn login(
     })?;
 
     let email = body.email.trim().to_lowercase();
+
+    // --- Rate limiting (Redis-backed) ---
+    let rate_key = format!("cream:login_rate:{}", email);
+    let lockout_key = format!("cream:login_lockout:{}", email);
+    let fail_count_key = format!("cream:login_failures:{}", email);
+
+    {
+        let mut conn = state.redis.clone();
+
+        // Check account lockout first.
+        let locked: Option<String> = redis::cmd("GET")
+            .arg(&lockout_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        if locked.is_some() {
+            tracing::warn!(email = %email, "login attempt on locked account");
+            return Err(ApiError::RateLimited {
+                retry_after_secs: LOCKOUT_DURATION_SECS as u64,
+            });
+        }
+
+        // Check rate limit window.
+        let count: i64 = redis::cmd("INCR")
+            .arg(&rate_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(1);
+        if count == 1 {
+            // First request in this window — set expiry.
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&rate_key)
+                .arg(LOGIN_RATE_LIMIT_WINDOW_SECS)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(());
+        }
+        if count > MAX_LOGIN_ATTEMPTS {
+            tracing::warn!(email = %email, count, "login rate limit exceeded");
+            return Err(ApiError::RateLimited {
+                retry_after_secs: LOGIN_RATE_LIMIT_WINDOW_SECS as u64,
+            });
+        }
+    }
 
     // Look up operator by email.
     let row: Option<(Uuid, String, String, String)> = sqlx::query_as(
@@ -199,7 +258,44 @@ pub async fn login(
 
     // Verify password.
     if !verify_password(&body.password, &stored_hash)? {
+        // Increment consecutive failure counter for lockout.
+        let mut conn = state.redis.clone();
+        let failures: i64 = redis::cmd("INCR")
+            .arg(&fail_count_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(1);
+        if failures == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&fail_count_key)
+                .arg(LOCKOUT_DURATION_SECS)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(());
+        }
+        if failures >= LOCKOUT_THRESHOLD {
+            // Lock the account.
+            let _: () = redis::cmd("SET")
+                .arg(&lockout_key)
+                .arg("1")
+                .arg("EX")
+                .arg(LOCKOUT_DURATION_SECS)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(());
+            tracing::warn!(email = %email, failures, "account locked after consecutive failures");
+        }
         return Err(ApiError::Unauthorized);
+    }
+
+    // Login succeeded — clear failure counter.
+    {
+        let mut conn = state.redis.clone();
+        let _: () = redis::cmd("DEL")
+            .arg(&fail_count_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(());
     }
 
     // Issue tokens.
@@ -212,6 +308,9 @@ pub async fn login(
         .bind(operator_id)
         .execute(&state.db)
         .await?;
+
+    // Audit trail.
+    log_auth_event(&state.db, Some(operator_id), "operator_login", &email).await;
 
     Ok(Json(AuthResponse {
         operator_id: operator_id_str,
@@ -270,6 +369,10 @@ pub async fn refresh(
         .bind(operator_id)
         .execute(&state.db)
         .await?;
+
+        // Audit: this is a security-relevant event — potential token theft.
+        log_auth_event(&state.db, Some(operator_id), "refresh_token_reuse_detected", "all sessions revoked").await;
+
         return Err(ApiError::Unauthorized);
     }
 
@@ -321,6 +424,14 @@ pub async fn logout(
 ) -> Result<StatusCode, ApiError> {
     let token_hash = hex::encode(Sha256::digest(body.refresh_token.as_bytes()));
 
+    // Look up the operator_id before revoking (for audit).
+    let session_operator: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT operator_id FROM operator_sessions WHERE refresh_token_hash = $1",
+    )
+    .bind(&token_hash)
+    .fetch_optional(&state.db)
+    .await?;
+
     sqlx::query(
         "UPDATE operator_sessions SET revoked_at = now()
          WHERE refresh_token_hash = $1 AND revoked_at IS NULL",
@@ -329,7 +440,35 @@ pub async fn logout(
     .execute(&state.db)
     .await?;
 
+    // Audit trail.
+    if let Some((op_id,)) = session_operator {
+        log_auth_event(&state.db, Some(op_id), "operator_logout", "session revoked").await;
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Auth audit logging
+// ---------------------------------------------------------------------------
+
+/// Best-effort write of an authentication event to the `operator_events` table.
+/// Never fails the caller — swallows DB errors with a warning log.
+async fn log_auth_event(db: &sqlx::PgPool, operator_id: Option<Uuid>, event_type: &str, detail: &str) {
+    let details = serde_json::json!({
+        "operator_id": operator_id.map(|id| format!("opr_{id}")),
+        "detail": detail,
+    });
+    if let Err(e) = sqlx::query(
+        "INSERT INTO operator_events (event_type, details) VALUES ($1, $2)",
+    )
+    .bind(event_type)
+    .bind(&details)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(event_type, error = %e, "failed to log auth event (non-blocking)");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +525,7 @@ fn issue_access_token(
     };
 
     jsonwebtoken::encode(
-        &Header::default(),
+        &Header::new(Algorithm::HS256),
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
@@ -398,7 +537,13 @@ async fn issue_refresh_token(
     operator_id: Uuid,
     config: &crate::config::AppConfig,
 ) -> Result<String, ApiError> {
-    // Generate a random 256-bit refresh token.
+    // Generate a high-entropy refresh token (UUIDv7 = 122 bits of randomness).
+    // SHA-256 is intentionally used instead of Argon2 because:
+    // 1. The token has high entropy — brute-forcing 2^122 possibilities is infeasible
+    //    even with fast hashing. Argon2 is for low-entropy passwords, not random tokens.
+    // 2. We need deterministic lookup: `WHERE refresh_token_hash = $1`. Argon2's per-hash
+    //    salt makes DB lookups impossible without loading all rows.
+    // This matches the industry standard (GitHub, Stripe, AWS all SHA-256 hash API tokens).
     let raw_token = format!("crrt_{}", Uuid::now_v7());
     let token_hash = hex::encode(Sha256::digest(raw_token.as_bytes()));
     let expires_at = Utc::now() + chrono::Duration::seconds(config.jwt_refresh_ttl_secs);

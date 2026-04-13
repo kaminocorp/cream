@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/shared/page-header";
 import { ProviderHealthDashboard } from "@/components/providers/provider-health-dashboard";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 
 /**
  * Provider health page. The server component fetches the initial snapshot
@@ -12,6 +13,7 @@ import { getApiClient } from "@/lib/api";
  * because it needs to accumulate history, not replace it.
  */
 export default async function ProvidersPage() {
+  await requireAuth();
   const api = await getApiClient();
   const providers = await api.getProviderHealth();
 

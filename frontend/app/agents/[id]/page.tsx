@@ -8,6 +8,7 @@ import { AgentStatusBadge } from "@/components/shared/agent-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { getApiClient } from "@/lib/api";
+import { requireAuth } from "@/lib/auth";
 import { AuditEntry, Currency, PolicyRule } from "@/lib/types";
 import { formatAmount, formatDate } from "@/lib/utils";
 import { RotateKeyDialog } from "@/components/agents/rotate-key-dialog";
@@ -60,6 +61,7 @@ const txColumns: Column<AuditEntry>[] = [
  * summary of the rules in the profile.
  */
 export default async function AgentDetailPage({ params }: Props) {
+  await requireAuth();
   const { id } = await params;
   const api = await getApiClient();
 

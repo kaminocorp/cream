@@ -2,6 +2,57 @@ use async_trait::async_trait;
 
 use super::{EscalationNotification, NotificationSender, ReminderKind, ReminderNotification};
 
+/// Produce a text/plain approximation of an HTML body by stripping tags.
+/// Used to build the plaintext alternative in multipart emails so clients
+/// that don't render HTML still show readable content.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                // Replace block-level closing tags with newlines for readability.
+            }
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+    // Collapse multiple blank lines and trim.
+    let mut prev_blank = false;
+    let lines: Vec<&str> = result
+        .lines()
+        .filter(|line| {
+            let blank = line.trim().is_empty();
+            if blank && prev_blank {
+                return false;
+            }
+            prev_blank = blank;
+            true
+        })
+        .collect();
+    lines.join("\n").trim().to_string()
+}
+
+/// Escape a string for safe inclusion in HTML. Prevents XSS when
+/// interpolating user-controlled fields (recipient, agent_name, etc.)
+/// into email templates.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Email configuration
 // ---------------------------------------------------------------------------
@@ -104,6 +155,8 @@ impl EmailNotifier {
     }
 
     /// Build the HTML body for an escalation email.
+    ///
+    /// All user-controlled fields are HTML-escaped to prevent XSS.
     pub fn build_html_body(
         notification: &EscalationNotification,
         dashboard_base_url: Option<&str>,
@@ -123,9 +176,15 @@ impl EmailNotifier {
         } else {
             format!(
                 r#"<p><a href="{}" style="display:inline-block;padding:10px 20px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;">Review in Dashboard</a></p>"#,
-                deep_link
+                html_escape(&deep_link)
             )
         };
+
+        // Escape all user-controlled fields to prevent XSS.
+        let recipient = html_escape(&notification.recipient);
+        let agent_name = html_escape(&notification.agent_name);
+        let justification = html_escape(&notification.justification_summary);
+        let payment_id = html_escape(&notification.payment_id.to_string());
 
         format!(
             r#"<!DOCTYPE html>
@@ -149,16 +208,19 @@ impl EmailNotifier {
 </html>"#,
             amount = notification.amount,
             currency = notification.currency,
-            recipient = notification.recipient,
-            agent_name = notification.agent_name,
+            recipient = recipient,
+            agent_name = agent_name,
             timeout = notification.timeout_minutes,
-            payment_id = notification.payment_id,
-            justification = notification.justification_summary,
+            payment_id = payment_id,
+            justification = justification,
             link_section = link_section,
         )
     }
 
     /// Send via SMTP using `lettre`.
+    ///
+    /// Sends a multipart message with both text/plain and text/html alternatives
+    /// so email clients that don't render HTML still show readable content.
     async fn send_smtp(
         &self,
         host: &str,
@@ -168,7 +230,7 @@ impl EmailNotifier {
         subject: &str,
         html_body: &str,
     ) -> Result<(), String> {
-        use lettre::message::{header::ContentType, Mailbox};
+        use lettre::message::{MultiPart, SinglePart, Mailbox};
         use lettre::transport::smtp::authentication::Credentials;
         use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -183,12 +245,26 @@ impl EmailNotifier {
             .parse()
             .map_err(|e| format!("invalid to address: {e}"))?;
 
+        // Strip HTML tags for the plaintext alternative.
+        let plain_text = strip_html_tags(html_body);
+
         let email = Message::builder()
             .from(from)
             .to(to)
             .subject(subject)
-            .header(ContentType::TEXT_HTML)
-            .body(html_body.to_string())
+            .multipart(
+                MultiPart::alternative()
+                    .singlepart(
+                        SinglePart::builder()
+                            .header(lettre::message::header::ContentType::TEXT_PLAIN)
+                            .body(plain_text),
+                    )
+                    .singlepart(
+                        SinglePart::builder()
+                            .header(lettre::message::header::ContentType::TEXT_HTML)
+                            .body(html_body.to_string()),
+                    ),
+            )
             .map_err(|e| format!("failed to build email: {e}"))?;
 
         let creds = Credentials::new(username.to_string(), password.to_string());
@@ -299,6 +375,11 @@ impl NotificationSender for EmailNotifier {
             ),
         };
 
+        // Escape all user-controlled fields.
+        let recipient = html_escape(&notification.recipient);
+        let agent = html_escape(&notification.agent_name);
+        let payment_id = html_escape(&notification.payment_id.to_string());
+
         let html_body = format!(
             r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"></head>
@@ -326,9 +407,9 @@ impl NotificationSender for EmailNotifier {
             },
             amount = notification.amount,
             currency = notification.currency,
-            recipient = notification.recipient,
-            agent = notification.agent_name,
-            payment_id = notification.payment_id,
+            recipient = recipient,
+            agent = agent,
+            payment_id = payment_id,
         );
 
         let result = match &self.config.mode {
@@ -416,6 +497,34 @@ mod tests {
 
         assert!(!html.contains("Review in Dashboard"), "should not contain CTA");
         assert!(!html.contains("/escalations?payment_id="), "should not contain link");
+    }
+
+    #[test]
+    fn html_body_escapes_xss_in_recipient() {
+        let mut notification = test_notification();
+        notification.recipient = "<script>alert('xss')</script>".to_string();
+        notification.agent_name = "agent<img src=x>".to_string();
+
+        let html = EmailNotifier::build_html_body(&notification, None);
+
+        assert!(!html.contains("<script>"), "recipient must be HTML-escaped");
+        assert!(html.contains("&lt;script&gt;"), "should contain escaped tag");
+        assert!(!html.contains("<img src=x>"), "agent_name must be HTML-escaped");
+        assert!(html.contains("&lt;img src=x&gt;"), "should contain escaped img");
+    }
+
+    #[test]
+    fn html_escape_covers_all_entities() {
+        assert_eq!(super::html_escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&#x27;f");
+    }
+
+    #[test]
+    fn strip_html_tags_produces_readable_text() {
+        let html = "<h2>Title</h2><p>Hello <strong>world</strong></p>";
+        let plain = super::strip_html_tags(html);
+        assert!(plain.contains("Title"));
+        assert!(plain.contains("Hello world"));
+        assert!(!plain.contains("<"), "should not contain HTML tags");
     }
 
     #[test]

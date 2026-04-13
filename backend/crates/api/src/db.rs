@@ -62,6 +62,11 @@ pub trait PaymentRepository: Send + Sync {
     /// Mark a payment as having had its reminder sent.
     async fn set_reminder_sent(&self, payment_id: &PaymentId) -> Result<(), ApiError>;
 
+    /// Get the effective escalation timeout in minutes for a payment.
+    /// Uses the specific escalation rule if set, falls back to the profile minimum,
+    /// then to 60 minutes as a final default.
+    async fn get_escalation_timeout_minutes(&self, payment_id: &PaymentId) -> Result<i32, ApiError>;
+
     /// Conditionally update a payment only if its current DB status matches `expected_status`.
     /// Returns `true` if the row was updated, `false` if status had already changed (race lost).
     async fn update_payment_if_status(
@@ -495,6 +500,31 @@ impl PaymentRepository for PgPaymentRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn get_escalation_timeout_minutes(&self, payment_id: &PaymentId) -> Result<i32, ApiError> {
+        // Same COALESCE logic as find_expired_escalations: specific rule → profile min → 60.
+        let row: (i32,) = sqlx::query_as(
+            r#"SELECT COALESCE(
+                (SELECT (pr.escalation->>'timeout_minutes')::int
+                 FROM policy_rules pr
+                 WHERE pr.id = p.escalation_rule_id
+                   AND pr.escalation IS NOT NULL),
+                (SELECT MIN((pr2.escalation->>'timeout_minutes')::int)
+                 FROM policy_rules pr2
+                 JOIN agents a ON a.profile_id = pr2.profile_id
+                 WHERE a.id = p.agent_id
+                   AND pr2.escalation IS NOT NULL
+                   AND pr2.enabled = true),
+                60
+            ) AS timeout_minutes
+            FROM payments p
+            WHERE p.id = $1"#,
+        )
+        .bind(payment_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
     }
 
     async fn update_payment_if_status(

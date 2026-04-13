@@ -8,6 +8,25 @@ use crate::error::ApiError;
 use crate::extractors::auth::AuthenticatedOperator;
 use crate::state::AppState;
 
+/// The 12 rule types registered in the policy engine.
+const VALID_RULE_TYPES: &[&str] = &[
+    "amount_cap",
+    "velocity_limit",
+    "spend_rate",
+    "category_check",
+    "merchant_check",
+    "geographic",
+    "rail_restriction",
+    "justification_quality",
+    "time_window",
+    "first_time_merchant",
+    "duplicate_detection",
+    "escalation_threshold",
+];
+
+/// Valid policy actions (matches `PolicyAction` enum serialization).
+const VALID_ACTIONS: &[&str] = &["APPROVE", "BLOCK", "ESCALATE"];
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -124,27 +143,50 @@ pub async fn apply_template(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("agent {agent_id_str}")))?;
 
-    // Parse rules array and insert each one.
+    // Parse rules array and insert each one inside a transaction so that
+    // partial failures don't leave the agent with an incomplete rule set.
     let rule_array = rules
         .as_array()
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("template rules is not an array")))?;
 
+    let mut tx = state.db.begin().await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("begin transaction: {e}")))?;
+
     let mut inserted = 0u32;
-    for rule_json in rule_array {
+    for (idx, rule_json) in rule_array.iter().enumerate() {
         let rule_id = PolicyRuleId::new();
         let priority = rule_json
             .get("priority")
             .and_then(|v| v.as_i64())
             .unwrap_or(100) as i32;
-        let rule_type = rule_json
+
+        // Validate rule_type is present and recognized.
+        let rule_type_str = rule_json
             .get("rule_type")
             .and_then(|v| v.as_str())
-            .map(String::from);
+            .ok_or_else(|| {
+                ApiError::ValidationError(format!("rule[{idx}]: missing required field 'rule_type'"))
+            })?;
+        if !VALID_RULE_TYPES.contains(&rule_type_str) {
+            return Err(ApiError::ValidationError(format!(
+                "rule[{idx}]: unknown rule_type '{rule_type_str}'"
+            )));
+        }
+        let rule_type = Some(rule_type_str.to_string());
+
         let condition = rule_json.get("condition").cloned().unwrap_or(serde_json::json!({}));
+
+        // Validate action if present.
         let action = rule_json
             .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("BLOCK");
+        if !VALID_ACTIONS.contains(&action) {
+            return Err(ApiError::ValidationError(format!(
+                "rule[{idx}]: invalid action '{action}' (expected APPROVE, BLOCK, or ESCALATE)"
+            )));
+        }
+
         let escalation = rule_json.get("escalation").cloned();
 
         sqlx::query(
@@ -160,14 +202,14 @@ pub async fn apply_template(
         .bind(&condition)
         .bind(action)
         .bind(&escalation)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("insert rule: {e}")))?;
 
         inserted += 1;
     }
 
-    // Log operator event.
+    // Log operator event inside the same transaction.
     sqlx::query(
         "INSERT INTO operator_events (event_type, details) VALUES ('template_applied', $1)",
     )
@@ -178,9 +220,12 @@ pub async fn apply_template(
         "profile_id": profile_id.to_string(),
         "rules_inserted": inserted,
     }))
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .ok(); // Best-effort audit.
+    .ok(); // Best-effort audit — don't fail the whole apply if event insert fails.
+
+    tx.commit().await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("commit transaction: {e}")))?;
 
     tracing::info!(
         template = %template_name,
