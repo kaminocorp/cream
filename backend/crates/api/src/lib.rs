@@ -77,13 +77,27 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Build a CORS layer from configured origins.
 ///
-/// If `allowed_origins` is empty (no `CORS_ALLOWED_ORIGINS` set), falls back to
-/// permissive mode for local development. In production, operators MUST set
-/// `CORS_ALLOWED_ORIGINS` to restrict cross-origin access.
+/// If `allowed_origins` is empty, requires `ALLOW_PERMISSIVE_CORS=true` to
+/// fall back to permissive mode (for local development). Without the explicit
+/// opt-in, an empty origin list panics at startup — fail-fast rather than
+/// silently running with all origins allowed.
 fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
     if allowed_origins.is_empty() {
-        tracing::warn!("CORS_ALLOWED_ORIGINS not set — using permissive CORS (development only)");
-        return CorsLayer::permissive();
+        let allow_permissive = std::env::var("ALLOW_PERMISSIVE_CORS")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+        if allow_permissive {
+            tracing::warn!(
+                "CORS_ALLOWED_ORIGINS not set and ALLOW_PERMISSIVE_CORS=true — \
+                 using permissive CORS (development only)"
+            );
+            return CorsLayer::permissive();
+        }
+        panic!(
+            "CORS_ALLOWED_ORIGINS is empty and ALLOW_PERMISSIVE_CORS is not set. \
+             Either set CORS_ALLOWED_ORIGINS to a comma-separated list of origins, \
+             or set ALLOW_PERMISSIVE_CORS=true for local development."
+        );
     }
 
     let origins: Vec<axum::http::HeaderValue> = allowed_origins

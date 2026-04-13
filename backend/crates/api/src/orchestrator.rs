@@ -11,6 +11,43 @@ use crate::error::ApiError;
 use crate::extractors::auth::AuthenticatedAgent;
 use crate::state::AppState;
 
+/// Apply settlement status transitions based on the provider response.
+/// Returns the failure reason (if any) for persistence in the payments table.
+///
+/// Used by both `process()` and `resume_after_approval()` — extracted to
+/// avoid duplicating the same match block in both paths.
+fn apply_settlement_transitions(
+    payment: &mut Payment,
+    response: &ProviderPaymentResponse,
+) -> Result<Option<&'static str>, ApiError> {
+    match response.status {
+        TransactionStatus::Settled => {
+            payment.transition(PaymentStatus::Submitted)?;
+            payment.transition(PaymentStatus::Settled)?;
+            Ok(None)
+        }
+        TransactionStatus::Pending | TransactionStatus::RequiresAction => {
+            payment.transition(PaymentStatus::Submitted)?;
+            Ok(None)
+        }
+        TransactionStatus::Failed => {
+            payment.transition(PaymentStatus::Submitted)?;
+            payment.transition(PaymentStatus::Failed)?;
+            Ok(Some("provider returned failed"))
+        }
+        TransactionStatus::Declined => {
+            payment.transition(PaymentStatus::Submitted)?;
+            payment.transition(PaymentStatus::Failed)?;
+            Ok(Some("provider declined the transaction"))
+        }
+        TransactionStatus::Refunded => {
+            payment.transition(PaymentStatus::Submitted)?;
+            payment.transition(PaymentStatus::Failed)?;
+            Ok(Some("provider returned refunded"))
+        }
+    }
+}
+
 /// Orchestrates the deterministic 8-step payment lifecycle.
 ///
 /// Steps 1-2 (schema validation, agent identity) are handled by Axum extractors
@@ -186,32 +223,7 @@ impl PaymentOrchestrator {
         };
 
         // --- Step 7: Settlement confirmation ---
-        let failure_reason = match provider_response.status {
-            TransactionStatus::Settled => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Settled)?;
-                None
-            }
-            TransactionStatus::Pending | TransactionStatus::RequiresAction => {
-                payment.transition(PaymentStatus::Submitted)?;
-                None
-            }
-            TransactionStatus::Failed => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Failed)?;
-                Some("provider returned failed")
-            }
-            TransactionStatus::Declined => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Failed)?;
-                Some("provider declined the transaction")
-            }
-            TransactionStatus::Refunded => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Failed)?;
-                Some("provider returned refunded")
-            }
-        };
+        let failure_reason = apply_settlement_transitions(&mut payment, &provider_response)?;
         self.state.payment_repo.update_payment(&payment).await?;
 
         // Persist settlement data (amount_settled, settled_currency, failure_reason)
@@ -342,32 +354,7 @@ impl PaymentOrchestrator {
         };
 
         // Step 7: Settlement
-        let failure_reason = match provider_response.status {
-            TransactionStatus::Settled => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Settled)?;
-                None
-            }
-            TransactionStatus::Pending | TransactionStatus::RequiresAction => {
-                payment.transition(PaymentStatus::Submitted)?;
-                None
-            }
-            TransactionStatus::Failed => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Failed)?;
-                Some("provider returned failed")
-            }
-            TransactionStatus::Declined => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Failed)?;
-                Some("provider declined the transaction")
-            }
-            TransactionStatus::Refunded => {
-                payment.transition(PaymentStatus::Submitted)?;
-                payment.transition(PaymentStatus::Failed)?;
-                Some("provider returned refunded")
-            }
-        };
+        let failure_reason = apply_settlement_transitions(&mut payment, &provider_response)?;
         self.state.payment_repo.update_payment(&payment).await?;
 
         // Persist settlement data from the provider response.

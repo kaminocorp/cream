@@ -42,9 +42,6 @@ fmt-check:
 test:
     cargo test --manifest-path backend/Cargo.toml
 
-test-integration:
-    cargo test --manifest-path backend/Cargo.toml -- --ignored
-
 # ── Run ─────────────────────────────────────────
 
 run-api:

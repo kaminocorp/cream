@@ -11,6 +11,9 @@ import { ApiError } from "../src/types";
 import { registerInitiatePaymentTool } from "../src/tools/initiate-payment";
 import { registerGetPaymentStatusTool } from "../src/tools/get-payment-status";
 import { registerCheckProviderHealthTool } from "../src/tools/check-provider-health";
+import { registerCreateVirtualCardTool } from "../src/tools/create-virtual-card";
+import { registerGetAuditHistoryTool } from "../src/tools/get-audit-history";
+import { registerGetMyPolicyTool } from "../src/tools/get-my-policy";
 
 // Minimal McpServer mock — captures registerTool invocations so we can
 // retrieve the handler function and call it directly.
@@ -254,5 +257,140 @@ describe("check_provider_health tool", () => {
 
     expect(isError(result)).toBe(true);
     expect(firstText(result)).toContain("ECONNREFUSED");
+  });
+});
+
+describe("create_virtual_card tool", () => {
+  it("returns card JSON on success", async () => {
+    const { server, getHandler } = makeServer();
+    const card = { id: "card_abc", status: "active", card_type: "single_use" };
+    const api = makeApi({
+      createCard: jest.fn().mockResolvedValue(card),
+    });
+
+    registerCreateVirtualCardTool(server, api);
+    const result = await getHandler("create_virtual_card")({
+      card_type: "single_use",
+      currency: "USD",
+      provider_id: "stripe_issuing",
+    });
+
+    expect(isError(result)).toBeUndefined();
+    expect(firstText(result)).toContain("card_abc");
+    expect(api.createCard).toHaveBeenCalled();
+  });
+
+  it("returns isError:true on API failure", async () => {
+    const { server, getHandler } = makeServer();
+    const api = makeApi({
+      createCard: jest
+        .fn()
+        .mockRejectedValue(
+          new ApiError(400, "VALIDATION_ERROR", "Invalid card type"),
+        ),
+    });
+
+    registerCreateVirtualCardTool(server, api);
+    const result = await getHandler("create_virtual_card")({
+      card_type: "bad_type",
+      currency: "USD",
+      provider_id: "stripe",
+    });
+
+    expect(isError(result)).toBe(true);
+    expect(firstText(result)).toContain("VALIDATION_ERROR");
+  });
+});
+
+describe("get_audit_history tool", () => {
+  it("returns audit entries as JSON", async () => {
+    const { server, getHandler } = makeServer();
+    const entries = [
+      { id: "aud_001", final_status: "settled", timestamp: "2026-04-01T00:00:00Z" },
+    ];
+    const api = makeApi({
+      queryAudit: jest.fn().mockResolvedValue(entries),
+    });
+
+    registerGetAuditHistoryTool(server, api);
+    const result = await getHandler("get_audit_history")({});
+
+    expect(isError(result)).toBeUndefined();
+    expect(firstText(result)).toContain("aud_001");
+    expect(firstText(result)).toContain("settled");
+  });
+
+  it("passes filter parameters to API", async () => {
+    const { server, getHandler } = makeServer();
+    const api = makeApi({
+      queryAudit: jest.fn().mockResolvedValue([]),
+    });
+
+    registerGetAuditHistoryTool(server, api);
+    await getHandler("get_audit_history")({
+      status: "failed",
+      limit: 10,
+    });
+
+    expect(api.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed", limit: 10 }),
+    );
+  });
+
+  it("returns isError:true on failure", async () => {
+    const { server, getHandler } = makeServer();
+    const api = makeApi({
+      queryAudit: jest
+        .fn()
+        .mockRejectedValue(new ApiError(500, "INTERNAL", "DB timeout")),
+    });
+
+    registerGetAuditHistoryTool(server, api);
+    const result = await getHandler("get_audit_history")({});
+
+    expect(isError(result)).toBe(true);
+    expect(firstText(result)).toContain("INTERNAL");
+  });
+});
+
+describe("get_my_policy tool", () => {
+  it("returns policy JSON on success", async () => {
+    const { server, getHandler } = makeServer();
+    const policy = {
+      agent: { id: "agt_123", name: "test-agent" },
+      profile: { name: "default", max_daily_spend: "1000" },
+      rules: [],
+    };
+    const api = makeApi({
+      getAgentPolicy: jest.fn().mockResolvedValue(policy),
+    });
+
+    registerGetMyPolicyTool(server, api);
+    const result = await getHandler("get_my_policy")({
+      agent_id: "agt_123",
+    });
+
+    expect(isError(result)).toBeUndefined();
+    expect(firstText(result)).toContain("test-agent");
+    expect(firstText(result)).toContain("1000");
+  });
+
+  it("returns isError:true when agent not found", async () => {
+    const { server, getHandler } = makeServer();
+    const api = makeApi({
+      getAgentPolicy: jest
+        .fn()
+        .mockRejectedValue(
+          new ApiError(404, "NOT_FOUND", "Agent not found"),
+        ),
+    });
+
+    registerGetMyPolicyTool(server, api);
+    const result = await getHandler("get_my_policy")({
+      agent_id: "agt_missing",
+    });
+
+    expect(isError(result)).toBe(true);
+    expect(firstText(result)).toContain("NOT_FOUND");
   });
 });

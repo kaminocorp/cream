@@ -21,7 +21,8 @@ pub struct AppConfig {
     /// How often (seconds) the escalation timeout monitor checks for expired approvals.
     pub escalation_check_interval_secs: u64,
     /// Comma-separated list of allowed CORS origins (e.g. "https://dashboard.example.com").
-    /// If empty or unset, defaults to permissive (development only).
+    /// If empty or unset, the server will refuse to start unless
+    /// `ALLOW_PERMISSIVE_CORS=true` is also set (development only).
     pub cors_allowed_origins: Vec<String>,
     /// Shared secret that, when presented as `Authorization: Bearer <key>`,
     /// authenticates the caller as the operator (dashboard / admin).

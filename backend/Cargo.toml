@@ -9,6 +9,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.85"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }

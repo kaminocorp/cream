@@ -1,21 +1,11 @@
 import Link from "next/link";
 import { PageHeader } from "@/components/shared/page-header";
 import { PolicyEditor } from "@/components/policy/policy-editor";
-import { Badge } from "@/components/ui/badge";
+import { AgentStatusBadge } from "@/components/shared/agent-status-badge";
 import { getApiClient } from "@/lib/api";
-import { AgentStatus } from "@/lib/types";
 
 interface Props {
   params: Promise<{ id: string }>;
-}
-
-function statusBadge(status: AgentStatus) {
-  const classes: Record<AgentStatus, string> = {
-    active: "bg-green-100 text-green-800",
-    suspended: "bg-yellow-100 text-yellow-800",
-    revoked: "bg-red-100 text-red-800",
-  };
-  return <Badge className={classes[status]}>{status}</Badge>;
 }
 
 export default async function PolicyPage({ params }: Props) {
@@ -36,7 +26,7 @@ export default async function PolicyPage({ params }: Props) {
               ← back to agent
             </Link>
             <span>·</span>
-            {statusBadge(agent.status)}
+            <AgentStatusBadge status={agent.status} />
             <span>·</span>
             <span className="text-xs text-zinc-500">
               profile: {profile.name} (v{profile.version})

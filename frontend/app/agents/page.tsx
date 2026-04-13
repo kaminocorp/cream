@@ -2,21 +2,12 @@ import Link from "next/link";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, Column } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/shared/empty-state";
-import { Badge } from "@/components/ui/badge";
+import { AgentStatusBadge } from "@/components/shared/agent-status-badge";
 import { Button } from "@/components/ui/button";
 import { getApiClient } from "@/lib/api";
-import { AgentSummary, AgentStatus } from "@/lib/types";
+import { AgentSummary } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 import { Plus, Users } from "lucide-react";
-
-function statusBadge(status: AgentStatus) {
-  const classes: Record<AgentStatus, string> = {
-    active: "bg-green-100 text-green-800",
-    suspended: "bg-yellow-100 text-yellow-800",
-    revoked: "bg-red-100 text-red-800",
-  };
-  return <Badge className={classes[status]}>{status}</Badge>;
-}
 
 const columns: Column<AgentSummary>[] = [
   {
@@ -44,7 +35,7 @@ const columns: Column<AgentSummary>[] = [
   {
     key: "status",
     header: "Status",
-    cell: (r) => statusBadge(r.status),
+    cell: (r) => <AgentStatusBadge status={r.status} />,
   },
   {
     key: "created",

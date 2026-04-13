@@ -127,10 +127,9 @@ export function ProviderHealthDashboard({ initial }: Props) {
       setPollError(null);
     } catch {
       consecutiveFailures.current += 1;
-      // Surface error after 3 consecutive failures to avoid flashing on
-      // a single transient timeout while still informing the operator of
-      // sustained connectivity issues.
-      if (consecutiveFailures.current >= 3) {
+      // Surface error after 2 consecutive failures — filters a single
+      // transient timeout while surfacing sustained issues within 20s.
+      if (consecutiveFailures.current >= 2) {
         setPollError("Unable to reach backend — health data may be stale");
       }
     }

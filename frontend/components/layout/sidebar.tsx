@@ -82,8 +82,17 @@ export function Sidebar() {
           <div
             className="fixed inset-0 z-40 bg-black/20 lg:hidden"
             onClick={() => setMobileOpen(false)}
+            aria-hidden="true"
           />
-          <aside className="fixed inset-y-0 left-0 z-40 flex w-56 flex-col border-r bg-zinc-50 px-3 py-4 pt-14 lg:hidden">
+          <aside
+            className="fixed inset-y-0 left-0 z-40 flex w-56 flex-col border-r bg-zinc-50 px-3 py-4 pt-14 lg:hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Navigation menu"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setMobileOpen(false);
+            }}
+          >
             {navItems}
           </aside>
         </>

@@ -51,11 +51,11 @@ type ConditionVariant =
   | { type: "FieldCheck"; field: string; op: string; value: unknown };
 
 function classify(cond: PolicyCondition): ConditionVariant {
-  if ("All" in cond) return { type: "All", children: cond.All };
-  if ("Any" in cond) return { type: "Any", children: cond.Any };
-  if ("Not" in cond) return { type: "Not", child: cond.Not };
-  if ("FieldCheck" in cond) {
-    const fc = cond.FieldCheck;
+  if ("all" in cond) return { type: "All", children: cond.all };
+  if ("any" in cond) return { type: "Any", children: cond.any };
+  if ("not" in cond) return { type: "Not", child: cond.not };
+  if ("field_check" in cond) {
+    const fc = cond.field_check;
     return { type: "FieldCheck", field: fc.field, op: fc.op, value: fc.value };
   }
   // Fallback for unexpected / future condition shapes — render visibly

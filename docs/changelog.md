@@ -1,5 +1,8 @@
 # Changelog
 
+- [0.12.5](#0125--2026-04-13) — Low-severity cleanup: 14 fixes — dead code removal, AUDIT_COLUMNS constant, AgentStatusBadge dedup, relativeTime guard, sidebar a11y, date filter debounce, orchestrator dedup, MSRV, MCP version dedup, justfile cleanup, dep audit CI, PageHeader re-export, MCP test coverage (22→29)
+- [0.12.4](#0124--2026-04-13) — Medium-severity hardening: 6 fixes — operator event audit log, frontend + MCP CI, docker resource limits, duplicate test dedup, poll error threshold, currency display
+- [0.12.3](#0123--2026-04-13) — Production-readiness hardening: 5 fixes (2 critical, 3 high) — audit TRUNCATE protection, PolicyCondition serde mismatch, CORS fail-hard, CI Postgres, policy action validation
 - [0.12.2](#0122--2026-04-13) — Pre-Phase-16 review: 5 frontend fixes — poll error visibility, keyboard accessibility, screen reader labels, defensive formatting, responsive filters
 - [0.12.1](#0121--2026-04-13) — Phase 15 production review: 24 fixes (3 critical, 4 high, 10 medium, 10 low) — security, data contract, accessibility, code quality
 - [0.12.0](#0120--2026-04-12) — Phase 15.2–15.8: dashboard full implementation — 13 pages wired, escalation queue, agent management, audit log UX, provider health charts, policy editor, responsive sidebar, 12/12 loading/error coverage
@@ -58,6 +61,88 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.12.5 — 2026-04-13
+
+**Low-Severity Cleanup — 14 Fixes**
+
+Final sweep resolving all remaining findings from the full-codebase production audit. Zero issues remain. 416 backend tests pass, 29 MCP tests pass (up from 22), frontend build clean, zero TypeScript errors.
+
+### Low — Fixed
+
+- **`[QUALITY]` Removed unused `ProviderCardStatus` type** — Dead code in `providers/types.rs:86-91`. Exported but never referenced anywhere in the codebase. Removed the type and its unused `VirtualCardId` import (`backend/crates/providers/src/types.rs`, `backend/crates/providers/src/lib.rs`)
+
+- **`[QUALITY]` Removed unused `serde_json` and `tracing` deps from providers crate** — Listed in `Cargo.toml` but not referenced in any `.rs` file under `providers/src/`. Removed to shrink dependency tree (`backend/crates/providers/Cargo.toml`)
+
+- **`[QUALITY]` Extracted `AUDIT_COLUMNS` constant in audit reader** — The 13-column SELECT list was repeated verbatim in 3 query methods (`query()`, `get_by_id()`, `get_by_payment()`). A column addition required updating all 3 — miss one and the tuple-based positional access (`row.0`–`row.12`) silently reads wrong data. Extracted as `const AUDIT_COLUMNS` (`backend/crates/audit/src/reader.rs`)
+
+- **`[QUALITY]` Extracted shared `AgentStatusBadge` component** — The `statusBadge(status: AgentStatus)` helper was duplicated identically in `agents/page.tsx`, `agents/[id]/page.tsx`, and `agents/[id]/policy/page.tsx`. Extracted to `components/shared/agent-status-badge.tsx` and updated all 3 import sites
+
+- **`[BUG]` `relativeTime()` now handles negative diffs** — If the server timestamp is ahead of the client clock (clock skew, timezone issue), `Date.now() - new Date(iso).getTime()` produces a negative value, rendering as "-5m ago". Added `Math.max(0, ...)` guard so future timestamps display as "just now" (`frontend/lib/utils.ts`)
+
+- **`[A11Y]` Mobile sidebar now has `aria-modal`, `role="dialog"`, and Escape-to-close** — The mobile sidebar overlay lacked semantic dialog attributes, making it invisible to screen readers and preventing keyboard dismissal. Added `role="dialog"`, `aria-modal="true"`, `aria-label`, `aria-hidden` on the backdrop, and `onKeyDown` handler for Escape (`frontend/components/layout/sidebar.tsx`)
+
+- **`[UX]` Date filter inputs now commit on blur instead of every change** — The `datetime-local` inputs in the audit filter bar fired `onChange` on every keystroke/interaction, causing excessive `router.push()` calls and server re-renders while the user was still picking a date. Changed to `onBlur` with diff-check so the filter only fires when the user commits their selection (`frontend/components/audit/audit-filter-bar.tsx`)
+
+- **`[QUALITY]` Extracted `apply_settlement_transitions()` from orchestrator** — The settlement status match block (Settled/Pending/Failed/Declined/Refunded → payment state transitions) was duplicated verbatim between `process()` and `resume_after_approval()`. Extracted as a standalone function (`backend/crates/api/src/orchestrator.rs`)
+
+- **`[INFRA]` Added `rust-version = "1.85"` MSRV to workspace** — No minimum supported Rust version was pinned. CI could break silently if a contributor or dependency bumped MSRV. Added `workspace.package.rust-version` field (`backend/Cargo.toml`)
+
+- **`[INFRA]` MCP server version now read from `package.json`** — Version was hardcoded as `"0.10.0"` in both `package.json` and `src/index.ts`. These would drift on version bumps. Replaced the hardcoded string with a dynamic `require("../package.json").version` read (`backend/mcp-server/src/index.ts`)
+
+- **`[INFRA]` Removed dead `test-integration` justfile target** — The `test-integration` target ran `cargo test -- --ignored`, but no tests in the codebase have the `#[ignore]` attribute. The command was a no-op. Removed (`justfile`)
+
+- **`[CI]` Added `cargo audit` to CI pipeline** — No dependency vulnerability scanning ran in CI. Added `cargo audit` step to the Check & Lint job (`.github/workflows/ci.yml`)
+
+- **`[QUALITY]` `PageHeader` converted from wrapper to re-export** — `PageHeader` was a single-line wrapper function that called `Header` with identical props. Replaced with a zero-overhead re-export: `export { Header as PageHeader }`. All 12 import sites remain stable (`frontend/components/shared/page-header.tsx`)
+
+- **`[TEST]` Added MCP test coverage for 3 untested tools** — `create_virtual_card`, `get_audit_history`, and `get_my_policy` had zero test coverage. Added 7 tests following the existing mock pattern: success path + error path for each tool, plus a filter passthrough test for audit history. MCP test count: 22 → 29 (`backend/mcp-server/tests/tools.test.ts`)
+
+---
+
+## 0.12.4 — 2026-04-13
+
+**Medium-Severity Hardening — 6 Fixes**
+
+Production-readiness sweep resolving all medium-severity findings from the full-codebase audit. Introduces the `operator_events` append-only table for administrative audit, adds frontend and MCP CI pipelines, applies resource limits to dev infrastructure, deduplicates drifting test files, and fixes two frontend UX issues. 416 backend tests pass, frontend build clean, zero TypeScript errors.
+
+### Medium — Fixed
+
+- **`[COMPLIANCE]` Agent lifecycle mutations had no audit trail** — `create_agent`, `update_agent`, `rotate_agent_key`, and `update_policy` wrote to the database but produced no audit record. The existing `audit_log` table is payment-centric (requires `request`, `justification`, `policy_evaluation`), so a new `operator_events` table was introduced: append-only (UPDATE/DELETE/TRUNCATE triggers), with `event_type`, `target_agent_id`, and `details` JSONB. Each lifecycle handler now calls `log_operator_event()` after the mutation succeeds. Audit writes are best-effort — a DB failure logs an error but does not roll back the business operation (`backend/crates/api/src/routes/agents.rs`, `backend/migrations/20260413200002_operator_events`)
+
+- **`[CI]` No frontend or MCP server CI steps** — TypeScript type errors in the dashboard and Jest failures in the MCP sidecar were undetected because CI only ran Rust checks. Added two new CI jobs: `frontend` (npm ci, tsc --noEmit, next build) and `mcp-server` (npm ci, tsc --noEmit, jest). Both use Node 22 with npm caching (`.github/workflows/ci.yml`)
+
+- **`[INFRA]` Docker-compose services had no resource limits** — Neither Postgres nor Redis had `mem_limit` or `cpus` set. A runaway query or memory leak could OOM the host. Added `deploy.resources.limits`: Postgres 512M / 1 CPU, Redis 128M / 0.5 CPU (`docker-compose.yml`)
+
+- **`[QUALITY]` Duplicate `db_serialization.rs` test file** — The same DB round-trip test existed in both `backend/tests/` (older version, 3-tuple `seed_agent`) and `crates/api/tests/` (refined version, typed enums, 2-tuple `seed_agent`). The two copies had already drifted — different assertion styles, different `recipient` JSON keys, different `seed_agent` signatures. Removed the older workspace-level copy and its now-unused `common/mod.rs` harness. The canonical version lives in `crates/api/tests/` (`backend/tests/db_serialization.rs`, `backend/tests/common/`)
+
+- **`[UX]` Provider health poll errors silent for 30 seconds** — The dashboard required 3 consecutive poll failures (30s at 10s intervals) before showing the "Unable to reach backend" warning. Reduced threshold to 2 failures (20s) — still filters single transient timeouts while surfacing sustained connectivity issues one tick sooner (`frontend/components/providers/provider-health-dashboard.tsx`)
+
+- **`[UX]` Spending limits displayed with hardcoded "SGD" currency** — The agent detail page appended "SGD" to all spending limit values regardless of the agent's actual currency. Misleading for multi-currency deployments. Removed the hardcoded currency suffix — values now display as raw amounts. Currency-aware display will be added when `AgentProfile` gains a `currency` field (`frontend/app/agents/[id]/page.tsx`)
+
+---
+
+## 0.12.3 — 2026-04-13
+
+**Production-Readiness Hardening — 5 Fixes (2 Critical, 3 High)**
+
+Full-codebase production-readiness audit covering all 6 Rust crates, Next.js frontend, MCP server, migrations, and CI. Audit scored backend at 8.5/10 and frontend at 7.5/10 pre-fix. These 5 targeted fixes close the critical and high-severity gaps identified. 416 backend tests pass, frontend production build clean, zero TypeScript errors.
+
+### Critical — Fixed
+
+- **`[BUG]` PolicyCondition case mismatch broke policy editor** — Rust serializes `PolicyCondition` variants with `#[serde(rename_all = "snake_case")]` producing JSON keys `all`, `any`, `not`, `field_check`. TypeScript type used PascalCase (`All`, `Any`, `Not`, `FieldCheck`), and `classify()` in `condition-tree.tsx` matched on PascalCase keys. Since JavaScript object key lookup is case-sensitive, every condition tree silently fell through to the "unknown" fallback — the entire policy editor was non-functional. Fixed the TypeScript discriminated union and `classify()` function to match snake_case (`frontend/lib/types.ts`, `frontend/components/policy/condition-tree.tsx`)
+
+- **`[SEC]` Audit ledger TRUNCATE protection missing** — The append-only `audit_log` table had row-level triggers blocking UPDATE and DELETE, but PostgreSQL's `TRUNCATE` bypasses row-level triggers entirely. A single `TRUNCATE audit_log` statement would silently wipe the entire immutable ledger. Added a `BEFORE TRUNCATE FOR EACH STATEMENT` trigger that raises an exception, closing the last mutation vector (`backend/migrations/20260413200001_audit_truncate_protection`)
+
+### High — Fixed
+
+- **`[SEC]` CORS permissive fallback on empty origins** — When `CORS_ALLOWED_ORIGINS` was unset, the server silently fell back to `CorsLayer::permissive()`, allowing any origin to call the API. Combined with an unset `OPERATOR_API_KEY` (which also uses a warn-and-continue pattern), a default-config deployment was wide open. Changed to fail-hard: the server now panics at startup if `CORS_ALLOWED_ORIGINS` is empty unless `ALLOW_PERMISSIVE_CORS=true` is explicitly set. Updated config doc comment to match (`backend/crates/api/src/lib.rs`, `backend/crates/api/src/config.rs`)
+
+- **`[CI]` No Postgres in CI — integration tests never ran** — CI ran `cargo test --workspace` with `SQLX_OFFLINE=true` but had no Postgres service container. The 15 integration tests in `backend/tests/db_serialization.rs` (which require `DATABASE_URL`) were effectively dead code in CI. Added a `postgres:16` service container with health checks, `sqlx-cli` installation, migration execution, and live `DATABASE_URL`. Test job now runs with `SQLX_OFFLINE=false` so sqlx compile-time checks also verify against the real schema (`.github/workflows/ci.yml`)
+
+- **`[SEC]` Missing `agentId` validation in policy server action** — `updatePolicy` in the agent policy page accepted `agentId: string` without format validation before passing it to the API client, unlike all other server actions which validate with `UUID_RE`. Added the same `UUID_RE` check with early return on mismatch, consistent with `agents/actions.ts` and `escalations/actions.ts` (`frontend/app/agents/[id]/policy/actions.ts`)
 
 ---
 

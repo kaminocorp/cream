@@ -4,25 +4,17 @@ import { DataTable, Column } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { AgentStatusBadge } from "@/components/shared/agent-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { getApiClient } from "@/lib/api";
-import { AgentStatus, AuditEntry, Currency, PolicyRule } from "@/lib/types";
+import { AuditEntry, Currency, PolicyRule } from "@/lib/types";
 import { formatAmount, formatDate } from "@/lib/utils";
 import { RotateKeyDialog } from "@/components/agents/rotate-key-dialog";
 import { BarChart2, Pencil } from "lucide-react";
 
 interface Props {
   params: Promise<{ id: string }>;
-}
-
-function statusBadge(status: AgentStatus) {
-  const classes: Record<AgentStatus, string> = {
-    active: "bg-green-100 text-green-800",
-    suspended: "bg-yellow-100 text-yellow-800",
-    revoked: "bg-red-100 text-red-800",
-  };
-  return <Badge className={classes[status]}>{status}</Badge>;
 }
 
 const txColumns: Column<AuditEntry>[] = [
@@ -93,7 +85,7 @@ export default async function AgentDetailPage({ params }: Props) {
           <span className="flex items-center gap-2">
             <span className="font-mono text-xs text-zinc-500">{agent.id}</span>
             <span>·</span>
-            {statusBadge(agent.status)}
+            <AgentStatusBadge status={agent.status} />
             <span>·</span>
             <span>profile: {profile.name}</span>
           </span>
@@ -120,7 +112,7 @@ export default async function AgentDetailPage({ params }: Props) {
                 </CardHeader>
                 <CardContent>
                   <div className="text-lg font-semibold">
-                    {value ? `${value} SGD` : "—"}
+                    {value ?? "—"}
                   </div>
                   <p className="mt-1 text-xs text-zinc-400">
                     {value ? "Limit" : "Not set"}

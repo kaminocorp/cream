@@ -28,7 +28,7 @@ export function formatDate(iso: string): string {
 
 // ISO 8601 → "3 minutes ago"
 export function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
+  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
   const mins = Math.floor(diff / 60_000);
   if (mins < 1)   return "just now";
   if (mins < 60)  return `${mins}m ago`;

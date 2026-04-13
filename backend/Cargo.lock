@@ -455,10 +455,8 @@ dependencies = [
  "cream-models",
  "rust_decimal",
  "serde",
- "serde_json",
  "thiserror",
  "tokio",
- "tracing",
  "uuid",
 ]
 

@@ -38,12 +38,32 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      - name: Dependency audit
+        run: cargo install cargo-audit && cargo audit
+
   test:
     name: Test
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cream
+          POSTGRES_PASSWORD: cream_ci
+          POSTGRES_DB: cream_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cream"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://cream:cream_ci@localhost:5432/cream_test
+      SQLX_OFFLINE: false
     steps:
       - uses: actions/checkout@v4
 
@@ -53,5 +73,59 @@ jobs:
         with:
           workspaces: backend
 
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres
+
+      - name: Run migrations
+        run: sqlx migrate run --source migrations
+
       - name: Run tests
         run: cargo test --workspace
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+  mcp-server:
+    name: MCP Server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/mcp-server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Test
+        run: npm test

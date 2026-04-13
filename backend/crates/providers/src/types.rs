@@ -2,9 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use cream_models::prelude::{
-    AgentId, CardControls, CardType, Currency, PaymentId, RailPreference, VirtualCardId,
-};
+use cream_models::prelude::{AgentId, CardControls, CardType, Currency, PaymentId, RailPreference};
 
 // ---------------------------------------------------------------------------
 // Normalized Payment Request — provider-agnostic input
@@ -77,14 +75,3 @@ pub struct CardConfig {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-// ---------------------------------------------------------------------------
-// Card Update Result
-// ---------------------------------------------------------------------------
-
-/// Lightweight result returned when querying a virtual card from a provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderCardStatus {
-    pub card_id: VirtualCardId,
-    pub provider_card_id: String,
-    pub status: cream_models::prelude::CardStatus,
-}

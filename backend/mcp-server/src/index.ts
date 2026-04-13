@@ -23,6 +23,10 @@ import { createApiClient } from "./api-client";
 import { registerAllTools } from "./tools";
 import { registerAllResources } from "./resources";
 import { registerAllPrompts } from "./prompts";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -30,7 +34,7 @@ async function main(): Promise<void> {
 
   const server = new McpServer({
     name: "cream-mcp-server",
-    version: "0.10.0",
+    version: pkg.version,
   });
 
   // Register all MCP capabilities.

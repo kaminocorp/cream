@@ -1,11 +1,3 @@
-import type { ReactNode } from "react";
-import { Header } from "@/components/layout/header";
-
-interface PageHeaderProps {
-  title: string;
-  description?: ReactNode;
-}
-
-export function PageHeader({ title, description }: PageHeaderProps) {
-  return <Header title={title} description={description} />;
-}
+// Re-export Header as PageHeader for backward compatibility.
+// No wrapper function — zero runtime overhead.
+export { Header as PageHeader } from "@/components/layout/header";

@@ -222,9 +222,10 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             className="w-[190px]"
             key={`from-${current.from}`}
             defaultValue={current.from ? isoToLocal(current.from) : ""}
-            onChange={(e) => {
+            onBlur={(e) => {
               const val = e.target.value;
-              pushParams({ from: val ? new Date(val).toISOString() : "" });
+              const iso = val ? new Date(val).toISOString() : "";
+              if (iso !== current.from) pushParams({ from: iso });
             }}
           />
         </div>
@@ -239,9 +240,10 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             className="w-[190px]"
             key={`to-${current.to}`}
             defaultValue={current.to ? isoToLocal(current.to) : ""}
-            onChange={(e) => {
+            onBlur={(e) => {
               const val = e.target.value;
-              pushParams({ to: val ? new Date(val).toISOString() : "" });
+              const iso = val ? new Date(val).toISOString() : "";
+              if (iso !== current.to) pushParams({ to: iso });
             }}
           />
         </div>

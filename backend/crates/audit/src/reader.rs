@@ -286,6 +286,15 @@ fn serialize_enum_to_string<T: serde::Serialize + std::fmt::Debug>(
         .map_err(AuditError::Serialization)
 }
 
+/// The 13-column SELECT list used across all audit reader queries. Centralised
+/// here so column additions are change-once-apply-everywhere — the tuple-based
+/// positional access (`row.0` through `row.12`) silently corrupts if any query
+/// has a different column order.
+const AUDIT_COLUMNS: &str = "id, timestamp, agent_id, agent_profile_id, payment_id, \
+    request, justification, policy_evaluation, \
+    routing_decision, provider_response, final_status, human_review, \
+    on_chain_tx_hash";
+
 /// Raw row returned by SQLx before we map it to the domain type.
 struct AuditRow {
     id: uuid::Uuid,
@@ -350,11 +359,7 @@ impl AuditReader for PgAuditReader {
         // value, preventing the fragile two-phase pattern where clause order
         // and bind order could silently diverge.
         let mut qb = QueryBuilder::new(
-            "SELECT id, timestamp, agent_id, agent_profile_id, payment_id, \
-             request, justification, policy_evaluation, \
-             routing_decision, provider_response, final_status, human_review, \
-             on_chain_tx_hash \
-             FROM audit_log WHERE true",
+            &format!("SELECT {AUDIT_COLUMNS} FROM audit_log WHERE true"),
         );
 
         if let Some(ref agent_id) = filters.agent_id {
@@ -474,11 +479,7 @@ impl AuditReader for PgAuditReader {
                 Option<String>,
             ),
         >(
-            "SELECT id, timestamp, agent_id, agent_profile_id, payment_id, \
-             request, justification, policy_evaluation, \
-             routing_decision, provider_response, final_status, human_review, \
-             on_chain_tx_hash \
-             FROM audit_log WHERE id = $1",
+            &format!("SELECT {AUDIT_COLUMNS} FROM audit_log WHERE id = $1"),
         )
         .bind(*id.as_uuid())
         .fetch_optional(&self.pool)
@@ -527,11 +528,10 @@ impl AuditReader for PgAuditReader {
                 Option<String>,
             ),
         >(
-            "SELECT id, timestamp, agent_id, agent_profile_id, payment_id, \
-             request, justification, policy_evaluation, \
-             routing_decision, provider_response, final_status, human_review, \
-             on_chain_tx_hash \
-             FROM audit_log WHERE payment_id = $1 ORDER BY timestamp DESC, id DESC LIMIT 1000",
+            &format!(
+                "SELECT {AUDIT_COLUMNS} FROM audit_log \
+                 WHERE payment_id = $1 ORDER BY timestamp DESC, id DESC LIMIT 1000"
+            ),
         )
         .bind(*payment_id.as_uuid())
         .fetch_all(&self.pool)

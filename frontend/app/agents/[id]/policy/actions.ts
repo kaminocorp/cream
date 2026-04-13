@@ -8,6 +8,8 @@ export type ActionResult =
   | { ok: true }
   | { ok: false; message: string };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface UpdateProfileInput {
   max_per_transaction?: string | null;
   max_daily_spend?: string | null;
@@ -23,6 +25,9 @@ export async function updatePolicy(
   agentId: string,
   input: UpdateProfileInput,
 ): Promise<ActionResult> {
+  if (!UUID_RE.test(agentId)) {
+    return { ok: false, message: "Invalid agent ID format" };
+  }
   try {
     const api = getApiClient();
     await api.updateAgentPolicy(agentId, input);

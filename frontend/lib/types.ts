@@ -162,10 +162,10 @@ export interface PolicyRule {
 }
 
 export type PolicyCondition =
-  | { All: PolicyCondition[] }
-  | { Any: PolicyCondition[] }
-  | { Not: PolicyCondition }
-  | { FieldCheck: { field: string; op: string; value: unknown } };
+  | { all: PolicyCondition[] }
+  | { any: PolicyCondition[] }
+  | { not: PolicyCondition }
+  | { field_check: { field: string; op: string; value: unknown } };
 
 export interface EscalationConfig {
   channel: "slack" | "email" | "webhook" | "dashboard";

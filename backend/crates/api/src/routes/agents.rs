@@ -291,6 +291,14 @@ pub async fn update_policy(
     .execute(&state.db)
     .await?;
 
+    log_operator_event(
+        &state.db,
+        "policy_updated",
+        &agent_id,
+        serde_json::json!({ "profile_id": profile_id.to_string() }),
+    )
+    .await;
+
     Ok(Json(serde_json::json!({ "status": "updated" })))
 }
 
@@ -298,10 +306,36 @@ pub async fn update_policy(
 // Agent lifecycle handlers — operator-only
 // ---------------------------------------------------------------------------
 
-// TODO(Phase 16-A): Agent lifecycle mutations (create, update, rotate-key)
-// should write to the audit log. The current audit schema is payment-centric
-// (AuditEntry requires a payment_id); Phase 16-A will introduce an
-// OperatorEvent table for non-payment administrative actions.
+/// Record an operator event in the `operator_events` append-only log.
+///
+/// Best-effort: if the INSERT fails (e.g. DB issue), the mutation itself
+/// has already committed, so we log the failure rather than unwinding the
+/// business operation. Audit writes should never block successful mutations.
+async fn log_operator_event(
+    db: &sqlx::PgPool,
+    event_type: &str,
+    target_agent_id: &AgentId,
+    details: serde_json::Value,
+) {
+    let result = sqlx::query(
+        "INSERT INTO operator_events (event_type, target_agent_id, details)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(event_type)
+    .bind(target_agent_id.as_uuid())
+    .bind(&details)
+    .execute(db)
+    .await;
+
+    if let Err(e) = result {
+        tracing::error!(
+            event_type = event_type,
+            agent_id = %target_agent_id,
+            error = %e,
+            "failed to write operator event — mutation succeeded but audit write failed"
+        );
+    }
+}
 
 /// `GET /v1/agents` — list all agents. Operator-only.
 ///
@@ -409,7 +443,19 @@ pub async fn create_agent(
     .await?;
 
     // Fetch the just-inserted row to populate the response with DB timestamps.
-    let summary = load_agent_summary(&state, AgentId::from_uuid(agent_id)).await?;
+    let created_id = AgentId::from_uuid(agent_id);
+    let summary = load_agent_summary(&state, created_id).await?;
+
+    log_operator_event(
+        &state.db,
+        "agent_created",
+        &created_id,
+        serde_json::json!({
+            "name": trimmed_name,
+            "profile_id": body.profile_id.to_string(),
+        }),
+    )
+    .await;
 
     Ok(Json(CreateAgentResponse {
         agent: summary,
@@ -497,6 +543,24 @@ pub async fn update_agent(
         return Err(ApiError::NotFound(format!("agent {agent_id}")));
     }
 
+    let mut details = serde_json::Map::new();
+    if let Some(ref name) = body.name {
+        details.insert("name".into(), serde_json::json!(name.trim()));
+    }
+    if let Some(status) = body.status {
+        details.insert("status".into(), serde_json::json!(status));
+    }
+    if let Some(profile_id) = body.profile_id {
+        details.insert("profile_id".into(), serde_json::json!(profile_id.to_string()));
+    }
+    log_operator_event(
+        &state.db,
+        "agent_updated",
+        &agent_id,
+        serde_json::Value::Object(details),
+    )
+    .await;
+
     let summary = load_agent_summary(&state, agent_id).await?;
     Ok(Json(summary))
 }
@@ -528,6 +592,14 @@ pub async fn rotate_agent_key(
     if rows_affected == 0 {
         return Err(ApiError::NotFound(format!("agent {agent_id}")));
     }
+
+    log_operator_event(
+        &state.db,
+        "agent_key_rotated",
+        &agent_id,
+        serde_json::json!({}),
+    )
+    .await;
 
     Ok(Json(RotateKeyResponse {
         agent_id,
