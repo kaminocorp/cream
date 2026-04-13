@@ -109,7 +109,7 @@ impl<'de> Deserialize<'de> for Justification {
 /// The `Other` variant allows extensibility while keeping the common cases
 /// strongly typed. The `Other` string is bounded to [`MAX_CATEGORY_OTHER_LEN`]
 /// characters on deserialization to prevent audit log bloat.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentCategory {
     SaasSubscription,

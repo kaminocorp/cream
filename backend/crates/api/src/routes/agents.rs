@@ -581,13 +581,14 @@ pub async fn rotate_agent_key(
 
     let (plaintext, hash) = generate_api_key();
 
-    let rows_affected =
-        sqlx::query("UPDATE agents SET api_key_hash = $1, updated_at = now() WHERE id = $2")
-            .bind(&hash)
-            .bind(agent_id.as_uuid())
-            .execute(&state.db)
-            .await?
-            .rows_affected();
+    let rows_affected = sqlx::query(
+        "UPDATE agents SET api_key_hash = $1, key_rotated_at = now(), updated_at = now() WHERE id = $2",
+    )
+    .bind(&hash)
+    .bind(agent_id.as_uuid())
+    .execute(&state.db)
+    .await?
+    .rows_affected();
 
     if rows_affected == 0 {
         return Err(ApiError::NotFound(format!("agent {agent_id}")));

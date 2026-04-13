@@ -228,6 +228,7 @@ pub async fn login(
                 ApiError::Internal(anyhow::anyhow!("authentication service temporarily unavailable"))
             })?;
         if locked.is_some() {
+            ::metrics::counter!(crate::metrics::AUTH_ATTEMPTS_TOTAL, "result" => "locked").increment(1);
             tracing::warn!(email = %email, "login attempt on locked account");
             return Err(ApiError::RateLimited {
                 retry_after_secs: LOCKOUT_DURATION_SECS as u64,
@@ -253,6 +254,7 @@ pub async fn login(
                 .unwrap_or(()); // EXPIRE failure is non-critical: key auto-expires on TTL miss
         }
         if count > MAX_LOGIN_ATTEMPTS {
+            ::metrics::counter!(crate::metrics::AUTH_ATTEMPTS_TOTAL, "result" => "rate_limited").increment(1);
             tracing::warn!(email = %email, count, "login rate limit exceeded");
             return Err(ApiError::RateLimited {
                 retry_after_secs: LOGIN_RATE_LIMIT_WINDOW_SECS as u64,
@@ -291,6 +293,7 @@ pub async fn login(
 
     // Verify password.
     if !verify_password(&body.password, &stored_hash)? {
+        ::metrics::counter!(crate::metrics::AUTH_ATTEMPTS_TOTAL, "result" => "failure").increment(1);
         // Increment consecutive failure counter for lockout.
         // These Redis writes are best-effort: if Redis is down, we still reject
         // the bad password (the login fails regardless). The risk is that
@@ -325,7 +328,10 @@ pub async fn login(
         return Err(ApiError::Unauthorized);
     }
 
-    // Login succeeded — clear failure counter.
+    // Login succeeded.
+    ::metrics::counter!(crate::metrics::AUTH_ATTEMPTS_TOTAL, "result" => "success").increment(1);
+
+    // Clear failure counter.
     {
         let mut conn = state.redis.clone();
         let _: () = redis::cmd("DEL")
@@ -666,7 +672,7 @@ mod tests {
             webhook_max_retries: 5,
             jwt_secret: Some("a".repeat(32)),
             jwt_access_ttl_secs: 900,
-            jwt_refresh_ttl_secs: 604800, slack_bot_token: None, slack_channel_id: None, slack_signing_secret: None, smtp_host: None, smtp_port: 587, smtp_username: None, smtp_password: None, email_from: None, escalation_email_to: None, resend_api_key: None, dashboard_base_url: None, provider_key_encryption_secret: None,
+            jwt_refresh_ttl_secs: 604800, slack_bot_token: None, slack_channel_id: None, slack_signing_secret: None, smtp_host: None, smtp_port: 587, smtp_username: None, smtp_password: None, email_from: None, escalation_email_to: None, resend_api_key: None, dashboard_base_url: None, provider_key_encryption_secret: None, log_format: crate::config::LogFormat::Pretty, log_level: "info".to_string(), log_bodies: false, otel_enabled: false, otel_exporter_endpoint: None, otel_service_name: "cream-api-test".to_string(), metrics_enabled: false, metrics_port: 9090, tls_cert_path: None, tls_key_path: None, hsts_max_age: 31_536_000, credential_rotation_warn_days: 90, audit_export_s3_bucket: None, audit_export_s3_region: None, audit_export_s3_prefix: None,
         };
 
         let token = issue_access_token(
@@ -705,7 +711,7 @@ mod tests {
             webhook_max_retries: 5,
             jwt_secret: Some("a".repeat(32)),
             jwt_access_ttl_secs: 900,
-            jwt_refresh_ttl_secs: 604800, slack_bot_token: None, slack_channel_id: None, slack_signing_secret: None, smtp_host: None, smtp_port: 587, smtp_username: None, smtp_password: None, email_from: None, escalation_email_to: None, resend_api_key: None, dashboard_base_url: None, provider_key_encryption_secret: None,
+            jwt_refresh_ttl_secs: 604800, slack_bot_token: None, slack_channel_id: None, slack_signing_secret: None, smtp_host: None, smtp_port: 587, smtp_username: None, smtp_password: None, email_from: None, escalation_email_to: None, resend_api_key: None, dashboard_base_url: None, provider_key_encryption_secret: None, log_format: crate::config::LogFormat::Pretty, log_level: "info".to_string(), log_bodies: false, otel_enabled: false, otel_exporter_endpoint: None, otel_service_name: "cream-api-test".to_string(), metrics_enabled: false, metrics_port: 9090, tls_cert_path: None, tls_key_path: None, hsts_max_age: 31_536_000, credential_rotation_warn_days: 90, audit_export_s3_bucket: None, audit_export_s3_region: None, audit_export_s3_prefix: None,
         };
 
         let token = issue_access_token(
@@ -741,7 +747,7 @@ mod tests {
             webhook_max_retries: 5,
             jwt_secret: Some("a".repeat(32)),
             jwt_access_ttl_secs: -120, // expired 2 minutes ago (exceeds default 60s leeway)
-            jwt_refresh_ttl_secs: 604800, slack_bot_token: None, slack_channel_id: None, slack_signing_secret: None, smtp_host: None, smtp_port: 587, smtp_username: None, smtp_password: None, email_from: None, escalation_email_to: None, resend_api_key: None, dashboard_base_url: None, provider_key_encryption_secret: None,
+            jwt_refresh_ttl_secs: 604800, slack_bot_token: None, slack_channel_id: None, slack_signing_secret: None, smtp_host: None, smtp_port: 587, smtp_username: None, smtp_password: None, email_from: None, escalation_email_to: None, resend_api_key: None, dashboard_base_url: None, provider_key_encryption_secret: None, log_format: crate::config::LogFormat::Pretty, log_level: "info".to_string(), log_bodies: false, otel_enabled: false, otel_exporter_endpoint: None, otel_service_name: "cream-api-test".to_string(), metrics_enabled: false, metrics_port: 9090, tls_cert_path: None, tls_key_path: None, hsts_max_age: 31_536_000, credential_rotation_warn_days: 90, audit_export_s3_bucket: None, audit_export_s3_region: None, audit_export_s3_prefix: None,
         };
 
         let token = issue_access_token(

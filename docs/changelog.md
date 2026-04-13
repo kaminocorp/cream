@@ -1,5 +1,14 @@
 # Changelog
 
+- [0.21.8](#0218--2026-04-13) — Post-Phase-17 hardening: 7 fixes — 4 uninstrumented metrics wired, PII redaction middleware, write_audit tracing span, OpenAPI PATCH alert body — 533 tests
+- [0.21.7](#0217--2026-04-13) — Phase 17-H: documentation — 7 Markdown guides, API reference (39 endpoints), 3 doc coverage validation tests, 523 tests — **Phase 17 complete**
+- [0.21.6](#0216--2026-04-13) — Phase 17-G: alerting rules engine — configurable alert rules, background evaluator, 4 built-in presets, CRUD endpoints, Slack/email dispatch, 520 tests
+- [0.21.5](#0215--2026-04-13) — Phase 17-F: OpenAPI 3.1 specification — 34 operations, Swagger UI at `/docs`, 11 model enums derive `ToSchema`, builder API, 515 tests
+- [0.21.4](#0214--2026-04-13) — Phase 17-E: audit log export — CSV/NDJSON content negotiation, async S3 export pipeline, `audit_exports` table, 10K row sync cap, 510 tests
+- [0.21.3](#0213--2026-04-13) — Phase 17-D: security hardening — 7 security headers, optional TLS via rustls, `key_rotated_at` credential age tracking, background rotation monitor, 500 tests
+- [0.21.2](#0212--2026-04-13) — Phase 17-C: Prometheus metrics — 13 metrics on port 9090, orchestrator + webhook + auth + rate limiter instrumentation, `metrics` crate facade, 489 tests
+- [0.21.1](#0211--2026-04-13) — Phase 17-B: OpenTelemetry distributed tracing — OTLP gRPC export, layered subscriber, graceful shutdown, route selector instrumented, 483 tests
+- [0.21.0](#0210--2026-04-13) — Phase 17-A: structured logging — JSON/pretty dual-mode, request_id/payment_id/agent_id correlation, orchestrator + webhook `#[instrument]`, 478 tests
 - [0.20.4](#0204--2026-04-13) — 5 medium-priority fixes: HTTPS-only webhooks, malformed event filter fail-closed, refreshSession claim validation, real agent names in reminder notifications, typed PolicyTemplateRule — 472 tests
 - [0.20.3](#0203--2026-04-13) — 5 high-priority fixes: operator_events schema widened for auth audit trail, explicit JWT HS256 validation, escalation timeout from DB config, dashboard deep links in notifications, atomic first-operator registration — 472 tests
 - [0.20.2](#0202--2026-04-13) — 3 security blockers fixed: constant-time login (anti-enumeration), Redis rate limiter fail-closed, policy template seed rule_type correction — 472 tests
@@ -75,6 +84,333 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.8 — 2026-04-13
+
+**Post-Phase-17 Hardening**
+
+7 targeted fixes from comprehensive Phase 17 review: 4 uninstrumented metrics wired to real data, PII redaction middleware, 1 missing tracing span, 1 OpenAPI spec gap. 533 backend tests pass (up from 525). Zero clippy warnings.
+
+### Metrics Fixes
+
+- **`cream_escalation_pending_count` gauge instrumented** — New `update_escalation_pending_gauge()` queries `SELECT COUNT(*) FROM payments WHERE status = 'pending_approval'` and sets the gauge on every tick of the escalation timeout monitor. Previously defined but never recorded — operators had no way to monitor queue depth via Prometheus. (`backend/crates/api/src/orchestrator.rs`)
+
+- **`cream_webhook_delivery_duration_seconds` histogram instrumented** — `deliver_to_endpoint()` now times the HTTP POST call with `Instant::now()` and records elapsed seconds to the histogram after each delivery attempt. Previously the histogram was defined but never written to. (`backend/crates/api/src/webhook_worker.rs`)
+
+- **`cream_redis_connection_errors_total` counter instrumented** — Redis connection errors now increment the counter at 3 sites: rate limiter fail-open path, webhook queue BRPOP error, and webhook enqueue LPUSH error. Previously Redis health was invisible to Prometheus. (`backend/crates/api/src/middleware/rate_limit.rs`, `backend/crates/api/src/webhook_worker.rs`)
+
+- **`cream_circuit_breaker_state` gauge added and instrumented** — New metric (14 → 15 total) with `provider` and `state` labels. `emit_circuit_breaker_gauge()` reads circuit breaker state and emits after every `record_success()` and `record_failure()` in `execute_with_failover()` (3 callsites). (`backend/crates/api/src/metrics.rs`, `backend/crates/api/src/orchestrator.rs`)
+
+### Security Fixes
+
+- **PII redaction middleware** — New `log_bodies_with_redaction` middleware recursively walks JSON request/response bodies and replaces values of sensitive field names (`password`, `api_key`, `secret`, `refresh_token`, `api_key_hash`, `token`) with `"[REDACTED]"`. Case-insensitive matching. Gated behind `LOG_BODIES=true` (default: `false`) — zero overhead when disabled. Non-JSON bodies logged as `"[non-JSON body]"` placeholder. (`backend/crates/api/src/middleware/logging.rs`, `backend/crates/api/src/config.rs`)
+
+### Observability Fixes
+
+- **`write_audit()` tracing span** — Added `#[tracing::instrument(skip_all, fields(payment_id, agent_id))]` to the `write_audit()` orchestrator method. The audit write pipeline step now appears as an explicit span in distributed traces. (`backend/crates/api/src/orchestrator.rs`)
+
+### Documentation Fixes
+
+- **OpenAPI PATCH alert request body** — Added `request_body` definition to the `PATCH /v1/alerts/{id}` operation in the OpenAPI spec. Swagger UI now shows what fields the update endpoint accepts. (`backend/crates/api/src/openapi.rs`)
+
+### Tests
+
+8 new tests (total: 533):
+- `redacts_password_field` — password values replaced with `[REDACTED]`
+- `redacts_api_key_field` — api_key values replaced
+- `redacts_nested_secret` — nested JSON objects redacted
+- `redacts_refresh_token` — refresh_token values replaced
+- `redacts_in_arrays` — array elements with sensitive fields redacted
+- `case_insensitive_field_matching` — `Password`, `API_KEY` etc. all matched
+- `non_json_bytes_returns_placeholder` — non-JSON returns `[non-JSON body]`
+- `empty_object_unchanged` — empty `{}` passes through unmodified
+
+---
+
+## 0.21.7 — 2026-04-13
+
+**Phase 17-H: Documentation**
+
+Comprehensive documentation covering operators, agent developers, and DevOps — 7 Markdown guides plus API reference. Three `include_str!`-based validation tests ensure docs stay in sync with code: adding an env var, route, or policy rule type without updating docs fails the build. 523 backend tests pass (up from 520). Zero clippy warnings. **Phase 17 is now fully complete (A through H).**
+
+### New Documentation
+
+| File | Audience | Content |
+|------|----------|---------|
+| `docs/guides/operator-setup.md` | Operators | Prerequisites, first-run setup, database init, first operator registration, first agent, test payment |
+| `docs/guides/self-hosting.md` | DevOps | Docker Compose, Kubernetes, reverse proxy, **complete env var reference (40+ variables)**, backups, scaling |
+| `docs/api-reference.md` | Developers | Full endpoint table (39 endpoints), authentication, pagination, rate limiting, error codes, request tracing |
+| `docs/guides/agent-integration.md` | Agent devs | Registration flow, payment lifecycle, structured justification format, idempotency, error handling, Python example |
+| `docs/guides/mcp-integration.md` | Agent devs | Stdio/HTTP+SSE setup, 6 tools + 3 resources + 2 prompts, Claude Desktop config, LangChain integration |
+| `docs/guides/webhook-integration.md` | Developers | Event types, HMAC-SHA256 verification (Node.js + Python examples), retry policy, delivery logs |
+| `docs/guides/policy-authoring.md` | Operators | All 12 rule types with JSON examples, condition trees, evaluation order, 3 built-in templates, best practices |
+
+### Tests
+
+3 new tests (total: 523):
+- `env_vars_documented_in_self_hosting_guide` — every `env::var("...")` in config.rs appears in self-hosting.md
+- `routes_documented_in_api_reference` — every `.route("/path", ...)` in lib.rs appears in api-reference.md
+- `policy_rule_types_documented` — all 12 registered rule types appear in policy-authoring.md
+
+---
+
+## 0.21.6 — 2026-04-13
+
+**Phase 17-G: Alerting Rules Engine**
+
+Configurable alert rules engine with background evaluation. Operators define rules specifying a Prometheus metric, comparison condition, and threshold. A background worker evaluates all enabled rules every 60 seconds against the metrics registry. When a threshold breaches and the cooldown has elapsed, notifications are dispatched via existing Slack/email infrastructure. 4 built-in preset rules seeded on migration. 520 backend tests pass (up from 515). Zero clippy warnings.
+
+### New Features
+
+- **Alert CRUD endpoints** — `GET/POST /v1/alerts` (list + create), `PATCH/DELETE /v1/alerts/{id}` (update + soft-delete), `GET /v1/alerts/history` (recently fired alerts, last 100). All operator-authenticated. (`backend/crates/api/src/routes/alerts.rs`)
+
+- **Background evaluation worker** — Fetches enabled rules, calls `PrometheusHandle::render()` for current metric values, parses Prometheus exposition text, evaluates each rule's condition (`gt`/`lt`/`gte`/`lte`/`eq`) against its threshold, checks cooldown, fires notification, updates `last_fired_at`. (`backend/crates/api/src/alert_engine.rs`)
+
+- **4 built-in preset rules** — Seeded on migration: provider error spike (`cream_provider_errors_total > 10`), payment failure rate (`cream_payments_total > 15`), escalation queue backup (`cream_escalation_pending_count > 10`), rate limit saturation (`cream_rate_limit_hits_total > 50`). All enabled by default with 1-hour cooldown. (`backend/migrations/20260414200011_create_alert_rules.up.sql`)
+
+- **`send_alert()` notification method** — Added `AlertNotification` type and `send_alert()` to `NotificationSender` trait. Reuses existing Slack/email notification infrastructure — zero new plumbing. (`backend/crates/api/src/notifications/mod.rs`)
+
+- **Metrics handle in AppState** — `init_metrics()` now returns a `PrometheusHandle` stored in `AppState` for the alert engine to read current metric values. (`backend/crates/api/src/state.rs`, `backend/crates/api/src/metrics.rs`)
+
+### Migration
+
+- New `alert_rules` table: `id`, `name`, `description`, `metric`, `condition`, `threshold`, `window_seconds`, `cooldown_seconds`, `channels` (JSONB), `enabled`, `last_fired_at`
+- 4 preset rules seeded
+
+### Tests
+
+5 new tests (total: 520):
+- `alert_condition_gt`, `alert_condition_lt`, `alert_condition_gte` — comparison evaluation
+- `alert_condition_from_str` — all 5 operators + invalid
+- `read_metric_value_parses_prometheus_text` — parses multi-line exposition, sums labeled variants
+
+---
+
+## 0.21.5 — 2026-04-13
+
+**Phase 17-F: OpenAPI 3.1 Specification**
+
+Complete OpenAPI 3.1 spec at `GET /v1/openapi.json` and interactive Swagger UI at `/docs`. 34 API operations across 11 endpoint groups documented with summaries, parameters, request/response schemas, and security schemes. Built using utoipa's builder API (single source of truth in `openapi.rs`) rather than per-handler annotations. 515 backend tests pass (up from 510). Zero clippy warnings.
+
+### New Features
+
+- **OpenAPI spec endpoint** — `GET /v1/openapi.json` serves the full spec as JSON (unauthenticated). Built at startup — zero per-request overhead. (`backend/crates/api/src/openapi.rs`)
+
+- **Swagger UI** — Interactive API documentation at `/docs` (unauthenticated). Loads spec from `/v1/openapi.json`. Developers can explore and test the API directly from the browser. (`backend/crates/api/src/lib.rs`)
+
+- **34 operations across 11 tags** — Payments (4), Cards (3), Agents (3), Policies (2), Audit (3), Webhooks (5), Auth (5), Settings (2), Templates (3), Providers (1), Integrations (1). Two security schemes: `agent_api_key` (Bearer token) and `operator_jwt` (Bearer JWT).
+
+- **11 model enums derive `ToSchema`** — `PaymentStatus`, `Currency`, `RailPreference`, `AgentStatus`, `CardType`, `CardStatus`, `PolicyAction`, `ComparisonOp`, `EscalationChannel`, `CircuitState`, `RecipientType`, `PaymentCategory` — available as named schema types in the spec. (`backend/crates/models/src/*.rs`)
+
+### New Dependencies
+
+- `utoipa` v5.4, `utoipa-swagger-ui` v9
+
+### Tests
+
+5 new tests (total: 515):
+- `spec_is_valid_json` — spec serializes and re-parses as valid JSON
+- `spec_has_correct_version` — version matches 0.21.5
+- `spec_covers_all_route_groups` — all 9 endpoint groups present
+- `spec_has_security_schemes` — agent_api_key and operator_jwt defined
+- `spec_path_count_covers_all_endpoints` — at least 20 unique paths
+
+---
+
+## 0.21.4 — 2026-04-13
+
+**Phase 17-E: Audit Log Export (CSV, NDJSON, S3)**
+
+Content negotiation on `GET /v1/audit`: JSON (default, unchanged), CSV, or NDJSON via `Accept` header. Synchronous exports capped at 10K rows. For bulk compliance exports, a new async pipeline via `POST /v1/audit/export` streams audit entries in 1000-row chunks and uploads to S3. Export jobs tracked in `audit_exports` table. 510 backend tests pass (up from 500). Zero clippy warnings.
+
+### New Features
+
+- **Content negotiation on `GET /v1/audit`** — `Accept: text/csv` returns flattened 10-column CSV (entry_id, timestamp, agent_id, payment_id, amount, currency, status, decision, provider, justification_summary). `Accept: application/x-ndjson` returns one full `AuditEntry` JSON per line. Both capped at 10K rows — exceeding returns `413 Payload Too Large` directing to async export. `Accept: application/json` unchanged. (`backend/crates/api/src/routes/audit.rs`)
+
+- **Async S3 export pipeline** — `POST /v1/audit/export` creates a background job that streams audit rows in 1000-row chunks, formats as CSV or NDJSON, and uploads to S3 via `aws-sdk-s3`. Returns `202 Accepted` with `export_id`. Poll status via `GET /v1/audit/exports/{id}`. (`backend/crates/api/src/audit_export.rs`, `backend/crates/api/src/routes/audit_export.rs`)
+
+### Migration
+
+- New `audit_exports` table: `id`, `status` (pending/running/completed/failed), `format`, `filters` (JSONB), `destination` (JSONB), `rows_exported`, `s3_key`, `error_message`, `created_at`, `completed_at`
+
+### New Dependencies
+
+- `csv`, `aws-config`, `aws-sdk-s3`
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUDIT_EXPORT_S3_BUCKET` | unset | S3 bucket for audit exports |
+| `AUDIT_EXPORT_S3_REGION` | unset | AWS region for S3 bucket |
+| `AUDIT_EXPORT_S3_PREFIX` | unset | Key prefix for S3 exports |
+
+### Tests
+
+10 new tests (total: 510):
+- `parse_accept_defaults_to_json`, `parse_accept_csv`, `parse_accept_ndjson`, `parse_accept_json_explicit` — content negotiation
+- `csv_escapes_commas_and_quotes_in_justification` — RFC 4180 escaping
+- `ndjson_produces_one_line_per_entry` — line-delimited validation
+- `csv_header_row_has_correct_columns` — 10-column header
+- `sync_export_row_cap_is_10000` — cap constant
+- `export_format_from_str_loose` — case-insensitive format parsing
+- `export_format_round_trips` — as_str/from_str_loose round-trip
+
+---
+
+## 0.21.3 — 2026-04-13
+
+**Phase 17-D: Security Hardening (TLS, Headers, Credential Rotation)**
+
+Defense-in-depth security hardening: 7 security response headers on every HTTP response, optional TLS termination via rustls, agent API key freshness tracking via `key_rotated_at` column, and a background credential age monitor that warns when keys exceed a configurable threshold. All features opt-in or with safe defaults. 500 backend tests pass (up from 489). Zero clippy warnings.
+
+### New Features
+
+- **Security response headers** — Tower middleware applied as outermost layer: `Strict-Transport-Security` (configurable `max-age`, default 1 year), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `X-XSS-Protection: 0`, `Referrer-Policy: strict-origin-when-cross-origin`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`. Applied to every response including 404s and CORS preflight. (`backend/crates/api/src/middleware/security_headers.rs`)
+
+- **Optional TLS/HTTPS** — When `TLS_CERT_PATH` and `TLS_KEY_PATH` are both set, the server starts with HTTPS via `axum-server` + rustls with 10-second graceful shutdown drain. Config validation: setting one without the other is a hard error. (`backend/crates/api/src/main.rs`)
+
+- **Agent key rotation tracking** — New `agents.key_rotated_at TIMESTAMPTZ` column. `rotate-key` handler now sets `key_rotated_at = now()`. Backfill migration sets existing agents to `created_at`. (`backend/migrations/20260414200009_add_agents_key_rotated_at.up.sql`)
+
+- **Credential age monitor** — Background task queries active agents where `key_rotated_at` exceeds `CREDENTIAL_ROTATION_WARN_DAYS` (default: 90). Logs structured warning per stale agent and increments `cream_credential_age_warning` counter (13 → 14 total metrics). Capped at 100 agents per scan. (`backend/crates/api/src/orchestrator.rs`)
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TLS_CERT_PATH` | unset | Path to TLS certificate (PEM) |
+| `TLS_KEY_PATH` | unset | Path to TLS private key (PEM) |
+| `HSTS_MAX_AGE` | `31536000` | HSTS max-age in seconds (1 year) |
+| `CREDENTIAL_ROTATION_WARN_DAYS` | `90` | Warn when agent key exceeds this age |
+
+### New Dependencies
+
+- `axum-server` v0.7 with `tls-rustls` feature
+
+### Tests
+
+11 new tests (total: 500):
+- `tls_defaults_to_none`, `tls_cert_without_key_rejected`, `tls_key_without_cert_rejected`, `tls_both_paths_accepted` — TLS config
+- `hsts_max_age_defaults_to_one_year`, `hsts_max_age_configurable` — HSTS config
+- `credential_rotation_warn_days_defaults_to_90`, `credential_rotation_warn_days_configurable` — rotation config
+- `security_headers_present_on_response` — all 7 headers with correct values
+- `hsts_max_age_configurable` (middleware) — custom max-age in header
+- `security_headers_on_404` — headers present on error responses
+
+---
+
+## 0.21.2 — 2026-04-13
+
+**Phase 17-C: Prometheus Metrics**
+
+13 Prometheus metrics exposed on a separate HTTP port (default 9090) covering payment throughput, policy decisions, provider health, webhook delivery, rate limiting, and authentication. Uses `metrics` crate facade with `metrics-exporter-prometheus` backend — when disabled, all macro calls are zero-overhead no-ops. 489 backend tests pass (up from 483). Zero clippy warnings.
+
+### New Features
+
+- **13 Prometheus metrics** — `cream_payments_total` (counter, by status/provider/rail), `cream_payment_duration_seconds` (histogram), `cream_policy_evaluation_duration_seconds` (histogram), `cream_policy_decision_total` (counter, by action), `cream_provider_request_duration_seconds` (histogram), `cream_provider_errors_total` (counter, by provider/retryable), `cream_webhook_deliveries_total` (counter, by status), `cream_webhook_delivery_duration_seconds` (histogram, reserved), `cream_webhook_retries_total` (counter), `cream_rate_limit_hits_total` (counter), `cream_auth_attempts_total` (counter, by result), `cream_escalation_pending_count` (gauge, reserved), `cream_redis_connection_errors_total` (counter, reserved). (`backend/crates/api/src/metrics.rs`)
+
+- **Orchestrator instrumentation** — 7 callsites: policy evaluation duration + decision, payment settlement by status/provider/rail, provider request duration, provider errors by retryability. (`backend/crates/api/src/orchestrator.rs`)
+
+- **Webhook worker instrumentation** — 4 callsites: delivery outcome (delivered/exhausted/failed), retry counter. (`backend/crates/api/src/webhook_worker.rs`)
+
+- **Rate limiter + auth instrumentation** — Rate limit hit counter, auth attempt counter by result (success/failure/locked/rate_limited). (`backend/crates/api/src/middleware/rate_limit.rs`, `backend/crates/api/src/routes/auth.rs`)
+
+- **Separate metrics port** — HTTP listener on port 9090 (configurable via `METRICS_PORT`) serving `/metrics` in Prometheus text format. Firewallable to internal-only access. (`backend/crates/api/src/main.rs`)
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `METRICS_ENABLED` | `true` | Enable Prometheus metrics endpoint |
+| `METRICS_PORT` | `9090` | Port for the `/metrics` HTTP listener |
+
+### New Dependencies
+
+- `metrics` 0.24, `metrics-exporter-prometheus` 0.16
+
+### Tests
+
+6 new tests (total: 489):
+- `metric_names_use_cream_prefix` — all 13 names start with `cream_`
+- `metric_names_are_unique` — no duplicate metric names
+- `metric_count_is_13` — guard test catches unregistered new metrics
+- `metrics_enabled_by_default` — defaults to true, port 9090
+- `metrics_disabled_explicit` — `METRICS_ENABLED=false` parsed correctly
+- `metrics_port_configurable` — custom port override
+
+---
+
+## 0.21.1 — 2026-04-13
+
+**Phase 17-B: OpenTelemetry Distributed Tracing**
+
+OTLP-compatible distributed tracing exportable to Jaeger, Datadog, Grafana Tempo, or Honeycomb. Gated behind `OTEL_ENABLED=true` (default false) — zero overhead when disabled. Layered `Registry` subscriber architecture composing OTEL alongside existing JSON/pretty fmt layers. Graceful shutdown with SIGINT/SIGTERM handling flushes in-flight traces. 483 backend tests pass (up from 478). Zero clippy warnings.
+
+### New Features
+
+- **Layered subscriber architecture** — Restructured from single `fmt().init()` to composable `registry().with(filter).with(fmt_layer).with(otel_layer)` stack. When OTEL is disabled, the optional layer is `None` (zero overhead). (`backend/crates/api/src/main.rs`)
+
+- **OTLP gRPC exporter** — Batch-mode span export via `tonic` to any OTLP collector. Default batch settings (512 spans, 5s flush). Tracer provider registered globally and flushed on shutdown via `Drop`. (`backend/crates/api/src/main.rs`)
+
+- **Graceful shutdown** — `shutdown_signal()` awaits SIGINT/SIGTERM, then `axum::serve::with_graceful_shutdown` drains connections and flushes traces before exit. Previously the server exited immediately on Ctrl+C. (`backend/crates/api/src/main.rs`)
+
+- **Route selector instrumented** — `RouteSelector::select()` gains `#[tracing::instrument]` with currency and rail preference fields. Creates a `select` span in the trace tree. (`backend/crates/router/src/selector.rs`)
+
+- **Full span tree per payment** — `http_request` → `process` (payment_id, agent_id, amount, currency) → `validate_justification` → `evaluate_policy` → `select` → `execute_with_failover` → `append` (audit write).
+
+### New Environment Variables
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `OTEL_ENABLED` | `false` | No | Enable OpenTelemetry distributed tracing |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | When OTEL enabled | OTLP gRPC endpoint (e.g. `http://localhost:4317`) |
+| `OTEL_SERVICE_NAME` | `cream-api` | No | Service name in traces |
+
+### New Dependencies
+
+- `opentelemetry` 0.31, `opentelemetry_sdk` 0.31, `opentelemetry-otlp` 0.31, `tracing-opentelemetry` 0.32
+
+### Tests
+
+5 new tests (total: 483):
+- `otel_disabled_by_default` — defaults to false, service name to "cream-api"
+- `otel_enabled_requires_endpoint` — OTEL_ENABLED=true without endpoint fails at startup
+- `otel_enabled_with_endpoint_accepted` — valid OTEL config loads correctly
+- `otel_service_name_configurable` — override works
+- `otel_disabled_explicit_false` — OTEL_ENABLED=false with endpoint set is accepted
+
+---
+
+## 0.21.0 — 2026-04-13
+
+**Phase 17-A: Structured Logging + Correlation ID Propagation**
+
+Every log line from cream-api is now machine-parseable structured JSON (in production) with `request_id`, `payment_id`, and `agent_id` automatically propagated through all tracing spans. Development environments get coloured, human-readable output via `LOG_FORMAT=pretty`. 478 backend tests pass (up from 472). Zero clippy warnings.
+
+### New Features
+
+- **Dual-mode log subscriber** — `LOG_FORMAT=json` (default): `tracing_subscriber::fmt().json()` with flattened events, target names, and current span context. `LOG_FORMAT=pretty`: coloured human-readable output for development. Driven by `AppConfig`, loaded before tracing init. (`backend/crates/api/src/main.rs`)
+
+- **Request ID in tracing spans** — New `inject_request_id` Axum middleware reads `X-Request-Id` after generation and records it into the current tracing span. All child spans (orchestrator, policy engine, audit writer, webhook enqueue) automatically inherit `request_id`. (`backend/crates/api/src/middleware/request_id.rs`)
+
+- **Orchestrator span instrumentation** — `#[tracing::instrument]` on 6 key methods: `process()` (with deferred `payment_id`), `resume_after_approval()`, `validate_justification()`, `evaluate_policy()`, `execute_with_failover()`, `check_escalation_reminders()`, `check_escalation_timeouts()`. All use `skip_all` to prevent logging sensitive function arguments. (`backend/crates/api/src/orchestrator.rs`)
+
+- **Webhook worker span instrumentation** — `#[tracing::instrument]` on `deliver_to_endpoint()` and `retry_delivery()` with endpoint_id, event_type, and attempt fields. (`backend/crates/api/src/webhook_worker.rs`)
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_FORMAT` | `json` | Log output format: `json` (machine-parseable) or `pretty` (coloured, human-readable) |
+| `LOG_LEVEL` | `info` | Fallback log level when `RUST_LOG` is not set |
+
+### Tests
+
+6 new tests (total: 478):
+- `log_format_defaults_to_json`, `log_format_pretty_accepted`, `log_format_json_accepted`, `log_format_invalid_rejected` — LOG_FORMAT parsing
+- `log_level_defaults_to_info`, `log_level_custom_accepted` — LOG_LEVEL parsing
 
 ---
 

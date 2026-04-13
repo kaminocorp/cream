@@ -39,7 +39,7 @@ pub struct PolicyRule {
 // ---------------------------------------------------------------------------
 
 /// The verdict the policy engine returns for a payment request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PolicyAction {
     Approve,
@@ -145,7 +145,7 @@ pub struct FieldCheck {
 }
 
 /// Comparison operators for field checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonOp {
     Equals,
@@ -223,7 +223,7 @@ impl<'de> Deserialize<'de> for EscalationConfig {
 }
 
 /// Delivery channel for escalation notifications.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EscalationChannel {
     Slack,

@@ -93,7 +93,7 @@ impl<'de> Deserialize<'de> for Recipient {
 }
 
 /// The type of payment recipient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipientType {
     /// A merchant (e.g., Stripe merchant, Shopify store)

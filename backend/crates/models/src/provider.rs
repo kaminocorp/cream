@@ -168,7 +168,7 @@ impl<'de> Deserialize<'de> for ProviderHealth {
 /// - Closed = healthy, accepting traffic
 /// - Open = unhealthy, all traffic rejected and rerouted
 /// - HalfOpen = cooldown expired, testing with limited traffic
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CircuitState {
     Closed,

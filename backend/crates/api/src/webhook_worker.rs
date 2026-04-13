@@ -21,6 +21,7 @@ use redis::AsyncCommands;
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::metrics as m;
 use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -131,6 +132,7 @@ pub async fn enqueue_webhook(
     };
     let mut conn = redis.clone();
     if let Err(e) = conn.lpush::<_, _, ()>(WEBHOOK_QUEUE_KEY, &serialized).await {
+        ::metrics::counter!(m::REDIS_CONNECTION_ERRORS_TOTAL).increment(1);
         tracing::error!(
             error = %e,
             event_type = %event.event_type,
@@ -171,6 +173,7 @@ pub async fn webhook_delivery_worker(state: AppState) {
             Ok(Some((_key, value))) => value,
             Ok(None) => continue, // timeout, loop again
             Err(e) => {
+                ::metrics::counter!(m::REDIS_CONNECTION_ERRORS_TOTAL).increment(1);
                 tracing::warn!(error = %e, "redis BRPOP error in webhook worker");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
@@ -338,6 +341,7 @@ fn event_matches(events: &serde_json::Value, event_type: &str) -> bool {
 
 /// Deliver a single event to a single endpoint. Creates the delivery log entry,
 /// sends the HTTP POST, and updates the log with the result.
+#[tracing::instrument(skip_all, fields(endpoint_id = %ep.id, event_type = %event.event_type))]
 async fn deliver_to_endpoint(
     db: &sqlx::PgPool,
     client: &reqwest::Client,
@@ -380,7 +384,8 @@ async fn deliver_to_endpoint(
         return;
     }
 
-    // Send the HTTP POST.
+    // Send the HTTP POST and measure delivery latency.
+    let send_start = std::time::Instant::now();
     let result = client
         .post(&ep.url)
         .header("Content-Type", "application/json")
@@ -389,6 +394,8 @@ async fn deliver_to_endpoint(
         .body(body)
         .send()
         .await;
+    let delivery_secs = send_start.elapsed().as_secs_f64();
+    ::metrics::histogram!(m::WEBHOOK_DELIVERY_DURATION_SECONDS).record(delivery_secs);
 
     match result {
         Ok(resp) => {
@@ -419,6 +426,7 @@ async fn deliver_to_endpoint(
 }
 
 /// Re-attempt a previously failed delivery.
+#[tracing::instrument(skip_all, fields(delivery_id = %row.id, attempt = row.attempt, event_type = %row.event_type))]
 async fn retry_delivery(
     db: &sqlx::PgPool,
     client: &reqwest::Client,
@@ -475,7 +483,9 @@ async fn retry_delivery(
 }
 
 /// Mark a delivery as successfully delivered.
+#[allow(clippy::cast_lossless)] // i16 → u16 cast for range check is intentional
 async fn mark_delivered(db: &sqlx::PgPool, delivery_id: Uuid, http_status: i16, response_body: &str) {
+    ::metrics::counter!(m::WEBHOOK_DELIVERIES_TOTAL, "status" => "delivered").increment(1);
     if let Err(e) = sqlx::query(
         "UPDATE webhook_delivery_log
          SET status = 'delivered', http_status = $2, response_body = $3,
@@ -493,6 +503,7 @@ async fn mark_delivered(db: &sqlx::PgPool, delivery_id: Uuid, http_status: i16, 
 }
 
 /// Mark a delivery as failed and schedule retry (or mark exhausted).
+#[allow(clippy::cast_possible_truncation)]
 async fn mark_failed(
     db: &sqlx::PgPool,
     delivery_id: Uuid,
@@ -502,8 +513,11 @@ async fn mark_failed(
     max_attempts: i16,
 ) {
     let (status, next_retry) = if new_attempt >= max_attempts {
+        ::metrics::counter!(m::WEBHOOK_DELIVERIES_TOTAL, "status" => "exhausted").increment(1);
         ("exhausted".to_string(), None)
     } else {
+        ::metrics::counter!(m::WEBHOOK_DELIVERIES_TOTAL, "status" => "failed").increment(1);
+        ::metrics::counter!(m::WEBHOOK_RETRIES_TOTAL).increment(1);
         let backoff_idx = (new_attempt as usize).min(RETRY_BACKOFF_SECS.len() - 1);
         let backoff_secs = RETRY_BACKOFF_SECS[backoff_idx];
         let next = Utc::now() + chrono::Duration::seconds(backoff_secs);

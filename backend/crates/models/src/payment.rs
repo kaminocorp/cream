@@ -29,7 +29,7 @@ pub const MAX_CATEGORY_OTHER_LEN: usize = 500;
 ///                      → Blocked
 /// Submitted → Failed (post-provider)
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {
     /// Just created, awaiting validation.
@@ -114,7 +114,7 @@ impl PaymentStatus {
 ///
 /// Covers ~95% of global fiat transaction volume and the major stablecoins
 /// / crypto assets relevant to agent payments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Currency {
     // Major fiat
@@ -182,7 +182,7 @@ impl Currency {
 // ---------------------------------------------------------------------------
 
 /// The agent's preferred payment rail. `Auto` lets the routing engine decide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RailPreference {
     Auto,

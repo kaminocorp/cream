@@ -28,6 +28,12 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 async-trait = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
@@ -39,6 +45,14 @@ subtle = { workspace = true }
 urlencoding = "2"
 lettre = { workspace = true }
 aes-gcm = { workspace = true }
+axum-server = { workspace = true }
+csv = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+http-body-util = "0.1"
+bytes = "1"
 rand = "0.9"
 
 [dev-dependencies]

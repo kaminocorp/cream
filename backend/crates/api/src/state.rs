@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use crate::config::AppConfig;
 use crate::db::PaymentRepository;
 use crate::notifications::NotificationSender;
+use metrics_exporter_prometheus::PrometheusHandle;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 ///
@@ -28,4 +29,7 @@ pub struct AppState {
     pub payment_repo: Arc<dyn PaymentRepository>,
     pub notification_sender: Arc<dyn NotificationSender>,
     pub config: Arc<AppConfig>,
+    /// Prometheus metrics handle for reading metric values. `None` when
+    /// metrics are disabled. Used by the alert engine (Phase 17-G).
+    pub metrics_handle: Option<PrometheusHandle>,
 }

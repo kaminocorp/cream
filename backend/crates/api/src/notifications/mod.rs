@@ -39,6 +39,17 @@ pub struct ReminderNotification {
     pub kind: ReminderKind,
 }
 
+/// Context for an alert notification fired by the alert engine (Phase 17-G).
+#[derive(Debug, Clone)]
+pub struct AlertNotification {
+    pub rule_name: String,
+    pub metric: String,
+    pub value: f64,
+    pub threshold: f64,
+    pub condition: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderKind {
     /// 50% timeout reminder — nudge the reviewer.
@@ -61,6 +72,19 @@ pub enum ReminderKind {
 pub trait NotificationSender: Send + Sync + 'static {
     /// Send an escalation notification (payment just entered PendingApproval).
     async fn send_escalation(&self, notification: &EscalationNotification) -> Result<(), String>;
+
+    /// Send an alert notification when a metric threshold is breached.
+    /// Default implementation logs and returns Ok.
+    async fn send_alert(&self, notification: &AlertNotification) -> Result<(), String> {
+        tracing::info!(
+            rule = %notification.rule_name,
+            metric = %notification.metric,
+            value = notification.value,
+            threshold = notification.threshold,
+            "alert fired (send_alert not implemented for this channel)"
+        );
+        Ok(())
+    }
 
     /// Send a reminder or timeout notification. Default implementation logs
     /// and returns Ok (channels that don't support reminders can skip it).
@@ -90,6 +114,11 @@ impl NotificationSender for NoopNotifier {
 
     async fn send_reminder(&self, _notification: &ReminderNotification) -> Result<(), String> {
         tracing::debug!("no notification channel configured, skipping reminder");
+        Ok(())
+    }
+
+    async fn send_alert(&self, _notification: &AlertNotification) -> Result<(), String> {
+        tracing::debug!("no notification channel configured, skipping alert");
         Ok(())
     }
 }
@@ -125,6 +154,15 @@ impl NotificationSender for CompositeNotifier {
         for sender in &self.senders {
             if let Err(e) = sender.send_reminder(notification).await {
                 tracing::warn!(error = %e, "reminder channel failed (non-blocking)");
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_alert(&self, notification: &AlertNotification) -> Result<(), String> {
+        for sender in &self.senders {
+            if let Err(e) = sender.send_alert(notification).await {
+                tracing::warn!(error = %e, "alert channel failed (non-blocking)");
             }
         }
         Ok(())

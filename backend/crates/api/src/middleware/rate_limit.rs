@@ -34,6 +34,7 @@ pub async fn rate_limit(
         match increment_counter(&state.redis, &key, window_secs).await {
             Ok(count) => {
                 if count > max_requests {
+                    ::metrics::counter!(crate::metrics::RATE_LIMIT_HITS_TOTAL).increment(1);
                     let retry_after = window_secs - (now % window_secs);
                     return Err(ApiError::RateLimited {
                         retry_after_secs: retry_after,
@@ -42,6 +43,7 @@ pub async fn rate_limit(
             }
             Err(e) => {
                 // Fail-open: Redis unavailable should not block requests.
+                ::metrics::counter!(crate::metrics::REDIS_CONNECTION_ERRORS_TOTAL).increment(1);
                 tracing::warn!(error = %e, "rate limiter: redis unavailable, allowing request");
             }
         }

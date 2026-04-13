@@ -36,7 +36,7 @@ pub struct VirtualCard {
 }
 
 /// Whether the card is single-use (one authorization) or multi-use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CardType {
     SingleUse,
@@ -102,7 +102,7 @@ impl<'de> Deserialize<'de> for CardControls {
 }
 
 /// The lifecycle status of a virtual card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CardStatus {
     Active,

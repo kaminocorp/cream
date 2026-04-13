@@ -1,5 +1,7 @@
 pub mod agents;
+pub mod alerts;
 pub mod audit;
+pub mod audit_export;
 pub mod auth;
 pub mod cards;
 pub mod integrations;

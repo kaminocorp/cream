@@ -1,9 +1,14 @@
 // cream-api: Axum HTTP server. Wires all crates together into the payment lifecycle orchestrator.
 
+pub mod alert_engine;
+pub mod audit_export;
 pub mod config;
+mod docs_coverage;
+pub mod openapi;
 pub mod db;
 pub mod error;
 pub mod extractors;
+pub mod metrics;
 pub mod middleware;
 pub mod notifications;
 pub mod orchestrator;
@@ -18,6 +23,8 @@ pub use state::AppState;
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::trace::TraceLayer;
+use utoipa_swagger_ui::SwaggerUi;
 
 /// Build the Axum router with all routes, middleware, and shared state.
 pub fn build_router(state: AppState) -> Router {
@@ -78,6 +85,28 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/settings/provider-keys",
             get(routes::settings::list_provider_keys).put(routes::settings::save_provider_key),
         )
+        // Alerts (Phase 17-G)
+        .route(
+            "/v1/alerts",
+            get(routes::alerts::list_alerts).post(routes::alerts::create_alert),
+        )
+        .route(
+            "/v1/alerts/{id}",
+            patch(routes::alerts::update_alert).delete(routes::alerts::delete_alert),
+        )
+        .route(
+            "/v1/alerts/history",
+            get(routes::alerts::alert_history),
+        )
+        // Audit Export (Phase 17-E)
+        .route(
+            "/v1/audit/export",
+            post(routes::audit_export::create_export),
+        )
+        .route(
+            "/v1/audit/exports/{id}",
+            get(routes::audit_export::get_export_status),
+        )
         // Policy Templates (Phase 16-G)
         .route(
             "/v1/policy-templates",
@@ -97,6 +126,16 @@ pub fn build_router(state: AppState) -> Router {
             middleware::rate_limit::rate_limit,
         ));
 
+    // PII-redacted body logging — only active when LOG_BODIES=true.
+    // Placed after rate limiting so rejected requests don't incur body buffering.
+    let api_routes = if state.config.log_bodies {
+        api_routes.layer(axum::middleware::from_fn(
+            middleware::logging::log_bodies_with_redaction,
+        ))
+    } else {
+        api_routes
+    };
+
     // Auth routes — NOT behind the main rate limiter (they have their own
     // stricter rate limiting in the future; for now, open).
     let auth_routes = Router::new()
@@ -112,9 +151,25 @@ pub fn build_router(state: AppState) -> Router {
         post(routes::integrations::slack_callback),
     );
 
+    // Build the OpenAPI spec once for the spec endpoint and Swagger UI.
+    let openapi_spec = openapi::build_openapi_spec();
+
     Router::new()
         // Health check — no auth, no rate limit.
         .route("/health", get(|| async { "ok" }))
+        // OpenAPI spec (Phase 17-F) — unauthenticated for developer access.
+        .route(
+            "/v1/openapi.json",
+            get({
+                let spec = openapi_spec.clone();
+                move || {
+                    let spec = spec.clone();
+                    async move { axum::Json(spec) }
+                }
+            }),
+        )
+        // Swagger UI — serves interactive API docs.
+        .merge(SwaggerUi::new("/docs").url("/v1/openapi.json", openapi_spec))
         // Merge in API routes (rate-limited).
         .merge(api_routes)
         // Merge in auth routes (not rate-limited — separate from API).
@@ -122,10 +177,37 @@ pub fn build_router(state: AppState) -> Router {
         // Merge in integration callback routes.
         .merge(integration_routes)
         // Global layers (applied to all routes including /health).
+        // Order matters: outermost layer runs first. The stack below executes as:
+        // 1. CORS (outermost)
+        // 2. TraceLayer creates a span with a `request_id` field (empty initially)
+        // 3. SetRequestId layer assigns X-Request-Id header
+        // 4. inject_request_id middleware reads the header and records it into the span
+        // 5. PropagateRequestId copies X-Request-Id to the response
+        //
+        // This means every tracing event emitted inside the request (including
+        // nested spans from orchestrator, policy engine, audit writer, etc.)
+        // automatically includes `request_id` in structured log output.
         .layer(middleware::request_id::propagate_request_id_layer())
+        .layer(axum::middleware::from_fn(
+            middleware::request_id::inject_request_id,
+        ))
         .layer(middleware::request_id::set_request_id_layer())
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                    request_id = tracing::field::Empty,
+                )
+            }),
+        )
         .layer(build_cors_layer(&state.config.cors_allowed_origins))
+        // Security headers — outermost application layer so every response
+        // (including CORS preflight, errors, 404s) gets hardened headers.
+        .layer(middleware::security_headers::SecurityHeadersLayer::new(
+            state.config.hsts_max_age,
+        ))
         .with_state(state)
 }
 

@@ -70,7 +70,7 @@ impl<'de> Deserialize<'de> for Agent {
 }
 
 /// The operational status of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     /// Agent is fully operational and can initiate payments.

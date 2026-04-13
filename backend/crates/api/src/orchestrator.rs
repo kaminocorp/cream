@@ -5,10 +5,11 @@ use chrono::Utc;
 use cream_models::prelude::*;
 use cream_policy::{EvaluationContext, PaymentSummary};
 use cream_providers::{NormalizedPaymentRequest, ProviderPaymentResponse, TransactionStatus};
-use cream_router::IdempotencyOutcome;
+use cream_router::{CircuitBreaker, IdempotencyOutcome};
 
 use crate::error::ApiError;
 use crate::extractors::auth::AuthenticatedAgent;
+use crate::metrics;
 use crate::notifications::EscalationNotification;
 use crate::state::AppState;
 use crate::webhook_worker::{enqueue_webhook, WebhookEvent};
@@ -50,6 +51,29 @@ fn apply_settlement_transitions(
     }
 }
 
+/// Read the current circuit breaker state for a provider and emit it as a
+/// Prometheus gauge. The gauge uses numeric encoding: 0 = closed, 1 = open,
+/// 2 = half_open. Called after every `record_success` / `record_failure` so
+/// the metric tracks state transitions in near-real-time.
+async fn emit_circuit_breaker_gauge(
+    circuit_breaker: &CircuitBreaker,
+    provider_id: &cream_models::prelude::ProviderId,
+) {
+    if let Ok(state) = circuit_breaker.state(provider_id).await {
+        let state_label = match state {
+            cream_models::prelude::CircuitState::Closed => "closed",
+            cream_models::prelude::CircuitState::Open => "open",
+            cream_models::prelude::CircuitState::HalfOpen => "half_open",
+        };
+        ::metrics::gauge!(
+            metrics::CIRCUIT_BREAKER_STATE,
+            "provider" => provider_id.as_str().to_string(),
+            "state" => state_label,
+        )
+        .set(1.0);
+    }
+}
+
 /// Orchestrates the deterministic 8-step payment lifecycle.
 ///
 /// Steps 1-2 (schema validation, agent identity) are handled by Axum extractors
@@ -64,6 +88,16 @@ impl PaymentOrchestrator {
     }
 
     /// Execute the full payment lifecycle for an authenticated agent request.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            payment_id = tracing::field::Empty,
+            agent_id = %agent.agent.id,
+            agent_name = %agent.agent.name,
+            amount = %request.amount,
+            currency = ?request.currency,
+        )
+    )]
     pub async fn process(
         &self,
         agent: &AuthenticatedAgent,
@@ -77,6 +111,9 @@ impl PaymentOrchestrator {
 
         // Create the payment entity in Pending state.
         let mut payment = Payment::new(request.clone());
+
+        // Record payment_id into the span now that we have it.
+        tracing::Span::current().record("payment_id", tracing::field::display(&payment.id));
 
         // --- Idempotency check ---
         let outcome = self
@@ -101,6 +138,16 @@ impl PaymentOrchestrator {
         self.state.payment_repo.update_payment(&payment).await?;
 
         let decision = self.evaluate_policy(agent, &request).await?;
+
+        // Record policy metrics.
+        ::metrics::histogram!(metrics::POLICY_EVALUATION_DURATION_SECONDS)
+            .record(decision.latency_ms as f64 / 1000.0);
+        let action_label = match decision.action {
+            PolicyAction::Approve => "approve",
+            PolicyAction::Block => "block",
+            PolicyAction::Escalate => "escalate",
+        };
+        ::metrics::counter!(metrics::POLICY_DECISION_TOTAL, "action" => action_label).increment(1);
 
         match decision.action {
             PolicyAction::Block => {
@@ -260,6 +307,35 @@ impl PaymentOrchestrator {
         // Fire webhook for terminal status (settled or failed).
         self.fire_webhook(&payment).await;
 
+        // Record payment outcome metrics.
+        let status_label = match payment.status() {
+            PaymentStatus::Settled => "settled",
+            PaymentStatus::Failed => "failed",
+            _ => "other",
+        };
+        let provider_label = payment
+            .provider_id()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let rail_label = format!("{:?}", request.preferred_rail);
+        ::metrics::counter!(
+            metrics::PAYMENTS_TOTAL,
+            "status" => status_label,
+            "provider" => provider_label.clone(),
+            "rail" => rail_label,
+        )
+        .increment(1);
+        ::metrics::histogram!(
+            metrics::PAYMENT_DURATION_SECONDS,
+            "provider" => provider_label.clone(),
+        )
+        .record(provider_latency_ms as f64 / 1000.0);
+        ::metrics::histogram!(
+            metrics::PROVIDER_REQUEST_DURATION_SECONDS,
+            "provider" => provider_label,
+        )
+        .record(provider_latency_ms as f64 / 1000.0);
+
         // Mark idempotency as completed.
         if let Err(e) = self
             .state
@@ -282,6 +358,13 @@ impl PaymentOrchestrator {
     ///
     /// On failure, the idempotency key is released so the agent can retry.
     /// On success, the caller (approve handler) is responsible for completing it.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            payment_id = %payment.id,
+            agent_id = %agent.agent.id,
+        )
+    )]
     pub async fn resume_after_approval(
         &self,
         agent: &AuthenticatedAgent,
@@ -399,6 +482,7 @@ impl PaymentOrchestrator {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    #[tracing::instrument(skip_all)]
     fn validate_justification(&self, request: &PaymentRequest) -> Result<(), ApiError> {
         let word_count = request.justification.summary.split_whitespace().count();
         if word_count < 5 {
@@ -409,6 +493,7 @@ impl PaymentOrchestrator {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(profile_id = %agent.profile.id))]
     async fn evaluate_policy(
         &self,
         agent: &AuthenticatedAgent,
@@ -445,6 +530,7 @@ impl PaymentOrchestrator {
         Ok(decision)
     }
 
+    #[tracing::instrument(skip_all, fields(candidates = routing.candidates.len()))]
     async fn execute_with_failover(
         &self,
         payment: &mut Payment,
@@ -523,6 +609,11 @@ impl PaymentOrchestrator {
                             "circuit breaker record_success failed; routing may use stale health data"
                         );
                     }
+                    emit_circuit_breaker_gauge(
+                        &self.state.circuit_breaker,
+                        &candidate.provider_id,
+                    )
+                    .await;
 
                     payment.set_provider(
                         candidate.provider_id.clone(),
@@ -538,6 +629,12 @@ impl PaymentOrchestrator {
                     return Ok((response, elapsed_ms));
                 }
                 Err(e) if e.is_retryable() => {
+                    ::metrics::counter!(
+                        metrics::PROVIDER_ERRORS_TOTAL,
+                        "provider" => candidate.provider_id.as_str().to_string(),
+                        "retryable" => "true",
+                    )
+                    .increment(1);
                     if let Err(cb_err) = self
                         .state
                         .circuit_breaker
@@ -550,6 +647,11 @@ impl PaymentOrchestrator {
                             "circuit breaker record_failure failed; routing may use stale health data"
                         );
                     }
+                    emit_circuit_breaker_gauge(
+                        &self.state.circuit_breaker,
+                        &candidate.provider_id,
+                    )
+                    .await;
                     tracing::warn!(
                         provider = %candidate.provider_id,
                         error = %e,
@@ -558,6 +660,12 @@ impl PaymentOrchestrator {
                     continue;
                 }
                 Err(e) => {
+                    ::metrics::counter!(
+                        metrics::PROVIDER_ERRORS_TOTAL,
+                        "provider" => candidate.provider_id.as_str().to_string(),
+                        "retryable" => "false",
+                    )
+                    .increment(1);
                     if let Err(cb_err) = self
                         .state
                         .circuit_breaker
@@ -570,6 +678,11 @@ impl PaymentOrchestrator {
                             "circuit breaker record_failure failed; routing may use stale health data"
                         );
                     }
+                    emit_circuit_breaker_gauge(
+                        &self.state.circuit_breaker,
+                        &candidate.provider_id,
+                    )
+                    .await;
                     tracing::error!(
                         provider = %candidate.provider_id,
                         error = %e,
@@ -665,6 +778,7 @@ impl PaymentOrchestrator {
         .await;
     }
 
+    #[tracing::instrument(skip_all, fields(payment_id = %payment.id, agent_id = %agent.agent.id))]
     async fn write_audit(
         &self,
         payment: &Payment,
@@ -744,6 +858,13 @@ pub async fn escalation_timeout_monitor(state: AppState) {
     loop {
         interval.tick().await;
 
+        // Update the escalation pending gauge on every tick so Prometheus
+        // always reflects the current queue depth.
+        match update_escalation_pending_gauge(&state).await {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(error = %e, "escalation pending gauge update failed"),
+        }
+
         // Check for reminders first (50% timeout).
         if let Err(e) = check_escalation_reminders(&state).await {
             tracing::error!(error = %e, "escalation reminder check failed");
@@ -756,8 +877,23 @@ pub async fn escalation_timeout_monitor(state: AppState) {
     }
 }
 
+/// Query the current count of payments in `pending_approval` status and set
+/// the `cream_escalation_pending_count` gauge. This runs on every monitor tick
+/// so the metric always reflects the real queue depth.
+async fn update_escalation_pending_gauge(state: &AppState) -> Result<(), ApiError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payments WHERE status = 'pending_approval'",
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    ::metrics::gauge!(metrics::ESCALATION_PENDING_COUNT).set(count as f64);
+    Ok(())
+}
+
 /// Send reminder notifications for payments that have passed 50% of their
 /// escalation timeout and haven't been reminded yet.
+#[tracing::instrument(skip_all)]
 async fn check_escalation_reminders(state: &AppState) -> Result<(), ApiError> {
     let reminder_ids = state.payment_repo.find_reminder_due_escalations().await?;
 
@@ -825,6 +961,7 @@ async fn check_escalation_reminders(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
     let expired_ids = state.payment_repo.find_expired_escalations().await?;
 
@@ -1027,6 +1164,79 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
             }
         }
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Credential age monitor (Phase 17-D)
+// ---------------------------------------------------------------------------
+
+/// Background task that scans for agents whose API keys haven't been rotated
+/// within `CREDENTIAL_ROTATION_WARN_DAYS`. Runs on the same interval as the
+/// escalation timeout monitor. Logs a warning per stale key and bumps the
+/// `cream_credential_age_warning` counter.
+pub async fn credential_age_monitor(state: AppState) {
+    let interval_secs = state.config.escalation_check_interval_secs;
+    let warn_days = state.config.credential_rotation_warn_days as i64;
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+
+    tracing::info!(
+        interval_secs,
+        warn_days,
+        "credential age monitor started"
+    );
+
+    loop {
+        interval.tick().await;
+
+        if let Err(e) = check_credential_ages(&state, warn_days).await {
+            tracing::error!(error = %e, "credential age check failed");
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+async fn check_credential_ages(state: &AppState, warn_days: i64) -> Result<(), ApiError> {
+    #[derive(sqlx::FromRow)]
+    struct StaleAgent {
+        id: uuid::Uuid,
+        name: String,
+        key_rotated_at: chrono::DateTime<Utc>,
+    }
+
+    let stale_agents: Vec<StaleAgent> = sqlx::query_as(
+        "SELECT id, name, key_rotated_at FROM agents
+         WHERE status = 'active'
+           AND key_rotated_at < now() - make_interval(days => $1::int)
+         ORDER BY key_rotated_at ASC
+         LIMIT 100",
+    )
+    .bind(warn_days as i32)
+    .fetch_all(&state.db)
+    .await?;
+
+    if stale_agents.is_empty() {
+        return Ok(());
+    }
+
+    for agent in &stale_agents {
+        let age_days = (Utc::now() - agent.key_rotated_at).num_days();
+        tracing::warn!(
+            agent_id = %agent.id,
+            agent_name = %agent.name,
+            key_age_days = age_days,
+            threshold_days = warn_days,
+            "agent API key has not been rotated within the configured threshold"
+        );
+        ::metrics::counter!(crate::metrics::CREDENTIAL_AGE_WARNING, "agent_id" => agent.id.to_string())
+            .increment(1);
+    }
+
+    tracing::info!(
+        count = stale_agents.len(),
+        "credential age warnings emitted"
+    );
 
     Ok(())
 }

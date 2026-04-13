@@ -7,6 +7,15 @@ use std::env;
 /// by watching unauthenticated callers get admin access.
 pub const MIN_OPERATOR_KEY_LEN: usize = 32;
 
+/// Log output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    /// Machine-parseable JSON (one object per line). Default for production.
+    Json,
+    /// Human-readable, optionally coloured. Default for development.
+    Pretty,
+}
+
 /// Application configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -73,6 +82,50 @@ pub struct AppConfig {
     /// AES-256 key (hex-encoded, 64 chars = 32 bytes) for encrypting provider API keys at rest.
     /// If unset, provider key storage endpoints return 503.
     pub provider_key_encryption_secret: Option<Vec<u8>>,
+    /// Log output format: `json` for machine-parseable structured logs (production),
+    /// `pretty` for human-readable coloured output (development).
+    /// Default: `json` when `RUST_LOG` is not set to debug, `pretty` otherwise.
+    pub log_format: LogFormat,
+    /// Global log level override. Defaults to `info`. Overridden by `RUST_LOG`
+    /// if that env var is set.
+    pub log_level: String,
+    /// Enable request/response body logging with PII redaction. Off by default.
+    /// When enabled, the `PiiRedactionLayer` strips sensitive fields
+    /// (`password`, `api_key`, `secret`, `refresh_token`) from logged bodies.
+    pub log_bodies: bool,
+    /// Enable OpenTelemetry distributed tracing. When `false`, zero performance
+    /// overhead — the OTEL layer is not added to the subscriber stack.
+    pub otel_enabled: bool,
+    /// OTLP gRPC endpoint (e.g. `http://localhost:4317`). Required when
+    /// `otel_enabled` is true.
+    pub otel_exporter_endpoint: Option<String>,
+    /// Service name reported in traces. Default: `cream-api`.
+    pub otel_service_name: String,
+    /// Enable Prometheus metrics endpoint. Default: `true`.
+    pub metrics_enabled: bool,
+    /// Port for the Prometheus `/metrics` HTTP listener. Default: `9090`.
+    /// Separate from the main API port to keep metrics internal-only.
+    pub metrics_port: u16,
+    /// Path to TLS certificate (PEM). When both `tls_cert_path` and
+    /// `tls_key_path` are set, the server starts with HTTPS via rustls.
+    /// Unset = plain HTTP (for local dev or behind a reverse proxy).
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key (PEM).
+    pub tls_key_path: Option<String>,
+    /// HSTS `max-age` in seconds. Default: `31536000` (1 year). Only
+    /// effective when the security headers middleware is active.
+    pub hsts_max_age: u64,
+    /// Warn when an agent's API key is older than this many days.
+    /// Default: `90`. The credential age monitor checks on the same
+    /// interval as the escalation timeout monitor.
+    pub credential_rotation_warn_days: u64,
+    /// S3 bucket for async audit exports. If unset, the async export
+    /// endpoint returns 503.
+    pub audit_export_s3_bucket: Option<String>,
+    /// AWS region for the S3 bucket.
+    pub audit_export_s3_region: Option<String>,
+    /// Key prefix for S3 exports (e.g. `audit/`).
+    pub audit_export_s3_prefix: Option<String>,
 }
 
 impl AppConfig {
@@ -190,6 +243,78 @@ impl AppConfig {
             _ => None,
         };
 
+        let log_format = match env::var("LOG_FORMAT").unwrap_or_default().to_lowercase().as_str() {
+            "json" => LogFormat::Json,
+            "pretty" => LogFormat::Pretty,
+            "" => LogFormat::Json, // default: JSON for production
+            other => {
+                return Err(ConfigError::Invalid(
+                    "LOG_FORMAT",
+                    format!("must be 'json' or 'pretty', got '{other}'"),
+                ));
+            }
+        };
+        let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+        let log_bodies = env::var("LOG_BODIES")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let otel_enabled = env::var("OTEL_ENABLED")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+        let otel_exporter_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let otel_service_name = env::var("OTEL_SERVICE_NAME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "cream-api".to_string());
+
+        let metrics_enabled = env::var("METRICS_ENABLED")
+            .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
+            .unwrap_or(true); // default: enabled
+        let metrics_port: u16 = parse_env("METRICS_PORT", 9090)?;
+
+        let tls_cert_path = env::var("TLS_CERT_PATH").ok().filter(|s| !s.trim().is_empty());
+        let tls_key_path = env::var("TLS_KEY_PATH").ok().filter(|s| !s.trim().is_empty());
+        let hsts_max_age: u64 = parse_env("HSTS_MAX_AGE", 31_536_000)?;
+        let credential_rotation_warn_days: u64 = parse_env("CREDENTIAL_ROTATION_WARN_DAYS", 90)?;
+
+        let audit_export_s3_bucket = env::var("AUDIT_EXPORT_S3_BUCKET")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let audit_export_s3_region = env::var("AUDIT_EXPORT_S3_REGION")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let audit_export_s3_prefix = env::var("AUDIT_EXPORT_S3_PREFIX")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+
+        // TLS: both cert and key must be provided together. One without the
+        // other is always a misconfiguration that should fail fast.
+        match (&tls_cert_path, &tls_key_path) {
+            (Some(_), None) => {
+                return Err(ConfigError::Invalid(
+                    "TLS_KEY_PATH",
+                    "required when TLS_CERT_PATH is set".to_string(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::Invalid(
+                    "TLS_CERT_PATH",
+                    "required when TLS_KEY_PATH is set".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        if otel_enabled && otel_exporter_endpoint.is_none() {
+            return Err(ConfigError::Invalid(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "required when OTEL_ENABLED=true".to_string(),
+            ));
+        }
+
         if operator_api_key.is_none() && jwt_secret.is_none() {
             tracing::warn!(
                 "neither JWT_SECRET nor OPERATOR_API_KEY is set — operator-only endpoints \
@@ -231,6 +356,21 @@ impl AppConfig {
             resend_api_key,
             dashboard_base_url,
             provider_key_encryption_secret,
+            log_format,
+            log_level,
+            log_bodies,
+            otel_enabled,
+            otel_exporter_endpoint,
+            otel_service_name,
+            metrics_enabled,
+            metrics_port,
+            tls_cert_path,
+            tls_key_path,
+            hsts_max_age,
+            credential_rotation_warn_days,
+            audit_export_s3_bucket,
+            audit_export_s3_region,
+            audit_export_s3_prefix,
         })
     }
 }
@@ -270,14 +410,17 @@ mod tests {
     fn with_env<F: FnOnce()>(f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Clean slate — remove anything a prior test might have set.
-        env::remove_var("DATABASE_URL");
-        env::remove_var("REDIS_URL");
-        env::remove_var("OPERATOR_API_KEY");
+        let vars = [
+            "DATABASE_URL", "REDIS_URL", "OPERATOR_API_KEY",
+            "LOG_FORMAT", "LOG_LEVEL",
+            "OTEL_ENABLED", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_SERVICE_NAME",
+            "METRICS_ENABLED", "METRICS_PORT",
+            "TLS_CERT_PATH", "TLS_KEY_PATH", "HSTS_MAX_AGE", "CREDENTIAL_ROTATION_WARN_DAYS",
+            "AUDIT_EXPORT_S3_BUCKET", "AUDIT_EXPORT_S3_REGION", "AUDIT_EXPORT_S3_PREFIX",
+        ];
+        for var in &vars { env::remove_var(var); }
         f();
-        // Leave no residue for the next test in the sequence.
-        env::remove_var("DATABASE_URL");
-        env::remove_var("REDIS_URL");
-        env::remove_var("OPERATOR_API_KEY");
+        for var in &vars { env::remove_var(var); }
     }
 
     #[test]
@@ -328,6 +471,295 @@ mod tests {
 
             let config = AppConfig::from_env().expect("32-char key should load");
             assert_eq!(config.operator_api_key.as_deref().map(str::len), Some(32));
+        });
+    }
+
+    #[test]
+    fn log_format_defaults_to_json() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.log_format, LogFormat::Json);
+        });
+    }
+
+    #[test]
+    fn log_format_pretty_accepted() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("LOG_FORMAT", "pretty");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.log_format, LogFormat::Pretty);
+        });
+    }
+
+    #[test]
+    fn log_format_json_accepted() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("LOG_FORMAT", "json");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.log_format, LogFormat::Json);
+        });
+    }
+
+    #[test]
+    fn log_format_invalid_rejected() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("LOG_FORMAT", "xml");
+
+            let result = AppConfig::from_env();
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("LOG_FORMAT"), "error should mention LOG_FORMAT, got: {err}");
+        });
+    }
+
+    #[test]
+    fn log_level_defaults_to_info() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.log_level, "info");
+        });
+    }
+
+    #[test]
+    fn log_level_custom_accepted() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("LOG_LEVEL", "debug");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.log_level, "debug");
+        });
+    }
+
+    #[test]
+    fn otel_disabled_by_default() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert!(!config.otel_enabled);
+            assert!(config.otel_exporter_endpoint.is_none());
+            assert_eq!(config.otel_service_name, "cream-api");
+        });
+    }
+
+    #[test]
+    fn otel_enabled_requires_endpoint() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("OTEL_ENABLED", "true");
+            // No OTEL_EXPORTER_OTLP_ENDPOINT set
+
+            let result = AppConfig::from_env();
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                "error should mention OTEL_EXPORTER_OTLP_ENDPOINT, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn otel_enabled_with_endpoint_accepted() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("OTEL_ENABLED", "true");
+            env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert!(config.otel_enabled);
+            assert_eq!(
+                config.otel_exporter_endpoint.as_deref(),
+                Some("http://localhost:4317")
+            );
+        });
+    }
+
+    #[test]
+    fn otel_service_name_configurable() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("OTEL_SERVICE_NAME", "my-custom-service");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.otel_service_name, "my-custom-service");
+        });
+    }
+
+    #[test]
+    fn otel_disabled_explicit_false() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("OTEL_ENABLED", "false");
+            env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert!(!config.otel_enabled);
+            // Endpoint is still parsed even when disabled (allows toggling without removing)
+            assert!(config.otel_exporter_endpoint.is_some());
+        });
+    }
+
+    #[test]
+    fn metrics_enabled_by_default() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert!(config.metrics_enabled);
+            assert_eq!(config.metrics_port, 9090);
+        });
+    }
+
+    #[test]
+    fn metrics_disabled_explicit() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("METRICS_ENABLED", "false");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert!(!config.metrics_enabled);
+        });
+    }
+
+    #[test]
+    fn metrics_port_configurable() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("METRICS_PORT", "9191");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.metrics_port, 9191);
+        });
+    }
+
+    #[test]
+    fn tls_defaults_to_none() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert!(config.tls_cert_path.is_none());
+            assert!(config.tls_key_path.is_none());
+        });
+    }
+
+    #[test]
+    fn tls_cert_without_key_rejected() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("TLS_CERT_PATH", "/tmp/cert.pem");
+
+            let result = AppConfig::from_env();
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("TLS_KEY_PATH"),
+                "error should mention TLS_KEY_PATH, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn tls_key_without_cert_rejected() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("TLS_KEY_PATH", "/tmp/key.pem");
+
+            let result = AppConfig::from_env();
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("TLS_CERT_PATH"),
+                "error should mention TLS_CERT_PATH, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn tls_both_paths_accepted() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("TLS_CERT_PATH", "/tmp/cert.pem");
+            env::set_var("TLS_KEY_PATH", "/tmp/key.pem");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.tls_cert_path.as_deref(), Some("/tmp/cert.pem"));
+            assert_eq!(config.tls_key_path.as_deref(), Some("/tmp/key.pem"));
+        });
+    }
+
+    #[test]
+    fn hsts_max_age_defaults_to_one_year() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.hsts_max_age, 31_536_000);
+        });
+    }
+
+    #[test]
+    fn hsts_max_age_configurable() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("HSTS_MAX_AGE", "86400");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.hsts_max_age, 86400);
+        });
+    }
+
+    #[test]
+    fn credential_rotation_warn_days_defaults_to_90() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.credential_rotation_warn_days, 90);
+        });
+    }
+
+    #[test]
+    fn credential_rotation_warn_days_configurable() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("CREDENTIAL_ROTATION_WARN_DAYS", "30");
+
+            let config = AppConfig::from_env().expect("should load");
+            assert_eq!(config.credential_rotation_warn_days, 30);
         });
     }
 }

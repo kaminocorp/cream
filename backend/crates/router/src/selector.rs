@@ -53,6 +53,7 @@ impl RouteSelector {
     /// Returns a `RoutingDecision` with ranked candidates. The top candidate
     /// is the selected provider. If no viable provider exists, returns
     /// `RoutingError::NoViableProvider`.
+    #[tracing::instrument(skip_all, fields(currency = ?request.currency, preferred_rail = ?request.preferred_rail))]
     pub async fn select(
         &self,
         request: &PaymentRequest,
