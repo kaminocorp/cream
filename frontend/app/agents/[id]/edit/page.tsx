@@ -13,7 +13,7 @@ interface Props {
  */
 export default async function EditAgentPage({ params }: Props) {
   const { id } = await params;
-  const api = getApiClient();
+  const api = await getApiClient();
 
   const [policy, agents] = await Promise.all([
     api.getAgentPolicy(id),

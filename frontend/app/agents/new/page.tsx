@@ -8,7 +8,7 @@ import { getApiClient } from "@/lib/api";
  * we extract unique (id, name) pairs from the agents table.
  */
 export default async function NewAgentPage() {
-  const api = getApiClient();
+  const api = await getApiClient();
   const agents = await api.listAgents();
 
   // Derive unique profiles from existing agents.

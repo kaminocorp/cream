@@ -5,15 +5,17 @@ pub mod db;
 pub mod error;
 pub mod extractors;
 pub mod middleware;
+pub mod notifications;
 pub mod orchestrator;
 pub mod routes;
 pub mod state;
+pub mod webhook_worker;
 
 pub use config::AppConfig;
 pub use error::ApiError;
 pub use state::AppState;
 
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -54,19 +56,71 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Provider Health (Vision Section 6.1)
         .route("/v1/providers/health", get(routes::providers::health))
-        // Webhooks (Vision Section 2.5)
-        .route("/v1/webhooks", post(routes::webhooks::register))
+        // Webhooks (Vision Section 2.5 + Phase 16-A)
+        .route(
+            "/v1/webhooks",
+            get(routes::webhooks::list_webhooks).post(routes::webhooks::register),
+        )
+        .route(
+            "/v1/webhooks/{id}",
+            delete(routes::webhooks::delete_webhook),
+        )
+        .route(
+            "/v1/webhooks/{id}/deliveries",
+            get(routes::webhooks::list_deliveries),
+        )
+        .route(
+            "/v1/webhooks/{id}/test",
+            post(routes::webhooks::test_webhook),
+        )
+        // Settings (Phase 16-F)
+        .route(
+            "/v1/settings/provider-keys",
+            get(routes::settings::list_provider_keys).put(routes::settings::save_provider_key),
+        )
+        // Policy Templates (Phase 16-G)
+        .route(
+            "/v1/policy-templates",
+            get(routes::templates::list_templates),
+        )
+        .route(
+            "/v1/policy-templates/{id}",
+            get(routes::templates::get_template),
+        )
+        .route(
+            "/v1/policy-templates/{template_id}/apply/{agent_id}",
+            post(routes::templates::apply_template),
+        )
         // Rate limiting middleware — applied to all /v1/* routes.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit::rate_limit,
         ));
 
+    // Auth routes — NOT behind the main rate limiter (they have their own
+    // stricter rate limiting in the future; for now, open).
+    let auth_routes = Router::new()
+        .route("/v1/auth/status", get(routes::auth::status))
+        .route("/v1/auth/register", post(routes::auth::register))
+        .route("/v1/auth/login", post(routes::auth::login))
+        .route("/v1/auth/refresh", post(routes::auth::refresh))
+        .route("/v1/auth/logout", post(routes::auth::logout));
+
+    // Integration callback routes — verified by their own signing secrets.
+    let integration_routes = Router::new().route(
+        "/v1/integrations/slack/callback",
+        post(routes::integrations::slack_callback),
+    );
+
     Router::new()
         // Health check — no auth, no rate limit.
         .route("/health", get(|| async { "ok" }))
-        // Merge in API routes.
+        // Merge in API routes (rate-limited).
         .merge(api_routes)
+        // Merge in auth routes (not rate-limited — separate from API).
+        .merge(auth_routes)
+        // Merge in integration callback routes.
+        .merge(integration_routes)
         // Global layers (applied to all routes including /health).
         .layer(middleware::request_id::propagate_request_id_layer())
         .layer(middleware::request_id::set_request_id_layer())

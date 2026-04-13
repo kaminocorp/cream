@@ -8,6 +8,7 @@ use sqlx::PgPool;
 
 use crate::config::AppConfig;
 use crate::db::PaymentRepository;
+use crate::notifications::NotificationSender;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 ///
@@ -25,5 +26,6 @@ pub struct AppState {
     pub idempotency_guard: Arc<IdempotencyGuard>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub payment_repo: Arc<dyn PaymentRepository>,
+    pub notification_sender: Arc<dyn NotificationSender>,
     pub config: Arc<AppConfig>,
 }

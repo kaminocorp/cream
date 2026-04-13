@@ -45,7 +45,7 @@ const columns: Column<AgentSummary>[] = [
 ];
 
 export default async function AgentsPage() {
-  const api = getApiClient();
+  const api = await getApiClient();
   const agents = await api.listAgents();
 
   return (

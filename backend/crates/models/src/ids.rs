@@ -98,6 +98,7 @@ typed_id!(PolicyRuleId, "rule");
 typed_id!(AuditEntryId, "aud");
 typed_id!(VirtualCardId, "card");
 typed_id!(WebhookEndpointId, "whk");
+typed_id!(OperatorId, "opr");
 
 // ---------------------------------------------------------------------------
 // IdempotencyKey — String-based, not UUID-based

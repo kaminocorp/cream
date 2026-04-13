@@ -2,6 +2,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use chrono::{DateTime, Utc};
 use cream_models::prelude::*;
+use jsonwebtoken::{DecodingKey, Validation};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -16,19 +17,40 @@ pub struct AuthenticatedAgent {
     pub profile: AgentProfile,
 }
 
-/// Resolved operator identity. In Phase 15.1 the operator is a single shared
-/// secret without an internal identity — there is no operator table, no
-/// multi-user tracking, no roles. Phase 16-A replaces this with a real
-/// identity (`operator_id`, roles) and a proper sign-in flow; callers
-/// pattern-matching on [`AuthenticatedPrincipal::Operator`] keep working
-/// unchanged because the variant is an opaque struct.
-///
-/// Intentionally carries no fields: 16-A can add them without any handler
-/// churn because all current handlers only care about the fact that the
-/// caller is an operator, not who the operator is.
-#[derive(Debug, Clone, Default)]
+/// Resolved operator identity. Phase 16-B: carries real per-user identity
+/// from the `operators` table. For backward compatibility, operators
+/// authenticated via the legacy `OPERATOR_API_KEY` get a default instance
+/// with `None` identity fields — existing handlers that only check "is this
+/// an operator?" continue to work unchanged.
+#[derive(Debug, Clone)]
 pub struct AuthenticatedOperator {
-    // Phase 16-A: add operator_id, roles, email, etc.
+    /// Operator ID from the `operators` table. `None` for legacy API key auth.
+    pub operator_id: Option<OperatorId>,
+    /// Operator email. `None` for legacy API key auth.
+    pub email: Option<String>,
+    /// Operator role (`admin` or `viewer`). Defaults to `admin` for legacy.
+    pub role: String,
+}
+
+impl Default for AuthenticatedOperator {
+    fn default() -> Self {
+        Self {
+            operator_id: None,
+            email: None,
+            role: "admin".to_string(),
+        }
+    }
+}
+
+/// JWT claims for operator access tokens.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OperatorClaims {
+    /// Subject: "opr_<uuid>"
+    pub sub: String,
+    pub email: String,
+    pub role: String,
+    pub iat: i64,
+    pub exp: i64,
 }
 
 /// Either an authenticated agent or an authenticated operator.
@@ -124,6 +146,33 @@ fn token_is_operator(state: &AppState, token: &str) -> bool {
     }
 }
 
+/// Try to decode a bearer token as a JWT operator access token. Returns
+/// `Some(AuthenticatedOperator)` if the token is a valid, non-expired JWT
+/// signed with the configured `JWT_SECRET`. Returns `None` if JWT is not
+/// configured or the token is not a valid JWT (allowing fallback to other
+/// auth methods).
+fn try_jwt_auth(state: &AppState, token: &str) -> Option<AuthenticatedOperator> {
+    let secret = state.config.jwt_secret.as_deref()?;
+
+    let decoding_key = DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = Validation::default();
+    validation.set_required_spec_claims(&["sub", "exp", "iat"]);
+
+    let token_data = jsonwebtoken::decode::<OperatorClaims>(token, &decoding_key, &validation)
+        .ok()?;
+
+    let claims = token_data.claims;
+
+    // Parse the operator ID from the "sub" claim (format: "opr_<uuid>").
+    let operator_id = claims.sub.parse::<OperatorId>().ok()?;
+
+    Some(AuthenticatedOperator {
+        operator_id: Some(operator_id),
+        email: Some(claims.email),
+        role: claims.role,
+    })
+}
+
 /// Axum extractor that authenticates an agent via `Authorization: Bearer <api_key>`.
 ///
 /// 1. Extracts the bearer token from the header.
@@ -159,10 +208,11 @@ impl FromRequestParts<AppState> for AuthenticatedAgent {
     }
 }
 
-/// Axum extractor that authenticates an operator via the shared
-/// `OPERATOR_API_KEY`. Returns 401 if the header is missing, malformed,
-/// or does not match the configured operator key. Also returns 401 when
-/// the operator key is unset in config (safe default).
+/// Axum extractor that authenticates an operator. Tries, in order:
+/// 1. JWT validation (if `JWT_SECRET` is configured)
+/// 2. Legacy `OPERATOR_API_KEY` constant-time comparison
+///
+/// Returns 401 if neither succeeds.
 impl FromRequestParts<AppState> for AuthenticatedOperator {
     type Rejection = ApiError;
 
@@ -172,6 +222,12 @@ impl FromRequestParts<AppState> for AuthenticatedOperator {
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(parts)?;
 
+        // Try JWT first (Phase 16-B).
+        if let Some(op) = try_jwt_auth(state, token) {
+            return Ok(op);
+        }
+
+        // Fall back to legacy shared key.
         if token_is_operator(state, token) {
             Ok(AuthenticatedOperator::default())
         } else {
@@ -195,7 +251,12 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(parts)?;
 
-        // Operator path first — constant-time check against the shared key.
+        // Try JWT operator auth first (Phase 16-B).
+        if let Some(op) = try_jwt_auth(state, token) {
+            return Ok(Self::Operator(op));
+        }
+
+        // Legacy operator key check.
         if token_is_operator(state, token) {
             return Ok(Self::Operator(AuthenticatedOperator::default()));
         }

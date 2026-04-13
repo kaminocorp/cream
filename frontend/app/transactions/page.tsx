@@ -70,7 +70,7 @@ const columns: Column<AuditEntry>[] = [
  * payments, not just one.
  */
 export default async function TransactionsPage() {
-  const api = getApiClient();
+  const api = await getApiClient();
   const entries = await api.queryAudit({ limit: 50 });
 
   return (

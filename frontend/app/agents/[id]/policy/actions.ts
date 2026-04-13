@@ -29,7 +29,7 @@ export async function updatePolicy(
     return { ok: false, message: "Invalid agent ID format" };
   }
   try {
-    const api = getApiClient();
+    const api = await getApiClient();
     await api.updateAgentPolicy(agentId, input);
 
     revalidatePath(`/agents/${agentId}`);

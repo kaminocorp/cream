@@ -55,6 +55,13 @@ pub trait PaymentRepository: Send + Sync {
     /// Find payments stuck in `pending_approval` past their escalation timeout.
     async fn find_expired_escalations(&self) -> Result<Vec<PaymentId>, ApiError>;
 
+    /// Find payments in `pending_approval` that have passed 50% of their timeout
+    /// and have NOT yet had a reminder sent (reminder_sent_at IS NULL).
+    async fn find_reminder_due_escalations(&self) -> Result<Vec<PaymentId>, ApiError>;
+
+    /// Mark a payment as having had its reminder sent.
+    async fn set_reminder_sent(&self, payment_id: &PaymentId) -> Result<(), ApiError>;
+
     /// Conditionally update a payment only if its current DB status matches `expected_status`.
     /// Returns `true` if the row was updated, `false` if status had already changed (race lost).
     async fn update_payment_if_status(
@@ -447,6 +454,47 @@ impl PaymentRepository for PgPaymentRepository {
             .into_iter()
             .map(|(id,)| PaymentId::from_uuid(id))
             .collect())
+    }
+
+    async fn find_reminder_due_escalations(&self) -> Result<Vec<PaymentId>, ApiError> {
+        // Same timeout calculation as find_expired_escalations, but checks for
+        // 50% of the timeout having elapsed AND reminder_sent_at IS NULL.
+        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            r#"SELECT DISTINCT p.id
+               FROM payments p
+               JOIN agents a ON a.id = p.agent_id
+               WHERE p.status = 'pending_approval'
+                 AND p.reminder_sent_at IS NULL
+                 AND p.updated_at + make_interval(
+                     mins := COALESCE(
+                         (SELECT (pr.escalation->>'timeout_minutes')::int
+                          FROM policy_rules pr
+                          WHERE pr.id = p.escalation_rule_id
+                            AND pr.escalation IS NOT NULL),
+                         (SELECT MIN((pr2.escalation->>'timeout_minutes')::int)
+                          FROM policy_rules pr2
+                          WHERE pr2.profile_id = a.profile_id
+                            AND pr2.escalation IS NOT NULL
+                            AND pr2.enabled = true),
+                         60
+                     ) / 2
+                 ) < now()"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id,)| PaymentId::from_uuid(id))
+            .collect())
+    }
+
+    async fn set_reminder_sent(&self, payment_id: &PaymentId) -> Result<(), ApiError> {
+        sqlx::query("UPDATE payments SET reminder_sent_at = now() WHERE id = $1")
+            .bind(payment_id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn update_payment_if_status(

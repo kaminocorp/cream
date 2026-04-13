@@ -18,7 +18,7 @@ interface Props {
  */
 export default async function AuditPage({ searchParams }: Props) {
   const params = await searchParams;
-  const api = getApiClient();
+  const api = await getApiClient();
 
   // Build query filters from URL search params.
   const filters: AuditQueryFilters = {

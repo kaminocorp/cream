@@ -40,9 +40,19 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 async-trait = "0.1"
 # Regex
 regex = "1"
-# Hashing
+# Hashing & crypto
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
+argon2 = { version = "0.5", features = ["std"] }
+# JWT
+jsonwebtoken = "9"
+# Constant-time comparison
+subtle = "2"
+# Encryption
+aes-gcm = "0.10"
+# Email
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
 # Testing
 mockall = "0.13"
 

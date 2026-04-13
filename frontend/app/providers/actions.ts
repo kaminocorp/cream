@@ -9,6 +9,6 @@ import { ProviderHealth } from "@/lib/types";
  * data in a ring buffer.
  */
 export async function fetchProviderHealth(): Promise<ProviderHealth[]> {
-  const api = getApiClient();
+  const api = await getApiClient();
   return api.getProviderHealth();
 }

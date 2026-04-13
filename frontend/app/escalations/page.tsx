@@ -12,7 +12,7 @@ import { getApiClient } from "@/lib/api";
  * operator workflow in the dashboard.
  */
 export default async function EscalationsPage() {
-  const api = getApiClient();
+  const api = await getApiClient();
   const pending = await api.queryAudit({
     status: "pending_approval",
     limit: 200,

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
+import { getSession } from "@/lib/auth";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -11,31 +12,29 @@ export const metadata: Metadata = {
 };
 
 /**
- * Force every dashboard route to render dynamically at request time.
+ * Force every route to render dynamically at request time.
  *
- * Without this, Next tries to prerender the pages at build time — and
- * since `getApiClient()` reads env vars that aren't populated during
- * build, every page's `Promise.all` fails with "NEXT_PUBLIC_API_URL is
- * required". Marking the root layout as dynamic cascades to all child
- * routes so nothing is prerendered.
- *
- * Applies to the "previous caching model" only (no `cacheComponents`
- * in next.config.ts). When we eventually flip to Cache Components,
- * this export will be removed and each page will opt into freshness via
- * `"use cache"` + `cacheLife` instead.
+ * Required because `getSession()` reads cookies (request-scoped) and
+ * `getApiClient()` reads env vars not available at build time.
  */
 export const dynamic = "force-dynamic";
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const session = await getSession();
+
   return (
     <html lang="en">
       <body className={`${inter.className} antialiased`}>
-        <div className="flex min-h-screen">
-          <Sidebar />
-          <main className="flex-1 overflow-auto">
-            {children}
-          </main>
-        </div>
+        {session ? (
+          <div className="flex min-h-screen">
+            <Sidebar operatorEmail={session.email} operatorRole={session.role} />
+            <main className="flex-1 overflow-auto">
+              {children}
+            </main>
+          </div>
+        ) : (
+          children
+        )}
       </body>
     </html>
   );

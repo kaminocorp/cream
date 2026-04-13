@@ -9,7 +9,9 @@ use cream_router::IdempotencyOutcome;
 
 use crate::error::ApiError;
 use crate::extractors::auth::AuthenticatedAgent;
+use crate::notifications::EscalationNotification;
 use crate::state::AppState;
+use crate::webhook_worker::{enqueue_webhook, WebhookEvent};
 
 /// Apply settlement status transitions based on the provider response.
 /// Returns the failure reason (if any) for persistence in the payments table.
@@ -106,6 +108,7 @@ impl PaymentOrchestrator {
                 self.state.payment_repo.update_payment(&payment).await?;
                 self.write_audit(&payment, agent, &decision, None, None, 0)
                     .await?;
+                self.fire_webhook(&payment).await;
                 if let Err(e) = self
                     .state
                     .idempotency_guard
@@ -148,6 +151,10 @@ impl PaymentOrchestrator {
                 }
                 self.write_audit(&payment, agent, &decision, None, None, 0)
                     .await?;
+
+                // Fire escalation notification (Slack, email, etc.) — best-effort.
+                self.fire_escalation_notification(&payment, agent).await;
+
                 // Don't release idempotency — the payment is still in progress.
                 return Ok(PaymentResponse::from(&payment));
             }
@@ -249,6 +256,9 @@ impl PaymentOrchestrator {
             provider_latency_ms,
         )
         .await?;
+
+        // Fire webhook for terminal status (settled or failed).
+        self.fire_webhook(&payment).await;
 
         // Mark idempotency as completed.
         if let Err(e) = self
@@ -378,6 +388,9 @@ impl PaymentOrchestrator {
             provider_latency_ms,
         )
         .await?;
+
+        // Fire webhook for terminal status (settled or failed).
+        self.fire_webhook(&payment).await;
 
         Ok(PaymentResponse::from(&payment))
     }
@@ -570,6 +583,70 @@ impl PaymentOrchestrator {
         Err(ApiError::AllProvidersUnavailable)
     }
 
+    /// Send an escalation notification via the configured channel (Slack, email,
+    /// etc.). Best-effort — never blocks or errors the payment pipeline.
+    async fn fire_escalation_notification(
+        &self,
+        payment: &Payment,
+        agent: &AuthenticatedAgent,
+    ) {
+        let notification = EscalationNotification {
+            payment_id: payment.id,
+            amount: payment.request.amount,
+            currency: payment.request.currency,
+            recipient: payment.request.recipient.identifier.clone(),
+            agent_name: agent.agent.name.clone(),
+            agent_id: agent.agent.id,
+            justification_summary: payment.request.justification.summary.clone(),
+            timeout_minutes: 30, // TODO: read from escalation config on the matched rule
+            dashboard_url: None,
+        };
+
+        if let Err(e) = self
+            .state
+            .notification_sender
+            .send_escalation(&notification)
+            .await
+        {
+            tracing::warn!(
+                payment_id = %payment.id,
+                error = %e,
+                "escalation notification dispatch failed (non-blocking)"
+            );
+        }
+    }
+
+    /// Fire a webhook event for a terminal payment status. Best-effort — never
+    /// blocks or errors the payment pipeline.
+    async fn fire_webhook(&self, payment: &Payment) {
+        let event_type = match payment.status() {
+            PaymentStatus::Settled => "payment.settled",
+            PaymentStatus::Failed => "payment.failed",
+            PaymentStatus::Blocked => "payment.blocked",
+            PaymentStatus::TimedOut => "payment.timed_out",
+            _ => return, // non-terminal — no webhook
+        };
+
+        let payload = serde_json::json!({
+            "payment_id": payment.id.to_string(),
+            "status": event_type.split('.').next_back().unwrap_or("unknown"),
+            "amount": payment.request.amount.to_string(),
+            "currency": payment.request.currency,
+            "agent_id": payment.request.agent_id.to_string(),
+            "recipient": payment.request.recipient.identifier,
+        });
+
+        enqueue_webhook(
+            &self.state.redis,
+            WebhookEvent {
+                event_type: event_type.to_string(),
+                payload,
+                agent_id: Some(*payment.request.agent_id.as_uuid()),
+            },
+        )
+        .await;
+    }
+
     async fn write_audit(
         &self,
         payment: &Payment,
@@ -638,6 +715,8 @@ impl PaymentOrchestrator {
 /// Background task that periodically checks for payments stuck in
 /// `PendingApproval` past their escalation timeout. Transitions them to
 /// `TimedOut` → `Blocked` and writes an audit entry.
+///
+/// Also sends reminder notifications at 50% of the timeout duration.
 pub async fn escalation_timeout_monitor(state: AppState) {
     let interval_secs = state.config.escalation_check_interval_secs;
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -647,10 +726,66 @@ pub async fn escalation_timeout_monitor(state: AppState) {
     loop {
         interval.tick().await;
 
+        // Check for reminders first (50% timeout).
+        if let Err(e) = check_escalation_reminders(&state).await {
+            tracing::error!(error = %e, "escalation reminder check failed");
+        }
+
+        // Then check for full timeouts.
         if let Err(e) = check_escalation_timeouts(&state).await {
             tracing::error!(error = %e, "escalation timeout check failed");
         }
     }
+}
+
+/// Send reminder notifications for payments that have passed 50% of their
+/// escalation timeout and haven't been reminded yet.
+async fn check_escalation_reminders(state: &AppState) -> Result<(), ApiError> {
+    let reminder_ids = state.payment_repo.find_reminder_due_escalations().await?;
+
+    if reminder_ids.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(count = reminder_ids.len(), "sending escalation reminders");
+
+    for payment_id in reminder_ids {
+        if let Some(payment) = state.payment_repo.get_payment(&payment_id).await? {
+            if payment.status() != PaymentStatus::PendingApproval {
+                continue;
+            }
+
+            // Mark reminder as sent BEFORE sending to prevent duplicates on crash/retry.
+            if let Err(e) = state.payment_repo.set_reminder_sent(&payment_id).await {
+                tracing::warn!(
+                    payment_id = %payment_id,
+                    error = %e,
+                    "failed to set reminder_sent_at, skipping to prevent duplicate"
+                );
+                continue;
+            }
+
+            let notification = crate::notifications::ReminderNotification {
+                payment_id: payment.id,
+                amount: payment.request.amount,
+                currency: payment.request.currency,
+                recipient: payment.request.recipient.identifier.clone(),
+                agent_name: format!("agent:{}", payment.request.agent_id),
+                minutes_remaining: 0, // approximate — exact calc would need the timeout config
+                kind: crate::notifications::ReminderKind::Reminder,
+            };
+
+            if let Err(e) = state.notification_sender.send_reminder(&notification).await {
+                tracing::warn!(
+                    payment_id = %payment_id,
+                    error = %e,
+                    "escalation reminder notification failed (non-blocking)"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
@@ -775,6 +910,51 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                                 payment_id
                             );
                         }
+                    }
+
+                    // Fire webhook for the timed-out/blocked payment.
+                    let timeout_event_type = match payment.status() {
+                        PaymentStatus::Blocked => "payment.blocked",
+                        PaymentStatus::TimedOut => "payment.timed_out",
+                        _ => "payment.timed_out",
+                    };
+                    enqueue_webhook(
+                        &state.redis,
+                        WebhookEvent {
+                            event_type: timeout_event_type.to_string(),
+                            payload: serde_json::json!({
+                                "payment_id": payment.id.to_string(),
+                                "status": "timed_out",
+                                "reason": "escalation_timeout",
+                                "agent_id": payment.request.agent_id.to_string(),
+                                "amount": payment.request.amount.to_string(),
+                                "currency": payment.request.currency,
+                            }),
+                            agent_id: Some(*payment.request.agent_id.as_uuid()),
+                        },
+                    )
+                    .await;
+
+                    // Send timeout notification via configured channels.
+                    let timeout_notification = crate::notifications::ReminderNotification {
+                        payment_id: payment.id,
+                        amount: payment.request.amount,
+                        currency: payment.request.currency,
+                        recipient: payment.request.recipient.identifier.clone(),
+                        agent_name: format!("agent:{}", payment.request.agent_id),
+                        minutes_remaining: 0,
+                        kind: crate::notifications::ReminderKind::Timeout,
+                    };
+                    if let Err(e) = state
+                        .notification_sender
+                        .send_reminder(&timeout_notification)
+                        .await
+                    {
+                        tracing::warn!(
+                            payment_id = %payment_id,
+                            error = %e,
+                            "timeout notification failed (non-blocking)"
+                        );
                     }
 
                     // Release the idempotency key — the payment is terminally blocked.

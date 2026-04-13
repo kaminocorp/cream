@@ -33,7 +33,7 @@ function isoTimestampHoursAgo(hours: number): string {
 }
 
 export default async function DashboardPage() {
-  const api = getApiClient();
+  const api = await getApiClient();
   const oneDayAgo = isoTimestampHoursAgo(24);
 
   // Fetch everything in parallel.

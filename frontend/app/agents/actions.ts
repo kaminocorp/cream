@@ -43,7 +43,7 @@ export async function createAgent(
   const nameErr = validateName(name);
   if (nameErr) return { ok: false, message: nameErr };
   try {
-    const api = getApiClient();
+    const api = await getApiClient();
     const res = await api.createAgent({ name, profile_id: profileId });
 
     revalidatePath("/agents");
@@ -68,7 +68,7 @@ export async function updateAgent(
     if (nameErr) return { ok: false, message: nameErr };
   }
   try {
-    const api = getApiClient();
+    const api = await getApiClient();
     await api.updateAgent(agentId, update);
 
     revalidatePath("/agents");
@@ -89,7 +89,7 @@ export async function rotateAgentKey(
 ): Promise<RotateKeyResult> {
   if (!UUID_RE.test(agentId)) return { ok: false, message: "Invalid agent ID format" };
   try {
-    const api = getApiClient();
+    const api = await getApiClient();
     const res = await api.rotateAgentKey(agentId);
 
     revalidatePath(`/agents/${agentId}`);

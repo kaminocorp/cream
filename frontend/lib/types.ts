@@ -276,6 +276,45 @@ export interface WebhookResponse {
   status: string;
 }
 
+export interface WebhookDelivery {
+  id: string;
+  webhook_endpoint_id: WebhookEndpointId;
+  event_type: string;
+  status: "pending" | "delivered" | "failed" | "exhausted";
+  http_status: number | null;
+  attempt: number;
+  max_attempts: number;
+  created_at: string;
+  delivered_at: string | null;
+  last_attempted_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Provider API key types (Phase 16-F)
+// ---------------------------------------------------------------------------
+
+export interface ProviderKeyInfo {
+  id: string;
+  provider_name: string;
+  key_preview: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Policy template types (Phase 16-G)
+// ---------------------------------------------------------------------------
+
+export interface PolicyTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: "starter" | "conservative" | "compliance" | "custom";
+  rules: unknown[];
+  is_builtin: boolean;
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // API error shape (matches ApiError JSON response from Rust)
 // ---------------------------------------------------------------------------

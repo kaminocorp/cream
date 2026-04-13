@@ -12,7 +12,7 @@ import { getApiClient } from "@/lib/api";
  * because it needs to accumulate history, not replace it.
  */
 export default async function ProvidersPage() {
-  const api = getApiClient();
+  const api = await getApiClient();
   const providers = await api.getProviderHealth();
 
   return (

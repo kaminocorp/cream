@@ -46,7 +46,7 @@ export async function approveEscalation(
     return { ok: false, message: "Invalid payment ID format" };
   }
   try {
-    const api = getApiClient();
+    const api = await getApiClient();
     await api.approvePayment(paymentId, reviewerId);
 
     // Revalidate the escalations page so the next render reflects the
@@ -79,7 +79,7 @@ export async function rejectEscalation(
     return { ok: false, message: "Invalid payment ID format" };
   }
   try {
-    const api = getApiClient();
+    const api = await getApiClient();
     await api.rejectPayment(paymentId, reviewerId, reason);
 
     revalidatePath("/escalations");

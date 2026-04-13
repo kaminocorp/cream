@@ -10,7 +10,7 @@ interface Props {
 
 export default async function PolicyPage({ params }: Props) {
   const { id } = await params;
-  const api = getApiClient();
+  const api = await getApiClient();
   const { agent, profile, rules } = await api.getAgentPolicy(id);
 
   return (

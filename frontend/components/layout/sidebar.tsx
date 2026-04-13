@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button";
 import {
   LayoutDashboard, ArrowLeftRight, Users, ShieldCheck,
   AlertTriangle, FileText, Activity, Settings, Menu, X,
+  LogOut,
 } from "lucide-react";
+import { logout } from "@/app/(auth)/login/actions";
 
 const nav = [
   { href: "/",             label: "Overview",     icon: LayoutDashboard },
@@ -26,9 +28,44 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(href + "/");
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  /** Operator email from JWT session. Undefined for legacy API key auth. */
+  operatorEmail?: string;
+  /** Operator role from JWT session (e.g. "admin", "viewer"). */
+  operatorRole?: string;
+}
+
+export function Sidebar({ operatorEmail, operatorRole }: SidebarProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [isLoggingOut, startLogout] = useTransition();
+
+  function handleLogout() {
+    startLogout(async () => {
+      await logout();
+    });
+  }
+
+  const operatorSection = operatorEmail ? (
+    <div className="mt-auto border-t px-2 pt-3">
+      <div className="mb-2">
+        <p className="truncate text-sm font-medium text-zinc-800">{operatorEmail}</p>
+        {operatorRole && (
+          <p className="text-xs capitalize text-zinc-400">{operatorRole}</p>
+        )}
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="w-full justify-start gap-2 text-zinc-500 hover:text-zinc-900"
+        onClick={handleLogout}
+        disabled={isLoggingOut}
+      >
+        <LogOut className="h-3.5 w-3.5" />
+        {isLoggingOut ? "Signing out..." : "Sign out"}
+      </Button>
+    </div>
+  ) : null;
 
   const navItems = (
     <>
@@ -62,6 +99,7 @@ export function Sidebar() {
       {/* Desktop sidebar */}
       <aside className="hidden h-screen w-56 shrink-0 flex-col border-r bg-zinc-50 px-3 py-4 lg:flex">
         {navItems}
+        {operatorSection}
       </aside>
 
       {/* Mobile toggle */}
@@ -94,6 +132,7 @@ export function Sidebar() {
             }}
           >
             {navItems}
+            {operatorSection}
           </aside>
         </>
       )}

@@ -61,7 +61,7 @@ const txColumns: Column<AuditEntry>[] = [
  */
 export default async function AgentDetailPage({ params }: Props) {
   const { id } = await params;
-  const api = getApiClient();
+  const api = await getApiClient();
 
   const [policy, recentTx] = await Promise.all([
     api.getAgentPolicy(id),

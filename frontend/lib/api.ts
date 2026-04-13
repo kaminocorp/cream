@@ -17,6 +17,9 @@ import {
   CardControls,
   CardType,
   WebhookResponse,
+  WebhookDelivery,
+  ProviderKeyInfo,
+  PolicyTemplate,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -216,23 +219,112 @@ export class CreamApiClient {
   }): Promise<WebhookResponse> {
     return request(this.baseUrl, this.apiKey, "POST", "/v1/webhooks", config);
   }
+
+  async listWebhooks(): Promise<WebhookResponse[]> {
+    return request(this.baseUrl, this.apiKey, "GET", "/v1/webhooks");
+  }
+
+  async deleteWebhook(id: string): Promise<void> {
+    return request(this.baseUrl, this.apiKey, "DELETE", `/v1/webhooks/${id}`);
+  }
+
+  async getWebhookDeliveries(
+    webhookId: string,
+    limit = 50,
+    offset = 0,
+  ): Promise<WebhookDelivery[]> {
+    const params = new URLSearchParams({ limit: limit.toString(), offset: offset.toString() });
+    return request(
+      this.baseUrl,
+      this.apiKey,
+      "GET",
+      `/v1/webhooks/${webhookId}/deliveries?${params}`,
+    );
+  }
+
+  async testWebhook(id: string): Promise<void> {
+    return request(this.baseUrl, this.apiKey, "POST", `/v1/webhooks/${id}/test`);
+  }
+
+  // --- Provider Keys ---
+
+  async getProviderKeys(): Promise<ProviderKeyInfo[]> {
+    return request(this.baseUrl, this.apiKey, "GET", "/v1/settings/provider-keys");
+  }
+
+  async saveProviderKey(providerName: string, apiKey: string): Promise<ProviderKeyInfo> {
+    return request(this.baseUrl, this.apiKey, "PUT", "/v1/settings/provider-keys", {
+      provider_name: providerName,
+      api_key: apiKey,
+    });
+  }
+
+  // --- Policy Templates ---
+
+  async listTemplates(): Promise<PolicyTemplate[]> {
+    return request(this.baseUrl, this.apiKey, "GET", "/v1/policy-templates");
+  }
+
+  async applyTemplate(
+    templateId: string,
+    agentId: string,
+  ): Promise<{ template_name: string; rules_inserted: number }> {
+    return request(
+      this.baseUrl,
+      this.apiKey,
+      "POST",
+      `/v1/policy-templates/${templateId}/apply/${agentId}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Singleton factory — import this in server components
+// Authenticated client factory — import this in server components / actions
 // ---------------------------------------------------------------------------
 
-// Module-level singleton — persists across requests in Next's long-lived
-// Node process. If CREAM_API_KEY is rotated at runtime, redeploy to pick
-// up the new value (env vars are read only at singleton creation time).
-let _client: CreamApiClient | null = null;
+/**
+ * Build a `CreamApiClient` for the current request.
+ *
+ * Auth resolution order:
+ *   1. JWT access token from `cream_access` httpOnly cookie (set by login)
+ *      — if the token is expired or about to expire, a transparent refresh
+ *        is attempted via the `cream_refresh` cookie before giving up.
+ *   2. Legacy `CREAM_API_KEY` env var (backward compat for deployments that
+ *      haven't migrated to JWT auth yet).
+ *
+ * Because the token can vary per request (cookies are request-scoped),
+ * there is no module-level singleton — a fresh client is built each time.
+ * This is cheap: no network I/O unless a refresh is needed.
+ */
+export async function getApiClient(): Promise<CreamApiClient> {
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "";
 
-export function getApiClient(): CreamApiClient {
-  if (!_client) {
-    _client = new CreamApiClient(
-      process.env.NEXT_PUBLIC_API_URL ?? "",
-      process.env.CREAM_API_KEY ?? "",
-    );
+  // --- Try cookie-based JWT auth ---
+  const {
+    getSession,
+    getAccessToken,
+    isTokenExpired,
+    refreshSession,
+  } = await import("./auth");
+
+  const session = await getSession();
+
+  if (session) {
+    if (isTokenExpired(session)) {
+      // Access token expired — try refresh
+      const refreshed = await refreshSession();
+      if (refreshed) {
+        const newToken = await getAccessToken();
+        if (newToken) return new CreamApiClient(baseUrl, newToken);
+      }
+      // Refresh failed — fall through to legacy key
+    } else {
+      const token = await getAccessToken();
+      if (token) return new CreamApiClient(baseUrl, token);
+    }
   }
-  return _client;
+
+  // --- Fall back to legacy CREAM_API_KEY ---
+  const legacyKey = process.env.CREAM_API_KEY ?? "";
+  return new CreamApiClient(baseUrl, legacyKey);
 }

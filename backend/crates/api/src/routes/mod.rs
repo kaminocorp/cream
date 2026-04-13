@@ -1,6 +1,10 @@
 pub mod agents;
 pub mod audit;
+pub mod auth;
 pub mod cards;
+pub mod integrations;
 pub mod payments;
 pub mod providers;
+pub mod settings;
+pub mod templates;
 pub mod webhooks;

@@ -28,14 +28,51 @@ pub struct AppConfig {
     /// authenticates the caller as the operator (dashboard / admin).
     ///
     /// Phase 15.1 interim design: a single shared key loaded from
-    /// `OPERATOR_API_KEY`. Phase 16-A replaces this with real per-user auth
+    /// `OPERATOR_API_KEY`. Phase 16-B replaces this with real per-user auth
     /// tied to an `operators` table; at that point this field becomes a
-    /// legacy fallback that 16-A can delete.
+    /// legacy fallback that 16-B can delete.
     ///
     /// Left unset = no operator access. The dashboard will be unable to
     /// reach operator-only endpoints (403), which is the correct behavior
     /// for deployments where operator auth has not been configured.
     pub operator_api_key: Option<String>,
+    /// Timeout (seconds) for outbound webhook HTTP requests.
+    pub webhook_delivery_timeout_secs: u64,
+    /// Maximum delivery attempts per webhook event (including initial attempt).
+    pub webhook_max_retries: u16,
+    /// HMAC secret for signing/verifying JWT access tokens. Must be at least
+    /// 32 characters. If unset, JWT auth is disabled and only the legacy
+    /// `OPERATOR_API_KEY` works.
+    pub jwt_secret: Option<String>,
+    /// Access token lifetime in seconds (default: 900 = 15 minutes).
+    pub jwt_access_ttl_secs: i64,
+    /// Refresh token lifetime in seconds (default: 604800 = 7 days).
+    pub jwt_refresh_ttl_secs: i64,
+    /// Slack bot OAuth token (xoxb-...). If unset, Slack notifications are disabled.
+    pub slack_bot_token: Option<String>,
+    /// Slack channel ID to post escalation messages to.
+    pub slack_channel_id: Option<String>,
+    /// Slack app signing secret for verifying inbound callbacks.
+    pub slack_signing_secret: Option<String>,
+    /// SMTP host for email notifications (e.g. "smtp.gmail.com").
+    pub smtp_host: Option<String>,
+    /// SMTP port (default 587 for STARTTLS).
+    pub smtp_port: u16,
+    /// SMTP username.
+    pub smtp_username: Option<String>,
+    /// SMTP password.
+    pub smtp_password: Option<String>,
+    /// Sender address for notification emails.
+    pub email_from: Option<String>,
+    /// Recipient address for escalation notification emails.
+    pub escalation_email_to: Option<String>,
+    /// Resend API key (alternative to SMTP).
+    pub resend_api_key: Option<String>,
+    /// Dashboard base URL for deep links in emails (e.g. "https://dashboard.cream.io").
+    pub dashboard_base_url: Option<String>,
+    /// AES-256 key (hex-encoded, 64 chars = 32 bytes) for encrypting provider API keys at rest.
+    /// If unset, provider key storage endpoints return 503.
+    pub provider_key_encryption_secret: Option<Vec<u8>>,
 }
 
 impl AppConfig {
@@ -54,6 +91,31 @@ impl AppConfig {
         let rate_limit_requests = parse_env("RATE_LIMIT_REQUESTS", 100)?;
         let rate_limit_window_secs = parse_env("RATE_LIMIT_WINDOW_SECS", 60)?;
         let escalation_check_interval_secs = parse_env("ESCALATION_CHECK_INTERVAL_SECS", 30)?;
+        let webhook_delivery_timeout_secs = parse_env("WEBHOOK_DELIVERY_TIMEOUT_SECS", 10)?;
+        let webhook_max_retries: u16 = parse_env("WEBHOOK_MAX_RETRIES", 5)?;
+        let jwt_access_ttl_secs: i64 = parse_env("JWT_ACCESS_TTL_SECS", 900)?;
+        let jwt_refresh_ttl_secs: i64 = parse_env("JWT_REFRESH_TTL_SECS", 604800)?;
+
+        let jwt_secret = match env::var("JWT_SECRET") {
+            Ok(val) => {
+                let trimmed = val.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.len() < MIN_OPERATOR_KEY_LEN {
+                    return Err(ConfigError::Invalid(
+                        "JWT_SECRET",
+                        format!(
+                            "must be at least {MIN_OPERATOR_KEY_LEN} characters (got {})",
+                            trimmed.len()
+                        ),
+                    ));
+                } else {
+                    Some(trimmed)
+                }
+            }
+            Err(_) => None,
+        };
+
         let cors_allowed_origins: Vec<String> = env::var("CORS_ALLOWED_ORIGINS")
             .unwrap_or_default()
             .split(',')
@@ -84,11 +146,54 @@ impl AppConfig {
             Err(_) => None,
         };
 
-        if operator_api_key.is_none() {
+        let slack_bot_token = env::var("SLACK_BOT_TOKEN").ok().filter(|s| !s.trim().is_empty());
+        let slack_channel_id = env::var("SLACK_CHANNEL_ID").ok().filter(|s| !s.trim().is_empty());
+        let slack_signing_secret =
+            env::var("SLACK_SIGNING_SECRET").ok().filter(|s| !s.trim().is_empty());
+
+        if slack_bot_token.is_some() && slack_channel_id.is_some() && slack_signing_secret.is_some()
+        {
+            tracing::info!("Slack integration enabled");
+        }
+
+        let smtp_host = env::var("SMTP_HOST").ok().filter(|s| !s.trim().is_empty());
+        let smtp_port: u16 = parse_env("SMTP_PORT", 587)?;
+        let smtp_username = env::var("SMTP_USERNAME").ok().filter(|s| !s.trim().is_empty());
+        let smtp_password = env::var("SMTP_PASSWORD").ok().filter(|s| !s.trim().is_empty());
+        let email_from = env::var("EMAIL_FROM").ok().filter(|s| !s.trim().is_empty());
+        let escalation_email_to =
+            env::var("ESCALATION_EMAIL_TO").ok().filter(|s| !s.trim().is_empty());
+        let resend_api_key = env::var("RESEND_API_KEY").ok().filter(|s| !s.trim().is_empty());
+        let dashboard_base_url =
+            env::var("DASHBOARD_BASE_URL").ok().filter(|s| !s.trim().is_empty());
+
+        let provider_key_encryption_secret = env::var("PROVIDER_KEY_ENCRYPTION_SECRET")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|hex_str| {
+                let bytes = hex::decode(hex_str.trim()).ok()?;
+                if bytes.len() == 32 {
+                    Some(bytes)
+                } else {
+                    tracing::warn!(
+                        "PROVIDER_KEY_ENCRYPTION_SECRET must be 64 hex chars (32 bytes), got {} bytes — ignoring",
+                        bytes.len()
+                    );
+                    None
+                }
+            });
+
+        if operator_api_key.is_none() && jwt_secret.is_none() {
             tracing::warn!(
-                "OPERATOR_API_KEY not set — operator-only endpoints (agent list/create/update, \
-                 approve/reject, audit cross-agent) will return 401. Set it to enable the \
-                 dashboard."
+                "neither JWT_SECRET nor OPERATOR_API_KEY is set — operator-only endpoints \
+                 (agent list/create/update, approve/reject, audit cross-agent) will return 401"
+            );
+        } else if operator_api_key.is_none() && jwt_secret.is_some() {
+            tracing::info!("JWT auth enabled; OPERATOR_API_KEY not set (legacy auth disabled)");
+        } else if operator_api_key.is_some() && jwt_secret.is_none() {
+            tracing::info!(
+                "OPERATOR_API_KEY set (legacy auth); JWT_SECRET not set — consider migrating \
+                 to JWT auth (Phase 16-B)"
             );
         }
 
@@ -102,6 +207,23 @@ impl AppConfig {
             escalation_check_interval_secs,
             cors_allowed_origins,
             operator_api_key,
+            webhook_delivery_timeout_secs,
+            webhook_max_retries,
+            jwt_secret,
+            jwt_access_ttl_secs,
+            jwt_refresh_ttl_secs,
+            slack_bot_token,
+            slack_channel_id,
+            slack_signing_secret,
+            smtp_host,
+            smtp_port,
+            smtp_username,
+            smtp_password,
+            email_from,
+            escalation_email_to,
+            resend_api_key,
+            dashboard_base_url,
+            provider_key_encryption_secret,
         })
     }
 }

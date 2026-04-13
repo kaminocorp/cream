@@ -394,3 +394,179 @@ pub async fn reject(
 
     Ok(Json(PaymentResponse::from(&payment)))
 }
+
+// ---------------------------------------------------------------------------
+// Internal helpers — reused by Slack callback (Phase 16-D)
+// ---------------------------------------------------------------------------
+
+/// Approve a payment that is currently in PendingApproval state.
+/// Used by both the HTTP handler and the Slack callback.
+pub(crate) async fn approve_payment_internal(
+    state: &AppState,
+    mut payment: Payment,
+    reviewer_id: &str,
+    reason: Option<&str>,
+) -> Result<PaymentResponse, ApiError> {
+    validate_review_fields(reviewer_id, &reason.map(String::from))?;
+
+    payment.transition(PaymentStatus::Approved)?;
+    let updated = state
+        .payment_repo
+        .update_payment_if_status(&payment, "pending_approval")
+        .await?;
+    if !updated {
+        return Err(ApiError::ValidationError(
+            "payment status changed concurrently (possibly timed out)".to_string(),
+        ));
+    }
+
+    let (agent, profile) = crate::extractors::auth::lookup_agent_by_id(
+        &state.db,
+        &payment.request.agent_id,
+    )
+    .await?
+    .ok_or_else(|| ApiError::NotFound("agent".to_string()))?;
+
+    let auth_agent = crate::extractors::auth::AuthenticatedAgent { agent, profile };
+
+    let review = HumanReviewRecord {
+        reviewer_id: reviewer_id.to_string(),
+        decision: PolicyAction::Approve,
+        reason: reason.map(String::from),
+        decided_at: Utc::now(),
+    };
+
+    let request_json = serde_json::to_value(&payment.request)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize request: {e}")))?;
+    let justification_json = serde_json::to_value(&payment.request.justification)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize justification: {e}")))?;
+
+    let audit_entry = AuditEntry {
+        id: AuditEntryId::new(),
+        timestamp: Utc::now(),
+        agent_id: payment.request.agent_id,
+        agent_profile_id: auth_agent.profile.id,
+        payment_id: Some(payment.id),
+        request: request_json,
+        justification: justification_json,
+        policy_evaluation: PolicyEvaluationRecord {
+            rules_evaluated: vec![],
+            matching_rules: vec![],
+            final_decision: PolicyAction::Approve,
+            decision_latency_ms: 0,
+        },
+        routing_decision: None,
+        provider_response: None,
+        final_status: payment.status(),
+        human_review: Some(review),
+        on_chain_tx_hash: None,
+    };
+    state
+        .audit_writer
+        .append(&audit_entry, Some(payment.id))
+        .await
+        .map_err(ApiError::from)?;
+
+    let idempotency_key = payment.request.idempotency_key.clone();
+    let payment_id_for_idemp = payment.id;
+
+    let orchestrator = PaymentOrchestrator::new(state.clone());
+    let response = orchestrator
+        .resume_after_approval(&auth_agent, payment)
+        .await?;
+
+    if let Err(e) = state
+        .idempotency_guard
+        .complete(&idempotency_key, &payment_id_for_idemp)
+        .await
+    {
+        tracing::warn!(
+            payment_id = %payment_id_for_idemp,
+            error = %e,
+            "idempotency guard completion failed after approval; payment already persisted"
+        );
+    }
+
+    Ok(response)
+}
+
+/// Reject a payment that is currently in PendingApproval state.
+/// Used by both the HTTP handler and the Slack callback.
+pub(crate) async fn reject_payment_internal(
+    state: &AppState,
+    mut payment: Payment,
+    reviewer_id: &str,
+    reason: Option<&str>,
+) -> Result<PaymentResponse, ApiError> {
+    validate_review_fields(reviewer_id, &reason.map(String::from))?;
+
+    payment.transition(PaymentStatus::Rejected)?;
+    let updated = state
+        .payment_repo
+        .update_payment_if_status(&payment, "pending_approval")
+        .await?;
+    if !updated {
+        return Err(ApiError::ValidationError(
+            "payment status changed concurrently (possibly timed out)".to_string(),
+        ));
+    }
+
+    let profile_id = crate::extractors::auth::lookup_profile_id_for_agent(
+        &state.db,
+        &payment.request.agent_id,
+    )
+    .await?
+    .ok_or_else(|| ApiError::NotFound("agent".to_string()))?;
+
+    let review = HumanReviewRecord {
+        reviewer_id: reviewer_id.to_string(),
+        decision: PolicyAction::Block,
+        reason: reason.map(String::from),
+        decided_at: Utc::now(),
+    };
+
+    let request_json = serde_json::to_value(&payment.request)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize request: {e}")))?;
+    let justification_json = serde_json::to_value(&payment.request.justification)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize justification: {e}")))?;
+
+    let audit_entry = AuditEntry {
+        id: AuditEntryId::new(),
+        timestamp: Utc::now(),
+        agent_id: payment.request.agent_id,
+        agent_profile_id: profile_id,
+        payment_id: Some(payment.id),
+        request: request_json,
+        justification: justification_json,
+        policy_evaluation: PolicyEvaluationRecord {
+            rules_evaluated: vec![],
+            matching_rules: vec![],
+            final_decision: PolicyAction::Block,
+            decision_latency_ms: 0,
+        },
+        routing_decision: None,
+        provider_response: None,
+        final_status: payment.status(),
+        human_review: Some(review),
+        on_chain_tx_hash: None,
+    };
+    state
+        .audit_writer
+        .append(&audit_entry, Some(payment.id))
+        .await
+        .map_err(ApiError::from)?;
+
+    if let Err(e) = state
+        .idempotency_guard
+        .release(&payment.request.idempotency_key, &payment.id)
+        .await
+    {
+        tracing::warn!(
+            payment_id = %payment.id,
+            error = %e,
+            "failed to release idempotency key after rejection"
+        );
+    }
+
+    Ok(PaymentResponse::from(&payment))
+}

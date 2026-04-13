@@ -33,8 +33,8 @@ pub mod prelude {
     pub use crate::card::{CardControls, CardStatus, CardType, VirtualCard};
     pub use crate::error::DomainError;
     pub use crate::ids::{
-        AgentId, AgentProfileId, AuditEntryId, IdempotencyKey, PaymentId, PolicyRuleId,
-        VirtualCardId, WebhookEndpointId,
+        AgentId, AgentProfileId, AuditEntryId, IdempotencyKey, OperatorId, PaymentId,
+        PolicyRuleId, VirtualCardId, WebhookEndpointId,
     };
     pub use crate::justification::{Justification, PaymentCategory};
     pub use crate::payment::{

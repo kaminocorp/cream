@@ -1,5 +1,13 @@
 # Changelog
 
+- [0.20.0](#0200--2026-04-13) — Phase 16-H: escalation monitor enhancement — reminder notifications at 50% timeout, timeout notifications on expiry, send_reminder() trait method for Slack + Email, reminder_sent_at idempotency column, 464 tests — **Phase 16 complete**
+- [0.19.0](#0190--2026-04-13) — Phase 16-G: policy template library — 3 built-in templates (Starter/Conservative/Compliance), list/get/apply endpoints, template library UI with agent selector, tabbed policies page, 463 tests
+- [0.18.0](#0180--2026-04-13) — Phase 16-F: settings UI + provider key storage — tabbed settings page (Webhooks/Provider Keys/Account), AES-256-GCM encrypted provider key storage, webhook CRUD + delivery log, account identity display, 461 tests
+- [0.17.0](#0170--2026-04-13) — Phase 16-E: email escalation notifications — EmailNotifier with SMTP (lettre) + Resend API dual-mode delivery, HTML template with payment details + dashboard deep link, fire-and-forget dispatch via CompositeNotifier, 455 tests
+- [0.16.0](#0160--2026-04-13) — Phase 16-D: Slack escalation notifications — NotificationSender trait, SlackNotifier with Block Kit + approve/reject buttons, Slack callback endpoint with HMAC-SHA256 verification, CompositeNotifier for multi-channel dispatch, fire-and-forget notification in orchestrator, 450 tests
+- [0.15.0](#0150--2026-04-13) — Phase 16-C: frontend auth — login/register pages, httpOnly cookie sessions, auto token refresh, conditional sidebar, operator identity display + logout, `getApiClient()` async migration, CREAM_API_KEY backward compat, 441 tests
+- [0.14.0](#0140--2026-04-13) — Phase 16-B: operator JWT auth — operators table, argon2id passwords, JWT access/refresh tokens with rotation + reuse detection, 5 auth endpoints, AuthenticatedOperator gains identity fields, legacy OPERATOR_API_KEY backward compat, 441 tests
+- [0.13.0](#0130--2026-04-13) — Phase 16-A: webhook delivery worker — HMAC-SHA256 signing, Redis-backed delivery queue, exponential backoff retry worker, delivery log table, 4 new operator endpoints (list/delete/deliveries/test), orchestrator wired for terminal events, 433 tests
 - [0.12.7](#0127--2026-04-13) — Pre-Phase-16 final fix: AgentForm ref-during-render ESLint violation resolved
 - [0.12.6](#0126--2026-04-13) — Pre-Phase-16 hardening: 7 high-priority fixes — proportionality fail-safe tests, reviewer identity configurable, name validation alignment, typed API client, frontend lint + npm audit CI, Rust API Dockerfile
 - [0.12.5](#0125--2026-04-13) — Low-severity cleanup: 14 fixes — dead code removal, AUDIT_COLUMNS constant, AgentStatusBadge dedup, relativeTime guard, sidebar a11y, date filter debounce, orchestrator dedup, MSRV, MCP version dedup, justfile cleanup, dep audit CI, PageHeader re-export, MCP test coverage (22→29)
@@ -63,6 +71,342 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.20.0 — 2026-04-13
+
+**Phase 16-H: Escalation Monitor Enhancement**
+
+Enhanced the escalation timeout monitor with proactive reminder notifications at 50% of the timeout duration and explicit timeout notifications when payments are auto-blocked. Extended the `NotificationSender` trait with `send_reminder()` implemented for Slack (warning/no_entry emoji messages) and Email (HTML reminder/timeout emails). `reminder_sent_at` column on payments prevents duplicate reminders. 464 backend tests pass (up from 463). Zero clippy warnings. **Phase 16 is now fully complete (A through H).**
+
+### New Features
+
+- **50% timeout reminder** — When a payment in `PendingApproval` has consumed half its escalation timeout, a reminder notification is sent via all configured channels (Slack, email). The `reminder_sent_at` column is set *before* sending to prevent duplicates on crash/retry. (`backend/crates/api/src/orchestrator.rs`)
+
+- **Timeout notification** — When a payment times out and is auto-blocked, a `ReminderKind::Timeout` notification is dispatched in addition to the existing webhook. (`backend/crates/api/src/orchestrator.rs`)
+
+- **`send_reminder()` trait method** — Added to `NotificationSender` with a default no-op implementation for backward compatibility. `ReminderNotification` carries payment details + `ReminderKind` (Reminder or Timeout). (`backend/crates/api/src/notifications/mod.rs`)
+
+- **Slack reminder messages** — Warning emoji for reminders, no_entry for timeouts. Text-only Block Kit messages with agent and payment context. (`backend/crates/api/src/notifications/slack.rs`)
+
+- **Email reminder/timeout** — HTML emails with appropriate titles ("Escalation Reminder" vs "Escalation Timed Out"). (`backend/crates/api/src/notifications/email.rs`)
+
+### Migration
+
+- `ALTER TABLE payments ADD COLUMN reminder_sent_at TIMESTAMPTZ` — NULL until 50% reminder is sent
+
+### Tests
+
+1 new test (total: 464):
+- ReminderKind::Reminder and ReminderKind::Timeout are distinguishable
+
+---
+
+## 0.19.0 — 2026-04-13
+
+**Phase 16-G: Policy Template Library**
+
+Pre-built policy template library with three built-in templates: Starter (basic $1K per-tx/$5K daily limits), Conservative ($50 human review threshold, first-time merchant flagging), and Compliance (SOX/PCI-aligned with geo restrictions, crypto/gambling blocks). Templates are applied by INSERTing rules into the agent's profile without deleting existing custom rules. Policies page rewritten with tabbed layout (Agent Policies + Templates). 463 backend tests pass (up from 461). Zero clippy warnings. Frontend lint, typecheck, and production build clean.
+
+### New Features
+
+- **Policy templates table** — `policy_templates` with name, description, category (starter/conservative/compliance/custom), JSONB rules array, and is_builtin flag. 3 seed templates shipped. (`backend/migrations/20260414200005_create_policy_templates.up.sql`)
+
+- **Template list/get/apply endpoints** — `GET /v1/policy-templates` lists all, `GET /v1/policy-templates/{id}` returns detail, `POST /v1/policy-templates/{id}/apply/{agent_id}` INSERTs template rules into the agent's profile. Apply logs an `operator_event`. (`backend/crates/api/src/routes/templates.rs`)
+
+- **Template library UI** — Card-per-template with category badge, description, rule count, and "Apply" button. Clicking "Apply" opens an agent selector showing active agents. (`frontend/components/policy/template-library.tsx`)
+
+- **Tabbed policies page** — "Agent Policies" tab (existing per-agent cards) and "Templates" tab (template library). (`frontend/app/policies/policies-client.tsx`)
+
+### New Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/v1/policy-templates` | Operator | List all templates |
+| `GET` | `/v1/policy-templates/{id}` | Operator | Get template detail |
+| `POST` | `/v1/policy-templates/{id}/apply/{agent_id}` | Operator | Apply template rules to agent |
+
+### Tests
+
+2 new backend tests (total: 463):
+- Template response serialization
+- Seed rule JSON validation
+
+---
+
+## 0.18.0 — 2026-04-13
+
+**Phase 16-F: Settings UI + Webhook Management + Provider Key Storage**
+
+Full Settings page rewrite with three tabs: Webhooks (register, list, delete, test, delivery log), Provider Keys (AES-256-GCM encrypted storage for Stripe/Airwallex/Coinbase with masked preview), and Account (operator identity from JWT session). Backend adds `provider_api_keys` table with AES-256-GCM encryption at rest, two new endpoints, and hex-encoded encryption secret configuration. 461 backend tests pass (up from 455). Zero clippy warnings. Frontend lint, typecheck, and production build clean.
+
+### New Features
+
+- **Provider API key encryption** — Keys are encrypted with AES-256-GCM using a server-side encryption secret before storage. 12-byte random nonce prepended to ciphertext. Only the last 4 characters are stored in plaintext for masked display. (`backend/crates/api/src/routes/settings.rs`)
+
+- **Settings page with tabs** — Three tabs: Webhooks (register/list/delete/test/delivery log), Provider Keys (Stripe/Airwallex/Coinbase entry with masked preview), Account (operator email/role/ID display). (`frontend/app/settings/`)
+
+- **Webhook management UI** — Register new webhook endpoints with URL + signing secret. View registered endpoints with status badges. Delete endpoints. Send test events. View paginated delivery log with status, HTTP code, attempt count, and timestamps. (`frontend/components/settings/`)
+
+- **Provider key entry UI** — Per-provider cards showing masked key preview and last updated timestamp. Click to add/update key. Keys submitted over HTTPS, encrypted at rest by the backend. (`frontend/components/settings/provider-keys-form.tsx`)
+
+### New Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `PUT` | `/v1/settings/provider-keys` | Operator | Save (upsert) encrypted provider API key |
+| `GET` | `/v1/settings/provider-keys` | Operator | List provider keys (masked, last 4 chars) |
+
+### Migration
+
+- `provider_api_keys` table with `UNIQUE(provider_name)`, `CHECK(provider_name IN ('stripe', 'airwallex', 'coinbase'))`, `BYTEA encrypted_key`, `TEXT key_preview`
+
+### Config
+
+- `PROVIDER_KEY_ENCRYPTION_SECRET` — Hex-encoded 32-byte AES-256 key (64 hex chars)
+
+### Dependencies
+
+- `aes-gcm = "0.10"` — AES-256-GCM authenticated encryption
+
+### Tests
+
+6 new backend tests (total: 461):
+- AES-256-GCM encrypt/decrypt round-trip, unique nonces, wrong secret fails, key preview masking, short data rejection
+
+---
+
+## 0.17.0 — 2026-04-13
+
+**Phase 16-E: Email Notification for Escalations**
+
+Email notification channel for payment escalations with dual-mode delivery: SMTP via `lettre` (STARTTLS, async) and Resend HTTP API as a managed alternative. HTML email template includes payment amount, currency, recipient, agent name, justification, timeout, and a deep link to the dashboard escalation queue. Plugs into the `NotificationSender` trait and `CompositeNotifier` from Phase 16-D — email fires alongside Slack when both are configured. 455 backend tests pass (up from 450). Zero clippy warnings.
+
+### New Features
+
+- **`EmailNotifier`** — Dual-mode email delivery: SMTP via `lettre::AsyncSmtpTransport` with STARTTLS, or Resend HTTP API via `reqwest`. Config auto-detects mode: Resend if `RESEND_API_KEY` is set, SMTP otherwise. All delivery errors are logged and swallowed (fire-and-forget). (`backend/crates/api/src/notifications/email.rs`)
+
+- **HTML email template** — Clean, inline-styled HTML with payment details table, justification blockquote, and a "Review in Dashboard" CTA button linking to `/escalations?payment_id=xxx`. CTA is omitted when `DASHBOARD_BASE_URL` is not configured. (`EmailNotifier::build_html_body()`)
+
+### Config
+
+| Env var | Purpose |
+|---------|---------|
+| `EMAIL_FROM` | Sender email address (required for email) |
+| `ESCALATION_EMAIL_TO` | Recipient address (required for email) |
+| `RESEND_API_KEY` | Resend API key (preferred over SMTP) |
+| `SMTP_HOST` | SMTP server hostname |
+| `SMTP_PORT` | SMTP port (default 587) |
+| `SMTP_USERNAME` | SMTP auth username |
+| `SMTP_PASSWORD` | SMTP auth password |
+| `DASHBOARD_BASE_URL` | Dashboard URL for deep links |
+
+### Dependencies
+
+- `lettre = "0.11"` — Async SMTP email transport
+
+### Tests
+
+5 new tests (total: 455):
+- HTML body contains all payment fields
+- Deep link included/omitted based on dashboard URL
+- Config graceful None when env vars missing
+- SMTP failure swallowed (non-blocking)
+
+---
+
+## 0.16.0 — 2026-04-13
+
+**Phase 16-D: Slack Integration for Escalation Notifications**
+
+Trait-based notification system with Slack as the first channel. When a payment is escalated to PendingApproval, a Block Kit message with interactive Approve/Reject buttons is sent to the configured Slack channel. A callback endpoint with HMAC-SHA256 signature verification handles button clicks. Notification failure never blocks the payment pipeline — the dashboard escalation queue always works as fallback. 450 backend tests pass (up from 441). Zero clippy warnings.
+
+### New Features
+
+- **`NotificationSender` trait** — Async trait for sending escalation notifications. Implementations are fire-and-forget — errors are logged and swallowed. `NoopNotifier` (default when no channel configured) and `CompositeNotifier` (dispatches to multiple channels with per-channel failure isolation) are built-in. (`backend/crates/api/src/notifications/mod.rs`)
+
+- **`SlackNotifier`** — Sends Block Kit messages via `chat.postMessage`. Message includes payment amount, currency, recipient, agent name, justification summary, timeout countdown, and interactive Approve/Reject buttons. Action IDs link to `payment_id` for callback processing. (`backend/crates/api/src/notifications/slack.rs`)
+
+- **Slack callback endpoint** — `POST /v1/integrations/slack/callback` handles interactive message actions. Verifies Slack signing secret (HMAC-SHA256 with 5-minute replay window), parses the URL-encoded payload, extracts action and payment ID, then calls `approve_payment_internal()` or `reject_payment_internal()`. (`backend/crates/api/src/routes/integrations.rs`)
+
+- **Orchestrator notification dispatch** — After a payment transitions to `PendingApproval`, `fire_escalation_notification()` is called as a best-effort notification. (`backend/crates/api/src/orchestrator.rs`)
+
+- **`approve_payment_internal()` / `reject_payment_internal()`** — Extracted `pub(crate)` helpers from the HTTP approve/reject handlers. Reusable by the Slack callback (and future email/webhook channels) without Axum extractor wrappers. (`backend/crates/api/src/routes/payments.rs`)
+
+### New Endpoint
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/v1/integrations/slack/callback` | Slack signing secret | Interactive message handler for approve/reject |
+
+### Config
+
+- `SLACK_BOT_TOKEN` — Bot OAuth token (optional; Slack disabled if unset)
+- `SLACK_CHANNEL_ID` — Channel ID for escalation messages
+- `SLACK_SIGNING_SECRET` — App signing secret for callback verification
+
+### Dependencies
+
+- `subtle = "2"` — Constant-time HMAC comparison
+- `urlencoding = "2"` — URL decoding for Slack payload
+
+### Tests
+
+9 new tests (total: 450):
+- NotificationSender: noop succeeds, composite dispatches all, composite continues after failure
+- Slack: Block Kit payload format, amount/currency display, signature valid/wrong secret/old timestamp/malformed
+
+---
+
+## 0.15.0 — 2026-04-13
+
+**Phase 16-C: Frontend Auth (Login/Register + Session Management)**
+
+Cookie-based session management for the Next.js operator dashboard. Login and registration pages with httpOnly cookie storage for JWT tokens, automatic token refresh on expiry, conditional sidebar rendering based on session state, and operator identity display with logout. Full backward compatibility — `CREAM_API_KEY` env var continues to work alongside JWT cookie auth. 441 backend tests pass. Frontend lint, typecheck, and production build clean.
+
+### New Features
+
+- **Login page** — Email + password form at `/login`. Uses `useTransition` for pending state. On success, sets httpOnly cookies and redirects to dashboard. (`frontend/app/(auth)/login/page.tsx`)
+
+- **Registration page** — Name + email + password + confirm form at `/register`. Checks `GET /v1/auth/status` on mount — redirects to `/login` if operators already exist (registration is first-operator-only). (`frontend/app/(auth)/register/page.tsx`)
+
+- **Auth server actions** — `login()`, `register()`, `logout()` server actions that call the backend auth endpoints and manage httpOnly cookies. `logout()` revokes the refresh token on the backend before clearing cookies. (`frontend/app/(auth)/login/actions.ts`)
+
+- **Session helpers** — `getSession()` reads the `cream_access` cookie and decodes JWT claims (without signature verification — backend handles that). `requireAuth()` redirects to `/login` if no session. `refreshSession()` transparently refreshes expired tokens via `/v1/auth/refresh`. (`frontend/lib/auth.ts`)
+
+- **Conditional root layout** — Root layout is now `async`. Reads session from cookie. If authenticated: renders sidebar + main content. If not: renders children only (auth pages provide their own centered layout via `(auth)` route group). (`frontend/app/layout.tsx`)
+
+- **Operator identity in sidebar** — Sidebar now displays operator email and role at the bottom, with a "Sign out" button that calls the `logout` server action. Props: `operatorEmail`, `operatorRole`. (`frontend/components/layout/sidebar.tsx`)
+
+- **Async `getApiClient()`** — API client factory reads JWT from `cream_access` cookie first, proactively refreshes if expired, falls back to `CREAM_API_KEY` env var. No more module-level singleton (tokens are request-scoped). All 15 call sites updated. (`frontend/lib/api.ts`)
+
+### Cookie Strategy
+
+| Cookie | Flags | TTL |
+|--------|-------|-----|
+| `cream_access` | httpOnly, secure (prod), SameSite=Lax | 15 min |
+| `cream_refresh` | httpOnly, secure (prod), SameSite=Lax | 7 days |
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `frontend/lib/auth.ts` | Session helpers: getSession, requireAuth, refreshSession, cookie management |
+| `frontend/app/(auth)/layout.tsx` | Centered auth layout (no sidebar) |
+| `frontend/app/(auth)/login/page.tsx` | Login form |
+| `frontend/app/(auth)/login/actions.ts` | login, register, logout server actions |
+| `frontend/app/(auth)/register/page.tsx` | First-operator registration form |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `frontend/lib/api.ts` | `getApiClient()` async + cookie auth + refresh + legacy fallback |
+| `frontend/app/layout.tsx` | Async + conditional sidebar based on session |
+| `frontend/components/layout/sidebar.tsx` | Operator email/role display + logout button |
+| 15 `app/` files | `getApiClient()` → `await getApiClient()` |
+
+---
+
+## 0.14.0 — 2026-04-13
+
+**Phase 16-B: Operator JWT Authentication**
+
+Real per-operator identity replacing the interim shared `OPERATOR_API_KEY`. Custom JWT auth issued by the Rust backend: argon2id password hashing, short-lived access tokens (15min), refresh tokens (7d) with rotation and reuse detection. Full backward compatibility — `OPERATOR_API_KEY` continues to work alongside JWT. 441 backend tests pass (up from 433). Zero clippy warnings.
+
+### New Features
+
+- **Operators table** — `operators(id, email, name, password_hash, role, status, created_at, updated_at, last_login_at)` with `admin` and `viewer` roles. Passwords hashed with argon2id (unique salts). (`backend/migrations/20260414200002_create_operators.up.sql`)
+
+- **Operator sessions table** — `operator_sessions(id, operator_id, refresh_token_hash, expires_at, created_at, revoked_at)` for refresh token tracking. Supports token rotation with reuse detection: if a revoked token is re-presented, all sessions for that operator are revoked (stolen token scenario). (`backend/migrations/20260414200003_create_operator_sessions.up.sql`)
+
+- **`OperatorId` typed ID** — `typed_id!(OperatorId, "opr")` with prefixed serialization (`opr_<uuid>`), matching the pattern of all other typed IDs. (`backend/crates/models/src/ids.rs`)
+
+- **`AuthenticatedOperator` now carries identity** — `operator_id: Option<OperatorId>`, `email: Option<String>`, `role: String`. Fields are `None` for legacy API key auth, populated for JWT auth. All existing handlers continue to work unchanged. (`backend/crates/api/src/extractors/auth.rs`)
+
+- **JWT verification in auth extractor** — `try_jwt_auth()` decodes bearer tokens as JWT first (if `JWT_SECRET` configured), falling back to legacy `OPERATOR_API_KEY` comparison. Both auth methods coexist. (`backend/crates/api/src/extractors/auth.rs`)
+
+- **`operator_events.operator_id` column** — Nullable FK to `operators`, enriching the operator event audit trail with real identity. (`backend/migrations/20260414200003_create_operator_sessions.up.sql`)
+
+### New Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/v1/auth/status` | None | Returns `{registered: bool}` — are any operators registered? |
+| `POST` | `/v1/auth/register` | None | First operator registration (blocked when operators exist) |
+| `POST` | `/v1/auth/login` | None | Email + password → access + refresh tokens |
+| `POST` | `/v1/auth/refresh` | Refresh token | Rotate refresh token, issue new access token |
+| `POST` | `/v1/auth/logout` | Refresh token | Revoke refresh token |
+
+Auth routes are **not** behind the main rate limiter — they operate independently.
+
+### Config
+
+- `JWT_SECRET` — HMAC secret for JWT signing (32+ chars, optional — if unset, JWT auth disabled)
+- `JWT_ACCESS_TTL_SECS` — Access token lifetime (default: 900 = 15 minutes)
+- `JWT_REFRESH_TTL_SECS` — Refresh token lifetime (default: 604800 = 7 days)
+
+### Dependencies
+
+- `jsonwebtoken = "9"` — JWT issuance and verification
+- `argon2 = "0.5"` — Password hashing (argon2id)
+- `rand = "0.9"` — Cryptographic random token generation
+
+### Tests
+
+8 new tests (total: 441):
+- Password hash round-trip, wrong password, argon2id format, unique salts
+- JWT issue + decode, wrong secret, expired token (beyond 60s leeway)
+- MIN_PASSWORD_LEN constant
+
+---
+
+## 0.13.0 — 2026-04-13
+
+**Phase 16-A: Webhook Delivery System**
+
+Complete outbound webhook delivery infrastructure. Events are enqueued via Redis when payments reach terminal status, delivered to registered endpoints with HMAC-SHA256 signatures, and retried with exponential backoff on failure. 433 backend tests pass (up from 418). Zero clippy warnings. Frontend lint + typecheck clean.
+
+### New Features
+
+- **Webhook delivery worker** — Background Tokio task pops events from `cream:webhook:queue` (Redis BRPOP), looks up matching endpoints by event type filter and agent scope, signs the payload with HMAC-SHA256, and POSTs to the endpoint URL. Configurable delivery timeout via `WEBHOOK_DELIVERY_TIMEOUT_SECS` (default 10s). (`backend/crates/api/src/webhook_worker.rs`)
+
+- **Webhook retry worker** — Background Tokio task polls `webhook_delivery_log` for failed deliveries eligible for retry. Exponential backoff: 5s → 30s → 2m → 15m → 1h (5 attempts max). Exhausted deliveries are marked `exhausted` and no longer retried. Uses `SELECT FOR UPDATE SKIP LOCKED` to prevent concurrent double-delivery. (`backend/crates/api/src/webhook_worker.rs`)
+
+- **HMAC-SHA256 payload signing** — Stripe-compatible signature scheme: `Cream-Signature: t=<unix_ts>,v1=<hex_hmac>`. The signed message is `<timestamp>.<body>`. Includes `sign_payload()` and `verify_signature()` functions with constant-time comparison. (`backend/crates/api/src/webhook_worker.rs`)
+
+- **Webhook delivery log table** — `webhook_delivery_log` with columns for endpoint ID, event type, payload, delivery status, HTTP status, response body, attempt count, retry scheduling, and timestamps. Partial index on `(next_retry_at) WHERE status = 'failed' AND attempt < max_attempts` for efficient retry worker queries. (`backend/migrations/20260414200001_webhook_delivery_log.up.sql`)
+
+- **`webhook_endpoints.agent_id` column** — Nullable FK to `agents`, enabling agent-scoped webhook delivery. Endpoints without an agent_id receive all events (broadcast). (`backend/migrations/20260414200001_webhook_delivery_log.up.sql`)
+
+- **Orchestrator webhook wiring** — Terminal payment transitions (Settled, Failed, Blocked, TimedOut) now enqueue webhook events. Includes both the `process()` and `resume_after_approval()` paths, plus the escalation timeout monitor. Webhook enqueue is fire-and-forget — never blocks the payment pipeline. (`backend/crates/api/src/orchestrator.rs`)
+
+### New Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/v1/webhooks` | Operator | List all registered webhook endpoints |
+| `DELETE` | `/v1/webhooks/{id}` | Operator | Deactivate a webhook endpoint |
+| `GET` | `/v1/webhooks/{id}/deliveries` | Operator | Paginated delivery log for an endpoint |
+| `POST` | `/v1/webhooks/{id}/test` | Operator | Send a test ping event to an endpoint |
+
+### Config
+
+- `WEBHOOK_DELIVERY_TIMEOUT_SECS` — HTTP timeout for outbound webhook requests (default: 10)
+- `WEBHOOK_MAX_RETRIES` — Maximum delivery attempts including initial (default: 5)
+
+### Dependencies
+
+- `hmac = "0.12"` — HMAC-SHA256 for webhook payload signing
+- `reqwest = "0.12"` — HTTP client for outbound webhook delivery
+
+### Tests
+
+15 new tests (total: 433):
+- Signing: format, determinism, different secrets/bodies/timestamps, verify valid/invalid/malformed
+- Event matching: wildcard, exact, prefix, empty array, malformed
+- Retry backoff schedule values
 
 ---
 

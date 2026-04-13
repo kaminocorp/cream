@@ -3,7 +3,11 @@ use std::sync::Arc;
 
 use cream_api::config::AppConfig;
 use cream_api::db::PgPaymentRepository;
+use cream_api::notifications::{self, NotificationSender};
+use cream_api::notifications::email::{EmailConfig, EmailNotifier};
+use cream_api::notifications::slack::{SlackConfig, SlackNotifier};
 use cream_api::orchestrator::escalation_timeout_monitor;
+use cream_api::webhook_worker::{webhook_delivery_worker, webhook_retry_worker};
 use cream_api::state::AppState;
 use cream_audit::{PgAuditReader, PgAuditWriter};
 use cream_models::prelude::*;
@@ -107,6 +111,28 @@ async fn main() -> anyhow::Result<()> {
     // Payment repository.
     let payment_repo = Arc::new(PgPaymentRepository::new(db.clone()));
 
+    // Notification sender (Slack, email, etc.). Falls back to NoopNotifier
+    // when no channel is configured.
+    let notification_sender: Arc<dyn NotificationSender> = {
+        let mut senders: Vec<Box<dyn NotificationSender>> = Vec::new();
+
+        if let Some(slack_config) = SlackConfig::from_env() {
+            tracing::info!("Slack escalation notifications enabled");
+            senders.push(Box::new(SlackNotifier::new(slack_config)));
+        }
+
+        if let Some(email_config) = EmailConfig::from_env() {
+            tracing::info!("Email escalation notifications enabled");
+            senders.push(Box::new(EmailNotifier::new(email_config)));
+        }
+
+        if senders.is_empty() {
+            Arc::new(notifications::NoopNotifier)
+        } else {
+            Arc::new(notifications::CompositeNotifier::new(senders))
+        }
+    };
+
     // Build AppState.
     let state = AppState {
         db,
@@ -119,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         idempotency_guard,
         circuit_breaker,
         payment_repo,
+        notification_sender,
         config: Arc::new(config.clone()),
     };
 
@@ -129,6 +156,16 @@ async fn main() -> anyhow::Result<()> {
     let monitor_state = state.clone();
     tokio::spawn(async move {
         escalation_timeout_monitor(monitor_state).await;
+    });
+
+    // Spawn webhook delivery workers (Phase 16-A).
+    let delivery_state = state.clone();
+    tokio::spawn(async move {
+        webhook_delivery_worker(delivery_state).await;
+    });
+    let retry_state = state.clone();
+    tokio::spawn(async move {
+        webhook_retry_worker(retry_state).await;
     });
 
     // Start serving.
