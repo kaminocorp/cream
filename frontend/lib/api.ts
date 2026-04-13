@@ -41,6 +41,8 @@ async function request<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
     // Opt out of caching for real-time dashboard data.
     cache: "no-store",
+    // Prevent indefinite hangs if the backend is unreachable or stalled.
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -168,7 +170,7 @@ export class CreamApiClient {
     if (filters.q)           params.set("q", filters.q);
     if (filters.agent_id)    params.set("agent_id", filters.agent_id);
     if (filters.limit)       params.set("limit", filters.limit.toString());
-    if (filters.offset)      params.set("offset", filters.offset.toString());
+    if (filters.offset !== undefined) params.set("offset", filters.offset.toString());
     const qs = params.toString();
     return request(this.baseUrl, this.apiKey, "GET", `/v1/audit${qs ? `?${qs}` : ""}`);
   }
@@ -195,7 +197,13 @@ export class CreamApiClient {
   // --- Providers ---
 
   async getProviderHealth(): Promise<ProviderHealth[]> {
-    return request(this.baseUrl, this.apiKey, "GET", "/v1/providers/health");
+    const res = await request<{ providers: ProviderHealth[] }>(
+      this.baseUrl,
+      this.apiKey,
+      "GET",
+      "/v1/providers/health",
+    );
+    return res.providers;
   }
 
   // --- Webhooks ---
@@ -213,6 +221,9 @@ export class CreamApiClient {
 // Singleton factory — import this in server components
 // ---------------------------------------------------------------------------
 
+// Module-level singleton — persists across requests in Next's long-lived
+// Node process. If CREAM_API_KEY is rotated at runtime, redeploy to pick
+// up the new value (env vars are read only at singleton creation time).
 let _client: CreamApiClient | null = null;
 
 export function getApiClient(): CreamApiClient {

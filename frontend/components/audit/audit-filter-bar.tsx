@@ -59,6 +59,23 @@ interface AuditFilterBarProps {
 const ALL = "__all__";
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert an ISO 8601 UTC string back to the `datetime-local` input format
+ * in the user's local timezone. Without this, stored UTC values shift by the
+ * timezone offset on every page reload (e.g. 16:00 SGT → stored as 08:00Z →
+ * displayed as 08:00 on next load).
+ */
+function isoToLocal(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -111,6 +128,7 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
           </label>
           <Input
             id="audit-search"
+            key={current.q}
             placeholder="Search..."
             defaultValue={current.q}
             onKeyDown={(e) => {
@@ -202,7 +220,8 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             id="audit-from"
             type="datetime-local"
             className="w-[190px]"
-            defaultValue={current.from ? current.from.slice(0, 16) : ""}
+            key={`from-${current.from}`}
+            defaultValue={current.from ? isoToLocal(current.from) : ""}
             onChange={(e) => {
               const val = e.target.value;
               pushParams({ from: val ? new Date(val).toISOString() : "" });
@@ -218,7 +237,8 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             id="audit-to"
             type="datetime-local"
             className="w-[190px]"
-            defaultValue={current.to ? current.to.slice(0, 16) : ""}
+            key={`to-${current.to}`}
+            defaultValue={current.to ? isoToLocal(current.to) : ""}
             onChange={(e) => {
               const val = e.target.value;
               pushParams({ to: val ? new Date(val).toISOString() : "" });
@@ -237,6 +257,7 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             min="0"
             className="w-[120px]"
             placeholder="0.00"
+            key={`min-${current.min_amount}`}
             defaultValue={current.min_amount}
             onBlur={(e) => pushParams({ min_amount: e.target.value })}
             onKeyDown={(e) => {
@@ -256,6 +277,7 @@ export function AuditFilterBar({ agents }: AuditFilterBarProps) {
             min="0"
             className="w-[120px]"
             placeholder="∞"
+            key={`max-${current.max_amount}`}
             defaultValue={current.max_amount}
             onBlur={(e) => pushParams({ max_amount: e.target.value })}
             onKeyDown={(e) => {

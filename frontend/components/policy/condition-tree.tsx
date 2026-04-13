@@ -58,8 +58,9 @@ function classify(cond: PolicyCondition): ConditionVariant {
     const fc = cond.FieldCheck;
     return { type: "FieldCheck", field: fc.field, op: fc.op, value: fc.value };
   }
-  // Fallback for unexpected shapes
-  return { type: "FieldCheck", field: "?", op: "?", value: cond };
+  // Fallback for unexpected / future condition shapes — render visibly
+  // so operators notice rather than silently masking unknown variants.
+  return { type: "Unknown" as "FieldCheck", field: "unknown", op: "?", value: cond };
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +81,17 @@ interface ConditionTreeProps {
  * Max visual depth mirrors the backend's 32-level limit but in practice
  * rules rarely exceed 3-4 levels.
  */
+const MAX_DEPTH = 32;
+
 export function ConditionTree({ condition, depth = 0 }: ConditionTreeProps) {
+  if (depth >= MAX_DEPTH) {
+    return (
+      <span className="text-xs italic text-zinc-400">
+        … (max nesting depth reached)
+      </span>
+    );
+  }
+
   const variant = classify(condition);
 
   if (variant.type === "FieldCheck") {

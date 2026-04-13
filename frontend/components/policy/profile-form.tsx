@@ -210,13 +210,16 @@ export function ProfileForm({ agentId, profile }: ProfileFormProps) {
 
     const input: UpdateProfileInput = {};
 
-    // Only send changed fields.
-    if (maxPerTx && maxPerTx !== profile.max_per_transaction) input.max_per_transaction = maxPerTx;
-    if (maxDaily && maxDaily !== profile.max_daily_spend) input.max_daily_spend = maxDaily;
-    if (maxWeekly && maxWeekly !== profile.max_weekly_spend) input.max_weekly_spend = maxWeekly;
-    if (maxMonthly && maxMonthly !== profile.max_monthly_spend) input.max_monthly_spend = maxMonthly;
-    if (escalationThreshold && escalationThreshold !== profile.escalation_threshold)
-      input.escalation_threshold = escalationThreshold;
+    // Only send changed fields. Compare against initial value directly —
+    // using a truthiness guard (`if (val && ...)`) would prevent clearing
+    // a limit back to empty/null, permanently locking the operator into
+    // whatever was first set.
+    if (maxPerTx !== (profile.max_per_transaction ?? "")) input.max_per_transaction = maxPerTx || null;
+    if (maxDaily !== (profile.max_daily_spend ?? "")) input.max_daily_spend = maxDaily || null;
+    if (maxWeekly !== (profile.max_weekly_spend ?? "")) input.max_weekly_spend = maxWeekly || null;
+    if (maxMonthly !== (profile.max_monthly_spend ?? "")) input.max_monthly_spend = maxMonthly || null;
+    if (escalationThreshold !== (profile.escalation_threshold ?? ""))
+      input.escalation_threshold = escalationThreshold || null;
 
     // Always send categories/rails/geo if they differ.
     if (JSON.stringify(categories) !== JSON.stringify(profile.allowed_categories))
@@ -227,7 +230,7 @@ export function ProfileForm({ agentId, profile }: ProfileFormProps) {
       input.geographic_restrictions = geo;
 
     if (Object.keys(input).length === 0) {
-      setSuccess(true);
+      // Nothing changed — don't hit the API.
       return;
     }
 

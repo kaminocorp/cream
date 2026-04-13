@@ -240,6 +240,72 @@ struct AgentProfileRow {
     updated_at: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------------------
+// Row → domain type conversion (single source of truth for the JSON
+// round-trip from sqlx rows to cream_models types)
+// ---------------------------------------------------------------------------
+
+fn agent_from_row(row: &AgentRow) -> Result<Agent, ApiError> {
+    let json = serde_json::json!({
+        "id": format!("agt_{}", row.id),
+        "profile_id": format!("prof_{}", row.profile_id),
+        "name": row.name,
+        "status": row.status,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    });
+    serde_json::from_value(json)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize agent: {e}")))
+}
+
+fn profile_from_row(row: &AgentProfileRow) -> Result<AgentProfile, ApiError> {
+    let json = serde_json::json!({
+        "id": format!("prof_{}", row.id),
+        "name": row.name,
+        "version": row.version,
+        "max_per_transaction": row.max_per_transaction,
+        "max_daily_spend": row.max_daily_spend,
+        "max_weekly_spend": row.max_weekly_spend,
+        "max_monthly_spend": row.max_monthly_spend,
+        "allowed_categories": row.allowed_categories,
+        "allowed_rails": row.allowed_rails,
+        "geographic_restrictions": row.geographic_restrictions,
+        "escalation_threshold": row.escalation_threshold,
+        "timezone": row.timezone,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    });
+    serde_json::from_value(json)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize profile: {e}")))
+}
+
+const PROFILE_COLUMNS: &str =
+    "id, name, version, max_per_transaction, max_daily_spend, \
+     max_weekly_spend, max_monthly_spend, allowed_categories, \
+     allowed_rails, geographic_restrictions, escalation_threshold, \
+     timezone, created_at, updated_at";
+
+async fn fetch_profile_row(
+    pool: &PgPool,
+    profile_id: uuid::Uuid,
+    agent_id: uuid::Uuid,
+) -> Result<AgentProfileRow, ApiError> {
+    let query = format!("SELECT {PROFILE_COLUMNS} FROM agent_profiles WHERE id = $1");
+    sqlx::query_as(&query)
+        .bind(profile_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "agent profile {profile_id} not found for agent {agent_id}"
+            ))
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Public lookup helpers
+// ---------------------------------------------------------------------------
+
 /// Look up an agent and its profile by agent ID. Used by the approve flow and any
 /// path that needs full agent context without an API key (e.g. after human review).
 pub(crate) async fn lookup_agent_by_id(
@@ -259,55 +325,9 @@ pub(crate) async fn lookup_agent_by_id(
         None => return Ok(None),
     };
 
-    let profile_row: AgentProfileRow = sqlx::query_as(
-        "SELECT id, name, version, max_per_transaction, max_daily_spend,
-                max_weekly_spend, max_monthly_spend, allowed_categories,
-                allowed_rails, geographic_restrictions, escalation_threshold,
-                timezone, created_at, updated_at
-         FROM agent_profiles WHERE id = $1",
-    )
-    .bind(agent_row.profile_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        ApiError::Internal(anyhow::anyhow!(
-            "agent profile {} not found for agent {}",
-            agent_row.profile_id,
-            agent_row.id
-        ))
-    })?;
+    let profile_row = fetch_profile_row(pool, agent_row.profile_id, agent_row.id).await?;
 
-    let agent_json = serde_json::json!({
-        "id": format!("agt_{}", agent_row.id),
-        "profile_id": format!("prof_{}", agent_row.profile_id),
-        "name": agent_row.name,
-        "status": agent_row.status,
-        "created_at": agent_row.created_at,
-        "updated_at": agent_row.updated_at,
-    });
-    let agent: Agent = serde_json::from_value(agent_json)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize agent: {e}")))?;
-
-    let profile_json = serde_json::json!({
-        "id": format!("prof_{}", profile_row.id),
-        "name": profile_row.name,
-        "version": profile_row.version,
-        "max_per_transaction": profile_row.max_per_transaction,
-        "max_daily_spend": profile_row.max_daily_spend,
-        "max_weekly_spend": profile_row.max_weekly_spend,
-        "max_monthly_spend": profile_row.max_monthly_spend,
-        "allowed_categories": profile_row.allowed_categories,
-        "allowed_rails": profile_row.allowed_rails,
-        "geographic_restrictions": profile_row.geographic_restrictions,
-        "escalation_threshold": profile_row.escalation_threshold,
-        "timezone": profile_row.timezone,
-        "created_at": profile_row.created_at,
-        "updated_at": profile_row.updated_at,
-    });
-    let profile: AgentProfile = serde_json::from_value(profile_json)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize profile: {e}")))?;
-
-    Ok(Some((agent, profile)))
+    Ok(Some((agent_from_row(&agent_row)?, profile_from_row(&profile_row)?)))
 }
 
 /// Look up only the AgentProfileId for a given agent. Lightweight alternative when
@@ -340,52 +360,7 @@ async fn lookup_agent_by_key_hash(
     .await?
     .ok_or(ApiError::Unauthorized)?;
 
-    let profile_row: AgentProfileRow = sqlx::query_as(
-        "SELECT id, name, version, max_per_transaction, max_daily_spend,
-                max_weekly_spend, max_monthly_spend, allowed_categories,
-                allowed_rails, geographic_restrictions, escalation_threshold,
-                timezone, created_at, updated_at
-         FROM agent_profiles
-         WHERE id = $1",
-    )
-    .bind(agent_row.profile_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(ApiError::Internal(anyhow::anyhow!(
-        "agent profile {} not found for agent {}",
-        agent_row.profile_id,
-        agent_row.id
-    )))?;
+    let profile_row = fetch_profile_row(pool, agent_row.profile_id, agent_row.id).await?;
 
-    let agent_json = serde_json::json!({
-        "id": format!("agt_{}", agent_row.id),
-        "profile_id": format!("prof_{}", agent_row.profile_id),
-        "name": agent_row.name,
-        "status": agent_row.status,
-        "created_at": agent_row.created_at,
-        "updated_at": agent_row.updated_at,
-    });
-    let agent: Agent = serde_json::from_value(agent_json)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize agent: {e}")))?;
-
-    let profile_json = serde_json::json!({
-        "id": format!("prof_{}", profile_row.id),
-        "name": profile_row.name,
-        "version": profile_row.version,
-        "max_per_transaction": profile_row.max_per_transaction,
-        "max_daily_spend": profile_row.max_daily_spend,
-        "max_weekly_spend": profile_row.max_weekly_spend,
-        "max_monthly_spend": profile_row.max_monthly_spend,
-        "allowed_categories": profile_row.allowed_categories,
-        "allowed_rails": profile_row.allowed_rails,
-        "geographic_restrictions": profile_row.geographic_restrictions,
-        "escalation_threshold": profile_row.escalation_threshold,
-        "timezone": profile_row.timezone,
-        "created_at": profile_row.created_at,
-        "updated_at": profile_row.updated_at,
-    });
-    let profile: AgentProfile = serde_json::from_value(profile_json)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize profile: {e}")))?;
-
-    Ok((agent, profile))
+    Ok((agent_from_row(&agent_row)?, profile_from_row(&profile_row)?))
 }

@@ -35,7 +35,13 @@ function pushSnapshot(
   const next = new Map(history);
   for (const p of providers) {
     const buf = next.get(p.provider_id) ?? [];
-    const updated = [...buf, { t: elapsed, health: p }];
+    // Deduplicate: if the last entry has the same timestamp (tab-switch
+    // double-poll can fire twice within the same second), replace it
+    // rather than appending a duplicate that creates vertical chart lines.
+    const last = buf[buf.length - 1];
+    const updated = last && last.t === elapsed
+      ? [...buf.slice(0, -1), { t: elapsed, health: p }]
+      : [...buf, { t: elapsed, health: p }];
     // Ring buffer: keep only the last MAX_SAMPLES entries.
     next.set(
       p.provider_id,

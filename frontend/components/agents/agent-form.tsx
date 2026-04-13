@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,7 +71,10 @@ export function AgentForm({ mode, profiles, initial }: AgentFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
 
-  // Post-create: one-time API key display
+  // Post-create: one-time API key display.
+  // The ref is a safety net — if the component re-renders due to an error
+  // boundary above us, React state is lost but refs survive until unmount.
+  const createdKeyRef = useRef<string | null>(null);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
 
@@ -93,6 +96,7 @@ export function AgentForm({ mode, profiles, initial }: AgentFormProps) {
           profileId,
         );
         if (result.ok) {
+          createdKeyRef.current = result.apiKey;
           setCreatedKey(result.apiKey);
           setCreatedAgentId(result.agentId);
         } else {
@@ -120,7 +124,9 @@ export function AgentForm({ mode, profiles, initial }: AgentFormProps) {
   };
 
   // After successful create, show the API key instead of the form.
-  if (createdKey) {
+  // Fall back to the ref if React state was lost (e.g. error boundary).
+  const displayKey = createdKey ?? createdKeyRef.current;
+  if (displayKey) {
     return (
       <div className="mx-auto max-w-md space-y-4">
         <h2 className="text-base font-medium">Agent created</h2>
@@ -128,8 +134,11 @@ export function AgentForm({ mode, profiles, initial }: AgentFormProps) {
           Save the API key below. You will not be able to see it again.
         </p>
         <ApiKeyDisplay
-          apiKey={createdKey}
-          onAcknowledge={() => router.push(`/agents/${createdAgentId}`)}
+          apiKey={displayKey}
+          onAcknowledge={() => {
+            createdKeyRef.current = null;
+            router.push(`/agents/${createdAgentId}`);
+          }}
         />
       </div>
     );

@@ -21,6 +21,18 @@ export type RotateKeyResult =
   | { ok: false; message: string };
 
 // ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateName(name: string): string | null {
+  if (!name.trim()) return "Agent name is required";
+  if (name.trim().length > 255) return "Agent name exceeds 255 characters";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
 
@@ -28,6 +40,8 @@ export async function createAgent(
   name: string,
   profileId: string,
 ): Promise<CreateAgentResult> {
+  const nameErr = validateName(name);
+  if (nameErr) return { ok: false, message: nameErr };
   try {
     const api = getApiClient();
     const res = await api.createAgent({ name, profile_id: profileId });
@@ -48,6 +62,11 @@ export async function updateAgent(
   agentId: string,
   update: { name?: string; status?: AgentStatus; profile_id?: string },
 ): Promise<ActionResult> {
+  if (!UUID_RE.test(agentId)) return { ok: false, message: "Invalid agent ID format" };
+  if (update.name !== undefined) {
+    const nameErr = validateName(update.name);
+    if (nameErr) return { ok: false, message: nameErr };
+  }
   try {
     const api = getApiClient();
     await api.updateAgent(agentId, update);
@@ -68,6 +87,7 @@ export async function updateAgent(
 export async function rotateAgentKey(
   agentId: string,
 ): Promise<RotateKeyResult> {
+  if (!UUID_RE.test(agentId)) return { ok: false, message: "Invalid agent ID format" };
   try {
     const api = getApiClient();
     const res = await api.rotateAgentKey(agentId);

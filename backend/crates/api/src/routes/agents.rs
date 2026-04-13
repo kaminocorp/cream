@@ -3,9 +3,11 @@
 //! Phase 15.1 introduces operator-level agent lifecycle management. Two
 //! classes of handler live here:
 //!
-//! 1. **Policy read/write** (`get_policy`, `update_policy`) — callable by
-//!    either an agent acting on itself, or an operator acting on any agent.
-//!    These accept [`AuthenticatedPrincipal`] and branch on the variant.
+//! 1. **Policy read** (`get_policy`) — callable by either an agent acting on
+//!    itself, or an operator acting on any agent. Accepts
+//!    [`AuthenticatedPrincipal`] and branches on the variant.
+//!    **Policy write** (`update_policy`) — operator-only. Agents must not be
+//!    able to self-elevate their own spending limits.
 //!
 //! 2. **Agent lifecycle** (`list_agents`, `create_agent`, `update_agent`,
 //!    `rotate_agent_key`) — callable only by operators. These accept
@@ -103,16 +105,43 @@ pub struct UpdateAgentRequest {
 }
 
 /// Request body for `PUT /v1/agents/{id}/policy`.
+///
+/// Spending limit fields use `Option<Option<Decimal>>` with a custom
+/// deserializer so the API can distinguish three states:
+///   - **Key absent** from JSON → `None` → don't change the column
+///   - **Key present as `null`** → `Some(None)` → clear (set column to NULL)
+///   - **Key present with value** → `Some(Some(v))` → set column to `v`
+///
+/// The standard `Option<T>` + `COALESCE` pattern cannot distinguish absent
+/// from null, making it impossible to clear a spending limit once set.
 #[derive(Debug, Deserialize)]
 pub struct UpdatePolicyRequest {
-    pub max_per_transaction: Option<rust_decimal::Decimal>,
-    pub max_daily_spend: Option<rust_decimal::Decimal>,
-    pub max_weekly_spend: Option<rust_decimal::Decimal>,
-    pub max_monthly_spend: Option<rust_decimal::Decimal>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub max_per_transaction: Option<Option<rust_decimal::Decimal>>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub max_daily_spend: Option<Option<rust_decimal::Decimal>>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub max_weekly_spend: Option<Option<rust_decimal::Decimal>>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub max_monthly_spend: Option<Option<rust_decimal::Decimal>>,
     pub allowed_categories: Option<Vec<PaymentCategory>>,
     pub allowed_rails: Option<Vec<RailPreference>>,
     pub geographic_restrictions: Option<Vec<CountryCode>>,
-    pub escalation_threshold: Option<rust_decimal::Decimal>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub escalation_threshold: Option<Option<rust_decimal::Decimal>>,
+}
+
+/// Deserialize a field that supports three states: absent, explicit null, or
+/// a value. When the key is present (even as `null`), serde calls this
+/// function; the `#[serde(default)]` attribute ensures absent keys produce
+/// `None` without calling this function at all.
+fn deserialize_clearable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    // Key is present — deserialize the inner value (which may be null).
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -158,12 +187,14 @@ pub async fn get_policy(
 
 /// `PUT /v1/agents/{id}/policy` — update an agent's policy profile.
 ///
-/// Operators may update any agent's policy. Agents may only update their
-/// own. Updates are applied directly to the profile row without version
-/// bumping (the full version history is a Phase 16-A concern).
+/// **Operator-only.** Agents must not be able to modify their own spending
+/// limits, allowed categories, or escalation thresholds — that would
+/// undermine the entire control-plane premise. Updates are applied directly
+/// to the profile row without version bumping (the full version history is
+/// a Phase 16-A concern).
 pub async fn update_policy(
     State(state): State<AppState>,
-    principal: AuthenticatedPrincipal,
+    _op: AuthenticatedOperator,
     Path(id): Path<String>,
     ValidatedJson(body): ValidatedJson<UpdatePolicyRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -171,26 +202,15 @@ pub async fn update_policy(
         .parse::<AgentId>()
         .map_err(|e| ApiError::ValidationError(format!("invalid agent ID: {e}")))?;
 
-    principal.authorize_target_agent(&agent_id)?;
-
-    // Resolve target profile_id: same short-circuit as get_policy — if the
-    // caller is the target agent, we already have it; otherwise look up.
-    let profile_id = match &principal {
-        AuthenticatedPrincipal::Agent(a) if a.agent.id == agent_id => a.profile.id,
-        _ => {
-            let (_, profile) = lookup_agent_by_id(&state.db, &agent_id)
-                .await?
-                .ok_or_else(|| ApiError::NotFound(format!("agent {agent_id}")))?;
-            profile.id
-        }
-    };
+    let (_, profile) = lookup_agent_by_id(&state.db, &agent_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {agent_id}")))?;
+    let profile_id = profile.id;
 
     // Validate spending limits are strictly positive when provided.
-    // AgentProfile's custom Deserialize enforces > 0, but this handler
-    // bypasses deserialization (struct literal → SQL). Without this check,
-    // a zero value would pass the DB CHECK (>= 0), be persisted, and then
-    // fail deserialization on the next auth attempt — permanently locking
-    // the agent out.
+    // `Some(Some(v))` = setting a value → must be positive.
+    // `Some(None)` = clearing → allowed (no validation needed).
+    // `None` = absent → no change.
     for (name, value) in [
         ("max_per_transaction", &body.max_per_transaction),
         ("max_daily_spend", &body.max_daily_spend),
@@ -198,7 +218,7 @@ pub async fn update_policy(
         ("max_monthly_spend", &body.max_monthly_spend),
         ("escalation_threshold", &body.escalation_threshold),
     ] {
-        if let Some(v) = value {
+        if let Some(Some(v)) = value {
             if *v <= rust_decimal::Decimal::ZERO {
                 return Err(ApiError::ValidationError(format!(
                     "{name} must be positive, got {v}"
@@ -228,28 +248,45 @@ pub async fn update_policy(
         .transpose()
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize geo: {e}")))?;
 
-    // Use COALESCE to only update fields that are provided.
+    // Spending limits use CASE WHEN instead of COALESCE so that explicit
+    // null clears the column. The boolean flag ($1, $3, ...) is true when
+    // the key was present in JSON; the value ($2, $4, ...) is NULL for
+    // clear or the Decimal for set. COALESCE is still correct for the
+    // array fields (categories, rails, geo) since clearing those means
+    // sending `[]`, not `null`.
     sqlx::query(
         "UPDATE agent_profiles SET
-            max_per_transaction = COALESCE($1, max_per_transaction),
-            max_daily_spend = COALESCE($2, max_daily_spend),
-            max_weekly_spend = COALESCE($3, max_weekly_spend),
-            max_monthly_spend = COALESCE($4, max_monthly_spend),
-            allowed_categories = COALESCE($5, allowed_categories),
-            allowed_rails = COALESCE($6, allowed_rails),
-            geographic_restrictions = COALESCE($7, geographic_restrictions),
-            escalation_threshold = COALESCE($8, escalation_threshold),
+            max_per_transaction   = CASE WHEN $1::boolean THEN $2  ELSE max_per_transaction   END,
+            max_daily_spend       = CASE WHEN $3::boolean THEN $4  ELSE max_daily_spend       END,
+            max_weekly_spend      = CASE WHEN $5::boolean THEN $6  ELSE max_weekly_spend      END,
+            max_monthly_spend     = CASE WHEN $7::boolean THEN $8  ELSE max_monthly_spend     END,
+            allowed_categories    = COALESCE($9,  allowed_categories),
+            allowed_rails         = COALESCE($10, allowed_rails),
+            geographic_restrictions = COALESCE($11, geographic_restrictions),
+            escalation_threshold  = CASE WHEN $12::boolean THEN $13 ELSE escalation_threshold END,
             updated_at = now()
-         WHERE id = $9",
+         WHERE id = $14",
     )
-    .bind(body.max_per_transaction)
-    .bind(body.max_daily_spend)
-    .bind(body.max_weekly_spend)
-    .bind(body.max_monthly_spend)
+    // max_per_transaction
+    .bind(body.max_per_transaction.is_some())
+    .bind(body.max_per_transaction.flatten())
+    // max_daily_spend
+    .bind(body.max_daily_spend.is_some())
+    .bind(body.max_daily_spend.flatten())
+    // max_weekly_spend
+    .bind(body.max_weekly_spend.is_some())
+    .bind(body.max_weekly_spend.flatten())
+    // max_monthly_spend
+    .bind(body.max_monthly_spend.is_some())
+    .bind(body.max_monthly_spend.flatten())
+    // array fields (COALESCE)
     .bind(&categories_json)
     .bind(&rails_json)
     .bind(&geo_json)
-    .bind(body.escalation_threshold)
+    // escalation_threshold
+    .bind(body.escalation_threshold.is_some())
+    .bind(body.escalation_threshold.flatten())
+    // WHERE
     .bind(profile_id.as_uuid())
     .execute(&state.db)
     .await?;
@@ -260,6 +297,11 @@ pub async fn update_policy(
 // ---------------------------------------------------------------------------
 // Agent lifecycle handlers — operator-only
 // ---------------------------------------------------------------------------
+
+// TODO(Phase 16-A): Agent lifecycle mutations (create, update, rotate-key)
+// should write to the audit log. The current audit schema is payment-centric
+// (AuditEntry requires a payment_id); Phase 16-A will introduce an
+// OperatorEvent table for non-payment administrative actions.
 
 /// `GET /v1/agents` — list all agents. Operator-only.
 ///

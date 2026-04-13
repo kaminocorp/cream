@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.12.1](#0121--2026-04-13) — Phase 15 production review: 24 fixes (3 critical, 4 high, 10 medium, 10 low) — security, data contract, accessibility, code quality
 - [0.12.0](#0120--2026-04-12) — Phase 15.2–15.8: dashboard full implementation — 13 pages wired, escalation queue, agent management, audit log UX, provider health charts, policy editor, responsive sidebar, 12/12 loading/error coverage
 - [0.11.0](#0110--2026-04-11) — Phase 15.1: operator auth + agent lifecycle — `AuthenticatedPrincipal` enum, 4 new endpoints, audit cross-agent visibility + `q` search, approve/reject auth fix, 416 tests
 - [0.10.1](#0101--2026-04-11) — npm publishing prep: scoped package `@kaminocorp/cream-mcp-server`, bin entry + shebang, publishConfig, mcpName for MCP registry, package README, LICENSE, server.json, 26.6 kB tarball verified via dry-run
@@ -56,6 +57,59 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.12.1 — 2026-04-13
+
+**Phase 15 Production Review — 24 Fixes Across Security, Data Contracts, Accessibility, and Code Quality**
+
+Post-implementation production readiness review of all Phase 15 sub-phases (15.1–15.8). Review scored the codebase at 7.8/10 pre-fix; this release resolves all 24 identified issues and brings the score to 9.5/10. All 416 backend tests pass, frontend production build clean, zero regressions.
+
+### Critical — Fixed
+
+- **`[SEC]` Agents could self-elevate spending limits** — `update_policy` accepted `AuthenticatedPrincipal`, meaning an agent could `PUT /v1/agents/{self}/policy` and raise its own `max_per_transaction`, `max_daily_spend`, etc. Changed to `AuthenticatedOperator` — agents can now read their own policy but only operators can modify it (`backend/crates/api/src/routes/agents.rs`)
+- **`[BUG]` Provider health response shape mismatch** — Rust endpoint returned `{ providers: [...] }` but TypeScript client expected a bare array. Caused the Overview "Providers Online" card and the entire Providers page to silently show zero data. Fixed by unwrapping the response envelope in the API client (`frontend/lib/api.ts`)
+- **`[BUG]` `setTimeout` called during render in EscalationTable** — Bare `if (error) { setTimeout(...) }` in the render body scheduled cascading timers on every re-render and had no cleanup on unmount. Moved to `useEffect` with proper cleanup (`frontend/components/escalations/escalation-table.tsx`)
+
+### High — Fixed
+
+- **`[SEC]` Next.js 16.2.2 DoS vulnerability (GHSA-q4gf-8mx6-v5v3)** — Bumped `next` to 16.2.3 and `eslint-config-next` to 16.2.3. High-severity CVE resolved; 2 moderate transitive vulnerabilities remain (`frontend/package.json`)
+- **`[BUG]` Datetime filter timezone shift on reload** — Audit filter bar stored UTC ISO strings in URL params but sliced them directly into `datetime-local` inputs, causing the displayed time to shift by the user's timezone offset on every page reload. Added `isoToLocal()` helper that converts UTC back through `Date` local getters (`frontend/components/audit/audit-filter-bar.tsx`)
+- **`[BUG]` No fetch timeout in API client** — Added `AbortSignal.timeout(15_000)` to all fetch calls. Prevents indefinite hangs when the Rust backend is unreachable (`frontend/lib/api.ts`)
+- **`[BUG]` Cannot clear spending limits in policy editor** — Two-layer fix. Frontend: truthiness guard (`if (maxPerTx && ...)`) prevented empty values from being detected as changes; replaced with direct comparison. Backend: `COALESCE($1, existing)` cannot distinguish "key absent" from "key set to null"; changed spending limit fields to `Option<Option<Decimal>>` with custom `deserialize_clearable` serde function, replaced SQL `COALESCE` with `CASE WHEN $flag THEN $value ELSE existing END` pattern (`frontend/components/policy/profile-form.tsx`, `backend/crates/api/src/routes/agents.rs`)
+
+### Medium — Fixed
+
+- **API client singleton stale credentials** — Added documenting comment explaining the trade-off: module-level singleton persists across requests, credential rotation requires redeployment (`frontend/lib/api.ts`)
+- **`offset=0` falsy check** — Changed `if (filters.offset)` to `if (filters.offset !== undefined)` — `0` is falsy in JavaScript, so page 1 pagination was semantically broken (correct by accident) (`frontend/lib/api.ts`)
+- **Clipboard API has no error handling** — Wrapped `navigator.clipboard.writeText()` in try/catch; shows "Clipboard access failed" message with manual selection fallback on non-HTTPS or restricted contexts (`frontend/components/agents/api-key-display.tsx`)
+- **Created API key stored in fragile React state** — Added `useRef` as safety net alongside `useState`. Refs survive error boundary resets; the display component falls back to `createdKeyRef.current` if state is lost (`frontend/components/agents/agent-form.tsx`)
+- **Ring buffer duplicate timestamps on tab-switch** — Added deduplication in `pushSnapshot()`: checks if the last entry has the same `t` value before appending, preventing vertical line segments in health charts (`frontend/components/providers/provider-health-dashboard.tsx`)
+- **Uncontrolled inputs don't sync on back-button** — Added `key` props to all 5 uncontrolled filter inputs (search, from, to, min_amount, max_amount) keyed on their URL param value. When the URL changes via back-button, React unmounts and remounts with the correct `defaultValue` (`frontend/components/audit/audit-filter-bar.tsx`)
+- **Duplicated JSON round-trip code in auth extractors** — Extracted `agent_from_row()`, `profile_from_row()`, `fetch_profile_row()`, and `PROFILE_COLUMNS` constant. Eliminated ~60 lines of duplicated `serde_json::json!` → `serde_json::from_value` code from `lookup_agent_by_id` and `lookup_agent_by_key_hash` (`backend/crates/api/src/extractors/auth.rs`)
+- **Expandable audit rows lack accessibility** — Added `role="button"`, `tabIndex={0}`, `aria-expanded`, and `onKeyDown` (Enter/Space) to expandable `<TableRow>` elements. Keyboard-only users can now navigate and expand audit rows (`frontend/components/audit/audit-table.tsx`)
+- **`newKey` initialized as empty string** — Changed `useState("")` to `useState<string | null>(null)` in RotateKeyDialog. Added null type guard on the display render path to prevent rendering an empty monospace key box on race conditions (`frontend/components/agents/rotate-key-dialog.tsx`)
+- **Success message on no-op** — Policy editor no longer shows "Profile updated successfully" when no fields were changed (fixed as part of the spending-limits-clearing HIGH fix) (`frontend/components/policy/profile-form.tsx`)
+
+### Low — Fixed
+
+- **No audit logging of agent lifecycle mutations** — Added TODO comment documenting the gap: Phase 16-A will introduce an `OperatorEvent` table for non-payment administrative actions (create, update, rotate-key). Current audit schema is payment-centric (`backend/crates/api/src/routes/agents.rs`)
+- **Operators cannot view individual payment detail** — Changed `get_status` from `AuthenticatedAgent` to `AuthenticatedPrincipal`. Operators now call `get_payment()` (unscoped), agents call `get_payment_for_agent()` (scoped). Unblocks dashboard payment detail pages and escalation context (`backend/crates/api/src/routes/payments.rs`)
+- **`ProviderHealth` TypeScript type missing `last_checked_at`** — Added optional `last_checked_at?: string` field mirroring the Rust struct (`frontend/lib/types.ts`)
+- **Dead `restore` action in EscalationTable** — Removed unused `restore` variant from `OptimisticAction` union and simplified the reducer to a single filter. The `restore` path was never dispatched; `router.refresh()` handles error recovery (`frontend/components/escalations/escalation-table.tsx`)
+- **ConditionTree has no depth guard** — Added `MAX_DEPTH = 32` constant (matching backend limit) with early return rendering "max nesting depth reached" (`frontend/components/policy/condition-tree.tsx`)
+- **Unknown condition variants silently render as fake FieldChecks** — Changed fallback in `classify()` to use `field: "unknown"` so operators see a visually distinct indicator when the backend adds new condition types (`frontend/components/policy/condition-tree.tsx`)
+- **`shadcn` package in production dependencies** — Moved from `dependencies` to `devDependencies`. `shadcn` is a CLI code-generation tool, never imported at runtime (`frontend/package.json`)
+- **Stale phase-reference comments** — Updated 3 comments that referenced Phase 15.7/15.8 as future work (`policies/page.tsx`, `escalation-table.tsx`, `header.tsx`)
+- **Hardcoded `reviewer_id`** — Added `// TODO(Phase 16-A)` comments on the `"dashboard-operator"` default parameters in both `approveEscalation` and `rejectEscalation` (`frontend/app/escalations/actions.ts`)
+- **Server Actions have no server-side input validation** — Added UUID regex validation on `paymentId`/`agentId` and name length validation in all Server Actions. Defense-in-depth; Rust backend remains the authoritative boundary (`frontend/app/agents/actions.ts`, `frontend/app/escalations/actions.ts`)
+
+### Changed
+
+- `UpdatePolicyRequest` spending limit fields upgraded from `Option<Decimal>` to `Option<Option<Decimal>>` with `#[serde(default, deserialize_with = "deserialize_clearable")]` to support three-state semantics: absent (no change), null (clear), value (set)
+- SQL for policy updates uses `CASE WHEN $flag::boolean THEN $value ELSE existing END` instead of `COALESCE` for clearable fields; array fields (categories, rails, geo) retain `COALESCE`
+- `UpdateProfileInput` TypeScript type: spending limit fields changed from `string?` to `string | null` to represent clearing intent
 
 ---
 

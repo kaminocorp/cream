@@ -9,8 +9,8 @@ import { ShieldCheck } from "lucide-react";
 /**
  * Policies index. Per-agent rules live at `/agents/{id}/policy`; there is
  * no aggregate "all rules" endpoint. For 15.2 we surface each agent as an
- * entry point to its policy. The full visual + YAML rule editor lands in
- * Phase 15.7.
+ * entry point to its policy. The visual rule editor lives at
+ * `/agents/{id}/policy` (shipped in Phase 15.7).
  *
  * The distinction between "policies" and "agents" here is that this page
  * is rule-focused (what governs the spend?) while `/agents` is

@@ -203,6 +203,7 @@ export interface ProviderHealth {
   p50_latency_ms: number;
   p99_latency_ms: number;
   circuit_state: CircuitState;
+  last_checked_at?: string;      // ISO 8601 — present in Rust ProviderHealth
 }
 
 // ---------------------------------------------------------------------------

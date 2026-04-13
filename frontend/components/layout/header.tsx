@@ -5,9 +5,7 @@ interface HeaderProps {
   title: string;
   /**
    * Subtitle content. Accepts a plain string or arbitrary React nodes
-   * (e.g., inline badges, status pills, monospace IDs). Widened from
-   * `string` in Phase 15.2 to let the agent detail page render an
-   * inline status + profile line.
+   * (e.g., inline badges, status pills, monospace IDs).
    */
   description?: ReactNode;
 }

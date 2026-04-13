@@ -22,10 +22,16 @@ export type ActionResult =
  * Phase 16-A will populate this automatically from the authenticated
  * operator's identity; until then the dashboard hardcodes a placeholder.
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function approveEscalation(
   paymentId: string,
+  // TODO(Phase 16-A): replace hardcoded reviewer_id with authenticated operator identity
   reviewerId: string = "dashboard-operator",
 ): Promise<ActionResult> {
+  if (!UUID_RE.test(paymentId)) {
+    return { ok: false, message: "Invalid payment ID format" };
+  }
   try {
     const api = getApiClient();
     await api.approvePayment(paymentId, reviewerId);
@@ -52,9 +58,13 @@ export async function approveEscalation(
  */
 export async function rejectEscalation(
   paymentId: string,
+  // TODO(Phase 16-A): replace hardcoded reviewer_id with authenticated operator identity
   reviewerId: string = "dashboard-operator",
   reason?: string,
 ): Promise<ActionResult> {
+  if (!UUID_RE.test(paymentId)) {
+    return { ok: false, message: "Invalid payment ID format" };
+  }
   try {
     const api = getApiClient();
     await api.rejectPayment(paymentId, reviewerId, reason);

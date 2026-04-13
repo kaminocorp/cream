@@ -1,6 +1,6 @@
 "use client";
 
-import { useOptimistic, useTransition, useState } from "react";
+import { useOptimistic, useTransition, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Table,
@@ -53,20 +53,13 @@ function readJustification(entry: AuditEntry): JustificationLike {
 // Optimistic state
 // ---------------------------------------------------------------------------
 
-type OptimisticAction =
-  | { type: "remove"; paymentId: string }
-  | { type: "restore"; paymentId: string; entry: AuditEntry };
+type OptimisticAction = { type: "remove"; paymentId: string };
 
 function optimisticReducer(
   state: AuditEntry[],
   action: OptimisticAction,
 ): AuditEntry[] {
-  switch (action.type) {
-    case "remove":
-      return state.filter((e) => e.payment_id !== action.paymentId);
-    case "restore":
-      return [...state, action.entry];
-  }
+  return state.filter((e) => e.payment_id !== action.paymentId);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,8 +81,7 @@ interface EscalationTableProps {
  * round-trip from making the UI feel sluggish on every decision.
  *
  * **Error handling.** Errors are shown inline below the table as transient
- * banners (auto-dismiss after 5 seconds). Full toast infrastructure lands
- * in Phase 15.8 polish.
+ * banners (auto-dismiss after 5 seconds).
  *
  * **Countdown.** The plan noted a per-row timeout countdown, but the
  * `AuditEntry` doesn't carry the escalation deadline today (the timeout is
@@ -141,9 +133,11 @@ export function EscalationTable({ entries }: EscalationTableProps) {
   };
 
   // Auto-dismiss errors after 5 seconds.
-  if (error) {
-    setTimeout(() => setError(null), 5_000);
-  }
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 5_000);
+    return () => clearTimeout(t);
+  }, [error]);
 
   if (optimisticEntries.length === 0) {
     return (

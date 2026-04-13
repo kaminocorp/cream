@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::error::ApiError;
-use crate::extractors::auth::{AuthenticatedAgent, AuthenticatedOperator};
+use crate::extractors::auth::{AuthenticatedAgent, AuthenticatedOperator, AuthenticatedPrincipal};
 use crate::extractors::json::ValidatedJson;
 use crate::orchestrator::PaymentOrchestrator;
 use crate::state::AppState;
@@ -128,20 +128,34 @@ pub async fn initiate(
 }
 
 /// `GET /v1/payments/{id}` — retrieve payment status and audit trail.
+///
+/// Operators may view any payment. Agents may only view their own.
 pub async fn get_status(
     State(state): State<AppState>,
-    agent: AuthenticatedAgent,
+    principal: AuthenticatedPrincipal,
     Path(id): Path<String>,
 ) -> Result<Json<PaymentDetail>, ApiError> {
     let payment_id = id
         .parse::<PaymentId>()
         .map_err(|e| ApiError::ValidationError(format!("invalid payment ID: {e}")))?;
 
-    let payment = state
-        .payment_repo
-        .get_payment_for_agent(&payment_id, &agent.agent.id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("payment {payment_id}")))?;
+    // Operators see any payment; agents are scoped to their own.
+    let payment = match &principal {
+        AuthenticatedPrincipal::Operator(_) => {
+            state
+                .payment_repo
+                .get_payment(&payment_id)
+                .await?
+                .ok_or_else(|| ApiError::NotFound(format!("payment {payment_id}")))?
+        }
+        AuthenticatedPrincipal::Agent(agent) => {
+            state
+                .payment_repo
+                .get_payment_for_agent(&payment_id, &agent.agent.id)
+                .await?
+                .ok_or_else(|| ApiError::NotFound(format!("payment {payment_id}")))?
+        }
+    };
 
     let audit_entries = state
         .audit_reader

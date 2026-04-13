@@ -18,11 +18,17 @@ interface ApiKeyDisplayProps {
  */
 export function ApiKeyDisplay({ apiKey, onAcknowledge }: ApiKeyDisplayProps) {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(apiKey);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2_000);
+    try {
+      await navigator.clipboard.writeText(apiKey);
+      setCopied(true);
+      setCopyFailed(false);
+      setTimeout(() => setCopied(false), 2_000);
+    } catch {
+      setCopyFailed(true);
+    }
   };
 
   return (
@@ -52,6 +58,12 @@ export function ApiKeyDisplay({ apiKey, onAcknowledge }: ApiKeyDisplayProps) {
           )}
         </Button>
       </div>
+
+      {copyFailed && (
+        <p className="text-xs text-red-600">
+          Clipboard access failed. Please select the key above and copy manually.
+        </p>
+      )}
 
       <Button className="w-full" onClick={onAcknowledge}>
         I&apos;ve copied the key

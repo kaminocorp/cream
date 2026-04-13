@@ -34,7 +34,7 @@ type Stage = "confirm" | "loading" | "display" | "error";
 export function RotateKeyDialog({ agentId, agentName }: RotateKeyDialogProps) {
   const [open, setOpen] = useState(false);
   const [stage, setStage] = useState<Stage>("confirm");
-  const [newKey, setNewKey] = useState("");
+  const [newKey, setNewKey] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [isPending, startTransition] = useTransition();
 
@@ -62,14 +62,14 @@ export function RotateKeyDialog({ agentId, agentName }: RotateKeyDialogProps) {
     if (!next && stage === "display") return;
     if (next) {
       setStage("confirm");
-      setNewKey("");
+      setNewKey(null);
       setError("");
     }
     setOpen(next);
   };
 
   const handleAcknowledge = () => {
-    setNewKey("");
+    setNewKey(null);
     setOpen(false);
     setStage("confirm");
   };
@@ -124,7 +124,7 @@ export function RotateKeyDialog({ agentId, agentName }: RotateKeyDialogProps) {
           </div>
         )}
 
-        {stage === "display" && (
+        {stage === "display" && newKey && (
           <ApiKeyDisplay apiKey={newKey} onAcknowledge={handleAcknowledge} />
         )}
 

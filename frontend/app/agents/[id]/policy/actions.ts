@@ -9,14 +9,14 @@ export type ActionResult =
   | { ok: false; message: string };
 
 export interface UpdateProfileInput {
-  max_per_transaction?: string;
-  max_daily_spend?: string;
-  max_weekly_spend?: string;
-  max_monthly_spend?: string;
+  max_per_transaction?: string | null;
+  max_daily_spend?: string | null;
+  max_weekly_spend?: string | null;
+  max_monthly_spend?: string | null;
   allowed_categories?: PaymentCategory[];
   allowed_rails?: RailPreference[];
   geographic_restrictions?: string[];
-  escalation_threshold?: string;
+  escalation_threshold?: string | null;
 }
 
 export async function updatePolicy(

@@ -115,7 +115,16 @@ export function AuditTable({ entries, hasMore }: AuditTableProps) {
               <Fragment key={entry.id}>
                 <TableRow
                   className="cursor-pointer hover:bg-zinc-50"
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={isExpanded}
                   onClick={() => toggle(entry.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      toggle(entry.id);
+                    }
+                  }}
                 >
                   <TableCell>
                     {isExpanded ? (
