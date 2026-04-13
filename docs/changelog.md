@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.12.7](#0127--2026-04-13) — Pre-Phase-16 final fix: AgentForm ref-during-render ESLint violation resolved
 - [0.12.6](#0126--2026-04-13) — Pre-Phase-16 hardening: 7 high-priority fixes — proportionality fail-safe tests, reviewer identity configurable, name validation alignment, typed API client, frontend lint + npm audit CI, Rust API Dockerfile
 - [0.12.5](#0125--2026-04-13) — Low-severity cleanup: 14 fixes — dead code removal, AUDIT_COLUMNS constant, AgentStatusBadge dedup, relativeTime guard, sidebar a11y, date filter debounce, orchestrator dedup, MSRV, MCP version dedup, justfile cleanup, dep audit CI, PageHeader re-export, MCP test coverage (22→29)
 - [0.12.4](#0124--2026-04-13) — Medium-severity hardening: 6 fixes — operator event audit log, frontend + MCP CI, docker resource limits, duplicate test dedup, poll error threshold, currency display
@@ -62,6 +63,18 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.12.7 — 2026-04-13
+
+**Pre-Phase-16 Final Fix — 1 Item**
+
+Production-readiness audit identified one remaining ESLint violation blocking a clean `npm run lint` pass in CI. Resolved. 418 backend tests pass, 29 MCP tests pass, frontend lint clean (0 errors, 0 warnings), TypeScript strict-mode clean.
+
+### High — Fixed
+
+- **`[BUG]` AgentForm ref-during-render violation resolved** — `createdKeyRef.current` was read directly during render (line 128) to provide a safety-net fallback for the one-time API key display. React 19's compiler plugin (`react-hooks/refs`) correctly flags this: ref reads during render don't trigger re-renders, so the branch could silently go stale. Moved the ref-to-state sync into a `useEffect` — the safety-net behavior is preserved (ref survives error boundary re-mounts and restores into state on the next render cycle), but the render path now reads only from `useState`, which React can track. ESLint now passes clean. (`frontend/components/agents/agent-form.tsx`)
 
 ---
 

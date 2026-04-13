@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition, useRef } from "react";
+import { useState, useTransition, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -124,8 +124,16 @@ export function AgentForm({ mode, profiles, initial }: AgentFormProps) {
   };
 
   // After successful create, show the API key instead of the form.
-  // Fall back to the ref if React state was lost (e.g. error boundary).
-  const displayKey = createdKey ?? createdKeyRef.current;
+  // The ref is a safety net — if the component re-renders and React state is
+  // lost (e.g. error boundary recovery), the effect below restores it from
+  // the ref so the operator never loses sight of their one-time API key.
+  useEffect(() => {
+    if (!createdKey && createdKeyRef.current) {
+      setCreatedKey(createdKeyRef.current);
+    }
+  }, [createdKey]);
+
+  const displayKey = createdKey;
   if (displayKey) {
     return (
       <div className="mx-auto max-w-md space-y-4">
