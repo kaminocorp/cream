@@ -14,20 +14,33 @@ export type ActionResult =
   | { ok: false; message: string };
 
 /**
+ * Resolve the operator reviewer identity for audit attribution.
+ *
+ * Phase 16-A will replace this with authenticated operator identity from
+ * session tokens. Until then, we use `OPERATOR_REVIEWER_NAME` env var
+ * (falls back to "dashboard-operator" if unset). This is a deliberate
+ * improvement over a compile-time constant — operators can set a
+ * meaningful label (e.g. "ops-team@acme") without code changes.
+ */
+function getReviewerId(): string {
+  return process.env.OPERATOR_REVIEWER_NAME || "dashboard-operator";
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
  * Approve an escalated payment. Called by the `<EscalationTable>` client
  * component via `startTransition`.
  *
  * The `reviewer_id` is a free-text label identifying which operator made
  * the decision — it's stored verbatim in the append-only audit ledger.
- * Phase 16-A will populate this automatically from the authenticated
- * operator's identity; until then the dashboard hardcodes a placeholder.
+ * Phase 16-A will replace `getReviewerId()` with the authenticated
+ * operator's identity from session tokens.
  */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 export async function approveEscalation(
   paymentId: string,
-  // TODO(Phase 16-A): replace hardcoded reviewer_id with authenticated operator identity
-  reviewerId: string = "dashboard-operator",
+  // TODO(Phase 16-A): replace getReviewerId() with authenticated operator identity
+  reviewerId: string = getReviewerId(),
 ): Promise<ActionResult> {
   if (!UUID_RE.test(paymentId)) {
     return { ok: false, message: "Invalid payment ID format" };
@@ -58,8 +71,8 @@ export async function approveEscalation(
  */
 export async function rejectEscalation(
   paymentId: string,
-  // TODO(Phase 16-A): replace hardcoded reviewer_id with authenticated operator identity
-  reviewerId: string = "dashboard-operator",
+  // TODO(Phase 16-A): replace getReviewerId() with authenticated operator identity
+  reviewerId: string = getReviewerId(),
   reason?: string,
 ): Promise<ActionResult> {
   if (!UUID_RE.test(paymentId)) {

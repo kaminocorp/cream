@@ -8,6 +8,7 @@ import {
   CreateAgentRequest,
   CreateAgentResponse,
   PaymentDetail,
+  PaymentRequest,
   PaymentResponse,
   ProviderHealth,
   RotateKeyResponse,
@@ -78,7 +79,7 @@ export class CreamApiClient {
 
   // --- Payments ---
 
-  async initiatePayment(req: unknown): Promise<PaymentResponse> {
+  async initiatePayment(req: PaymentRequest): Promise<PaymentResponse> {
     return request(this.baseUrl, this.apiKey, "POST", "/v1/payments", req);
   }
 
@@ -153,7 +154,7 @@ export class CreamApiClient {
     return request(this.baseUrl, this.apiKey, "GET", `/v1/agents/${agentId}/policy`);
   }
 
-  async updateAgentPolicy(agentId: string, update: unknown): Promise<AgentPolicyResponse> {
+  async updateAgentPolicy(agentId: string, update: object): Promise<AgentPolicyResponse> {
     return request(this.baseUrl, this.apiKey, "PUT", `/v1/agents/${agentId}/policy`, update);
   }
 

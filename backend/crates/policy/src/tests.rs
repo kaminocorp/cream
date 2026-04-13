@@ -2164,3 +2164,42 @@ fn condition_contains_case_insensitive_needle_lowercase() {
     });
     assert!(crate::evaluator::evaluate_condition(&condition, &ctx));
 }
+
+// ---------------------------------------------------------------------------
+// Proportionality stub guard tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn engine_proportionality_rule_type_is_not_registered() {
+    // The ProportionalityEvaluator is a stub (always passes) and is
+    // deliberately NOT registered in PolicyEngine::new(). If a policy rule
+    // has rule_type = "proportionality", the engine's fail-safe kicks in:
+    // it treats unregistered rule types as triggered with the rule's action.
+    // This test codifies that invariant — if someone registers the stub by
+    // mistake, the test below would need updating (and the stub would need
+    // a real implementation first).
+    let engine = PolicyEngine::new();
+    let ctx = test_context(Decimal::new(100, 0));
+
+    let mut rule = make_rule("amount", serde_json::json!(500), PolicyAction::Block);
+    rule.rule_type = Some("proportionality".to_string());
+
+    let decision = engine.evaluate(&[rule], &ctx).unwrap();
+    // Because "proportionality" is not registered, the fail-safe fires and
+    // treats the rule as triggered → Block.
+    assert_eq!(decision.action, PolicyAction::Block);
+    assert_eq!(decision.matching_rules.len(), 1);
+}
+
+#[test]
+fn engine_proportionality_escalate_action_triggers_fail_safe() {
+    let engine = PolicyEngine::new();
+    let ctx = test_context(Decimal::new(100, 0));
+
+    let mut rule = make_rule("amount", serde_json::json!(500), PolicyAction::Escalate);
+    rule.rule_type = Some("proportionality".to_string());
+
+    let decision = engine.evaluate(&[rule], &ctx).unwrap();
+    assert_eq!(decision.action, PolicyAction::Escalate);
+    assert_eq!(decision.matching_rules.len(), 1);
+}

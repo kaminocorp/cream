@@ -52,7 +52,7 @@ function validate(
   profileId: string,
 ): string | null {
   if (!name.trim()) return "Agent name is required.";
-  if (name.trim().length > 100) return "Name must be 100 characters or fewer.";
+  if (name.trim().length > 255) return "Name must be 255 characters or fewer.";
   if (mode === "create" && !profileId) return "A profile must be selected.";
   return null;
 }
@@ -168,7 +168,7 @@ export function AgentForm({ mode, profiles, initial }: AgentFormProps) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. procurement-bot"
-          maxLength={100}
+          maxLength={255}
           required
           aria-invalid={fieldError?.includes("name") ? true : undefined}
         />

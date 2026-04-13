@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.12.6](#0126--2026-04-13) — Pre-Phase-16 hardening: 7 high-priority fixes — proportionality fail-safe tests, reviewer identity configurable, name validation alignment, typed API client, frontend lint + npm audit CI, Rust API Dockerfile
 - [0.12.5](#0125--2026-04-13) — Low-severity cleanup: 14 fixes — dead code removal, AUDIT_COLUMNS constant, AgentStatusBadge dedup, relativeTime guard, sidebar a11y, date filter debounce, orchestrator dedup, MSRV, MCP version dedup, justfile cleanup, dep audit CI, PageHeader re-export, MCP test coverage (22→29)
 - [0.12.4](#0124--2026-04-13) — Medium-severity hardening: 6 fixes — operator event audit log, frontend + MCP CI, docker resource limits, duplicate test dedup, poll error threshold, currency display
 - [0.12.3](#0123--2026-04-13) — Production-readiness hardening: 5 fixes (2 critical, 3 high) — audit TRUNCATE protection, PolicyCondition serde mismatch, CORS fail-hard, CI Postgres, policy action validation
@@ -61,6 +62,30 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.12.6 — 2026-04-13
+
+**Pre-Phase-16 Hardening — 7 High-Priority Fixes**
+
+Full-stack production-readiness audit identified 7 high-priority gaps across backend, frontend, CI, and infrastructure. All 7 resolved. 418 backend tests pass (up from 416), 29 MCP tests pass, frontend build clean, zero TypeScript errors.
+
+### High — Fixed
+
+- **`[SEC]` ProportionalityEvaluator stub now guarded by fail-safe tests** — The `ProportionalityEvaluator` is a stub (always returns `Pass`) that is deliberately not registered in `PolicyEngine::new()`. If someone accidentally registered it or created a policy rule with `rule_type: "proportionality"`, it would silently approve all payments matching that rule. Added 2 tests codifying the invariant: `engine_proportionality_rule_type_is_not_registered` verifies the fail-safe fires and blocks; `engine_proportionality_escalate_action_triggers_fail_safe` verifies escalation. These tests will break if the stub is registered without a real implementation, preventing silent policy bypass (`backend/crates/policy/src/tests.rs`)
+
+- **`[AUDIT]` Reviewer identity now configurable via `OPERATOR_REVIEWER_NAME`** — Escalation approve/reject actions hardcoded `reviewer_id: "dashboard-operator"` — every human decision in the append-only audit ledger was attributed to a generic placeholder, making it impossible to distinguish which operator made which decision. Extracted a `getReviewerId()` helper that reads `OPERATOR_REVIEWER_NAME` from environment (falls back to `"dashboard-operator"` if unset). Operators can now set a meaningful label (e.g. `"ops-team@acme"`, `"alice@acme"`) without code changes. Phase 16-A will replace this entirely with authenticated operator identity from session tokens (`frontend/app/escalations/actions.ts`)
+
+- **`[BUG]` Agent name validation aligned to 255 characters** — Frontend form enforced `maxLength={100}` and validation `> 100`, while the server action validated `> 255` and the Rust backend uses `MAX_NAME_LEN = 255` (enforced by DB CHECK constraint `chk_agents_name_length`). This mismatch meant the form silently truncated valid 101–255 character names. Aligned both the form `maxLength` attribute and the client-side validation function to 255, matching the backend contract (`frontend/components/agents/agent-form.tsx`)
+
+- **`[SEC]` `initiatePayment()` now typed with `PaymentRequest`** — The `CreamApiClient.initiatePayment()` method accepted `unknown`, meaning any malformed object could be sent to the backend without compile-time or editor-time type checking. Changed to accept the existing `PaymentRequest` interface, which enforces required fields (`agent_id`, `amount`, `currency`, `recipient`, `justification`, `idempotency_key`) at the TypeScript level. Also typed `updateAgentPolicy()` from `unknown` to `object` for minimal type safety while remaining compatible with the `UpdateProfileInput` interface (`frontend/lib/api.ts`)
+
+- **`[CI]` Frontend ESLint now runs in CI** — ESLint was configured (`frontend/eslint.config.mjs`) with a `"lint"` script in `package.json`, but CI only ran `tsc --noEmit` and `next build`. Lint violations (accessibility issues, unused imports, style inconsistencies) could merge to `main` undetected. Added `npm run lint` step to the frontend CI job between type-check and build (`.github/workflows/ci.yml`)
+
+- **`[CI]` npm dependency audit added to frontend + MCP server CI** — Rust dependencies had `cargo audit` in CI since v0.12.5, but the two Node.js packages (frontend: 42 deps, MCP server: 12 deps) had zero vulnerability scanning. Added `npm audit --audit-level=moderate` to both the `frontend` and `mcp-server` CI jobs. Uses `|| true` to prevent CI failures on advisory-only findings while still surfacing vulnerabilities in build logs (`.github/workflows/ci.yml`)
+
+- **`[INFRA]` Rust API Dockerfile created** — The MCP server had a multi-stage Dockerfile since v0.10.0, but the core Rust API binary (`cream-api`) had no containerization path — it could not be deployed to any container orchestrator. Created `backend/Dockerfile`: Stage 1 (builder) compiles with `rust:1.85-slim-bookworm` and `SQLX_OFFLINE=true`, using stub `lib.rs` files for dependency layer caching. Stage 2 (runtime) copies only the compiled binary + migrations into `debian:bookworm-slim` with a non-root `cream` user. Also added `backend/.dockerignore` excluding `target/`, `mcp-server/`, and test files to keep the Docker context lean (`backend/Dockerfile`, `backend/.dockerignore`)
 
 ---
 

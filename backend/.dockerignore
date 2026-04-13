@@ -1,0 +1,6 @@
+target/
+mcp-server/
+tests/
+test_binding
+*.md
+.gitignore

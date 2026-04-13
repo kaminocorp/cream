@@ -103,8 +103,14 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Lint
+        run: npm run lint
+
       - name: Build
         run: npm run build
+
+      - name: Dependency audit
+        run: npm audit --audit-level=moderate || true
 
   mcp-server:
     name: MCP Server
@@ -129,3 +135,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Dependency audit
+        run: npm audit --audit-level=moderate || true
