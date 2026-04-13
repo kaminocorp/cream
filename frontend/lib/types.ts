@@ -305,12 +305,21 @@ export interface ProviderKeyInfo {
 // Policy template types (Phase 16-G)
 // ---------------------------------------------------------------------------
 
+/** A rule entry within a policy template's JSONB rules array. */
+export interface PolicyTemplateRule {
+  rule_type: string;
+  priority?: number;
+  condition?: PolicyCondition;
+  action?: PolicyAction;
+  escalation?: EscalationConfig;
+}
+
 export interface PolicyTemplate {
   id: string;
   name: string;
   description: string;
   category: "starter" | "conservative" | "compliance" | "custom";
-  rules: unknown[];
+  rules: PolicyTemplateRule[];
   is_builtin: boolean;
   created_at: string;
 }

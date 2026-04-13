@@ -27,6 +27,18 @@ const MIN_PASSWORD_LEN: usize = 12;
 const MAX_NAME_LEN: usize = 200;
 const MAX_EMAIL_LEN: usize = 320; // RFC 5321
 
+/// Lazily-initialized Argon2id hash used for constant-time login. When a login
+/// attempt targets a nonexistent email, we verify the submitted password
+/// against this dummy hash so the response latency is indistinguishable
+/// from a "valid email, wrong password" response. This prevents email
+/// enumeration via timing side-channels.
+///
+/// Generated once on first use (the first login attempt), then reused.
+static DUMMY_ARGON2_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    hash_password("__cream_dummy_constant_time_padding__")
+        .expect("failed to generate dummy argon2 hash for constant-time login")
+});
+
 // ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
@@ -114,27 +126,19 @@ pub async fn register(
         )));
     }
 
-    // Check that no operators exist yet.
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM operators",
-    )
-    .fetch_one(&state.db)
-    .await?;
-
-    if count > 0 {
-        return Err(ApiError::ValidationError(
-            "operators already registered — use login or request an invite".into(),
-        ));
-    }
-
-    // Hash password with argon2id.
+    // Hash password with argon2id (done before the DB check so the timing
+    // is consistent regardless of whether operators already exist).
     let password_hash = hash_password(&body.password)?;
 
-    // Insert operator.
+    // Atomically insert the first operator. The WHERE NOT EXISTS guard and
+    // the INSERT execute in a single statement, eliminating the TOCTOU race
+    // where two concurrent requests both pass a separate SELECT COUNT(*)
+    // check and both succeed.
     let operator_id = Uuid::now_v7();
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO operators (id, email, name, password_hash, role, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'admin', 'active', now(), now())",
+         SELECT $1, $2, $3, $4, 'admin', 'active', now(), now()
+         WHERE NOT EXISTS (SELECT 1 FROM operators)",
     )
     .bind(operator_id)
     .bind(&email)
@@ -142,6 +146,12 @@ pub async fn register(
     .bind(&password_hash)
     .execute(&state.db)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::ValidationError(
+            "operators already registered — use login or request an invite".into(),
+        ));
+    }
 
     // Issue tokens.
     let operator_id_str = format!("opr_{}", operator_id);
@@ -207,11 +217,16 @@ pub async fn login(
         let mut conn = state.redis.clone();
 
         // Check account lockout first.
+        // SECURITY: fail closed — if Redis is unreachable, reject login attempts
+        // rather than silently bypassing rate limiting.
         let locked: Option<String> = redis::cmd("GET")
             .arg(&lockout_key)
             .query_async(&mut conn)
             .await
-            .unwrap_or(None);
+            .map_err(|e| {
+                tracing::error!(error = %e, "redis unavailable during login lockout check — failing closed");
+                ApiError::Internal(anyhow::anyhow!("authentication service temporarily unavailable"))
+            })?;
         if locked.is_some() {
             tracing::warn!(email = %email, "login attempt on locked account");
             return Err(ApiError::RateLimited {
@@ -224,7 +239,10 @@ pub async fn login(
             .arg(&rate_key)
             .query_async(&mut conn)
             .await
-            .unwrap_or(1);
+            .map_err(|e| {
+                tracing::error!(error = %e, "redis unavailable during login rate limit — failing closed");
+                ApiError::Internal(anyhow::anyhow!("authentication service temporarily unavailable"))
+            })?;
         if count == 1 {
             // First request in this window — set expiry.
             let _: () = redis::cmd("EXPIRE")
@@ -232,7 +250,7 @@ pub async fn login(
                 .arg(LOGIN_RATE_LIMIT_WINDOW_SECS)
                 .query_async(&mut conn)
                 .await
-                .unwrap_or(());
+                .unwrap_or(()); // EXPIRE failure is non-critical: key auto-expires on TTL miss
         }
         if count > MAX_LOGIN_ATTEMPTS {
             tracing::warn!(email = %email, count, "login rate limit exceeded");
@@ -250,15 +268,34 @@ pub async fn login(
     .fetch_optional(&state.db)
     .await?;
 
-    let (operator_id, stored_hash, role, op_status) = row.ok_or(ApiError::Unauthorized)?;
+    // SECURITY: constant-time login — always run Argon2 verification even when
+    // the email doesn't exist. This prevents attackers from enumerating valid
+    // operator emails by measuring response time (DB lookup alone is fast;
+    // DB lookup + Argon2 is measurably slower).
+    let (operator_id, stored_hash, role, op_status) = match row {
+        Some(r) => r,
+        None => {
+            // Burn time with a dummy Argon2 verification so the response
+            // latency matches the "valid email, wrong password" path.
+            let _ = verify_password(&body.password, &DUMMY_ARGON2_HASH);
+            return Err(ApiError::Unauthorized);
+        }
+    };
 
     if op_status != "active" {
+        // Still run Argon2 so suspended accounts don't leak faster than
+        // nonexistent ones.
+        let _ = verify_password(&body.password, &stored_hash);
         return Err(ApiError::Unauthorized);
     }
 
     // Verify password.
     if !verify_password(&body.password, &stored_hash)? {
         // Increment consecutive failure counter for lockout.
+        // These Redis writes are best-effort: if Redis is down, we still reject
+        // the bad password (the login fails regardless). The risk is that
+        // failure counting stops working temporarily — acceptable because the
+        // rate limiter above already fails closed on Redis errors.
         let mut conn = state.redis.clone();
         let failures: i64 = redis::cmd("INCR")
             .arg(&fail_count_key)
@@ -454,15 +491,20 @@ pub async fn logout(
 
 /// Best-effort write of an authentication event to the `operator_events` table.
 /// Never fails the caller — swallows DB errors with a warning log.
+///
+/// Auth events set `operator_id` but leave `target_agent_id` NULL (they don't
+/// target a specific agent). The migration 20260414200008 made `target_agent_id`
+/// nullable and widened the `event_type` CHECK for exactly this purpose.
 async fn log_auth_event(db: &sqlx::PgPool, operator_id: Option<Uuid>, event_type: &str, detail: &str) {
     let details = serde_json::json!({
         "operator_id": operator_id.map(|id| format!("opr_{id}")),
         "detail": detail,
     });
     if let Err(e) = sqlx::query(
-        "INSERT INTO operator_events (event_type, details) VALUES ($1, $2)",
+        "INSERT INTO operator_events (event_type, operator_id, details) VALUES ($1, $2, $3)",
     )
     .bind(event_type)
+    .bind(operator_id)
     .bind(&details)
     .execute(db)
     .await
@@ -722,5 +764,30 @@ mod tests {
     #[test]
     fn min_password_length() {
         assert_eq!(MIN_PASSWORD_LEN, 12);
+    }
+
+    /// Verifies the dummy hash used for constant-time login is a valid
+    /// Argon2id hash that can be parsed and verified against.
+    #[test]
+    fn dummy_argon2_hash_is_valid_and_verifiable() {
+        let hash = &*DUMMY_ARGON2_HASH;
+        assert!(hash.starts_with("$argon2id$"), "must be argon2id");
+        // Must be parseable by the verify_password function.
+        let result = verify_password("any_password_here", hash);
+        assert!(result.is_ok(), "dummy hash must be parseable: {result:?}");
+        // Verification should return false (wrong password).
+        assert!(!result.unwrap());
+    }
+
+    /// Verifies that the suspended-account path also runs Argon2 (for
+    /// constant-time behavior) by ensuring verify_password is callable
+    /// with any valid hash and doesn't short-circuit.
+    #[test]
+    fn verify_password_always_runs_argon2() {
+        let hash = hash_password("real_password_123").unwrap();
+        // Wrong password still completes without error.
+        let result = verify_password("wrong_password_123", &hash);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
     }
 }

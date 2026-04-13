@@ -1,6 +1,9 @@
 # Changelog
 
-- [0.20.1](#0201--2026-04-13) — Production hardening: 15 fixes (6 security, 4 data integrity, 5 robustness) — login rate limiting + lockout, webhook HMAC raw secret + timestamp window, XSS-safe emails, Slack raw-byte HMAC, explicit JWT HS256, `requireAuth()` on all routes, transactional template apply, agent-scoped webhooks, real `minutes_remaining`, fail-fast encryption config, CSRF middleware, template rule validation, auth audit trail, multipart emails, 469 tests
+- [0.20.4](#0204--2026-04-13) — 5 medium-priority fixes: HTTPS-only webhooks, malformed event filter fail-closed, refreshSession claim validation, real agent names in reminder notifications, typed PolicyTemplateRule — 472 tests
+- [0.20.3](#0203--2026-04-13) — 5 high-priority fixes: operator_events schema widened for auth audit trail, explicit JWT HS256 validation, escalation timeout from DB config, dashboard deep links in notifications, atomic first-operator registration — 472 tests
+- [0.20.2](#0202--2026-04-13) — 3 security blockers fixed: constant-time login (anti-enumeration), Redis rate limiter fail-closed, policy template seed rule_type correction — 472 tests
+- [0.20.1](#0201--2026-04-13) — Production hardening: 15 fixes (6 security, 4 data integrity, 5 robustness) — login rate limiting, webhook HMAC, XSS-safe emails, CSRF middleware, auth audit trail, transactional template apply, 469 tests
 - [0.20.0](#0200--2026-04-13) — Phase 16-H: escalation monitor enhancement — reminder notifications at 50% timeout, timeout notifications on expiry, send_reminder() trait method for Slack + Email, reminder_sent_at idempotency column, 464 tests — **Phase 16 complete**
 - [0.19.0](#0190--2026-04-13) — Phase 16-G: policy template library — 3 built-in templates (Starter/Conservative/Compliance), list/get/apply endpoints, template library UI with agent selector, tabbed policies page, 463 tests
 - [0.18.0](#0180--2026-04-13) — Phase 16-F: settings UI + provider key storage — tabbed settings page (Webhooks/Provider Keys/Account), AES-256-GCM encrypted provider key storage, webhook CRUD + delivery log, account identity display, 461 tests
@@ -72,6 +75,84 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.20.4 — 2026-04-13
+
+**Post-Phase-16 Hardening (Tier 3)**
+
+5 medium-priority fixes covering defense-in-depth, UX, and type safety. 472 backend tests pass. Zero clippy warnings. Frontend lint, typecheck, and production build clean.
+
+### Security Fixes
+
+- **HTTPS-only webhook URLs (reject HTTP in production)** — `POST /v1/webhooks` now rejects `http://` URLs with a 400 validation error unless `ALLOW_INSECURE_WEBHOOKS=true` is set. Previously, plaintext HTTP URLs were accepted with only a warning log, risking MITM interception of webhook payloads containing payment IDs, amounts, and agent identifiers. (`backend/crates/api/src/routes/webhooks.rs`)
+
+- **Malformed webhook event filter fails closed** — `event_matches()` now returns `false` (reject all events) when the `events` column is not a valid JSON array, instead of `true` (accept all). A corrupted or manually-edited `webhook_endpoints.events` value would previously cause that endpoint to receive every event type — a potential data leak. (`backend/crates/api/src/webhook_worker.rs`)
+
+### Frontend Fixes
+
+- **`refreshSession()` validates individual JWT claims** — After token refresh, the decoded JWT claims (`sub`, `email`, `role`, `exp`) are now individually validated before constructing the `Session` object, matching the validation in `getSession()`. Previously, missing claims were silently cast to `undefined`, causing downstream runtime errors. (`frontend/lib/auth.ts`)
+
+- **`PolicyTemplate.rules` typed as `PolicyTemplateRule[]`** — Replaced `unknown[]` with a proper interface carrying `rule_type`, `priority`, `condition`, `action`, and `escalation` fields. This enables compile-time type checking in the template library UI and prevents silent runtime failures when accessing rule properties. (`frontend/lib/types.ts`)
+
+### UX Fixes
+
+- **Real agent names in reminder and timeout notifications** — Escalation reminder (50% timeout) and timeout notifications now resolve the actual agent name from the database via `lookup_agent_name()`, falling back to `agent:{id}` only if the lookup fails. Previously both paths always showed the synthetic `agent:{uuid}` identifier, making Slack and email notifications less readable for operators. (`backend/crates/api/src/orchestrator.rs`, `backend/crates/api/src/extractors/auth.rs`)
+
+### Tests
+
+Updated test (net 0 new):
+- `event_matches_malformed_rejects_all` — replaces `event_matches_malformed_accepts_all` to verify fail-closed behavior for non-array and null event filters
+
+---
+
+## 0.20.3 — 2026-04-13
+
+**Post-Phase-16 Hardening (Tier 2)**
+
+5 high-priority fixes from comprehensive production-readiness review. 472 backend tests pass. Zero clippy warnings.
+
+### Security Fixes
+
+- **Explicit JWT algorithm whitelist (HS256)** — JWT validation in the auth extractor now uses `Validation::new(Algorithm::HS256)` instead of `Validation::default()`. Prevents algorithm confusion attacks if the `jsonwebtoken` crate changes its default algorithm in a future major version. Both token issuance (explicit `Header::new(Algorithm::HS256)` from v0.20.1) and validation are now hardened. (`backend/crates/api/src/extractors/auth.rs`)
+
+- **Atomic first-operator registration (TOCTOU fix)** — `POST /v1/auth/register` now uses a single-statement `INSERT ... WHERE NOT EXISTS (SELECT 1 FROM operators)` instead of a separate `SELECT COUNT(*)` followed by `INSERT`. The previous pattern had a TOCTOU race where two concurrent requests could both pass the check and create two operators, breaking the "first operator only" invariant. The atomic statement eliminates this by checking and inserting in one SQL execution. (`backend/crates/api/src/routes/auth.rs`)
+
+### Data Integrity Fixes
+
+- **operator_events schema widened for auth + template events** — Migration `20260414200008` makes `target_agent_id` nullable and widens the `event_type` CHECK constraint to include `operator_registered`, `operator_login`, `operator_logout`, `refresh_token_reuse_detected`, and `template_applied`. Previously, all auth audit writes (`log_auth_event`) silently failed because: (1) the CHECK constraint only allowed 4 Phase 15 event types, and (2) `target_agent_id` was NOT NULL but auth events don't target a specific agent. The `log_auth_event` INSERT now also binds `operator_id` to the column added in the Phase 16-B migration. (`backend/migrations/20260414200008_widen_operator_events_for_auth.up.sql`, `backend/crates/api/src/routes/auth.rs`)
+
+### Functional Fixes
+
+- **Escalation timeout read from DB config, not hard-coded** — `fire_escalation_notification()` now queries `get_escalation_timeout_minutes()` to read the actual timeout from the escalation rule that triggered the payment (rule-specific → profile minimum → 60-minute default). Previously hard-coded to `30` with a TODO comment, meaning operator-configured timeouts were silently ignored in notification messages. (`backend/crates/api/src/orchestrator.rs`)
+
+- **Dashboard deep links in escalation notifications** — `EscalationNotification.dashboard_url` is now populated from `DASHBOARD_BASE_URL` config, generating links like `https://dashboard.cream.io/escalations?payment_id=pay_...`. Previously always `None`, so email recipients never got a clickable link to review the pending payment in the dashboard. (`backend/crates/api/src/orchestrator.rs`)
+
+---
+
+## 0.20.2 — 2026-04-13
+
+**Post-Phase-16 Security Hardening (Tier 1 Blockers)**
+
+3 security blockers identified during comprehensive Phase 16 production-readiness review. 472 backend tests pass (up from 469). Zero clippy warnings.
+
+### Security Fixes
+
+- **Constant-time login (email enumeration prevention)** — Login now always runs Argon2id verification against a lazily-initialized dummy hash when the email is not found, and also runs verification before rejecting suspended accounts. Previously, nonexistent emails returned immediately (DB lookup only, ~5ms) while valid emails incurred Argon2 (~50ms), allowing attackers to enumerate valid operator emails by timing responses. `DUMMY_ARGON2_HASH` is a `LazyLock<String>` generated once on first login attempt. (`backend/crates/api/src/routes/auth.rs`)
+
+- **Redis rate limiter fails closed** — Login rate limiting and account lockout checks now return `500 Internal Server Error` ("authentication service temporarily unavailable") when Redis is unreachable, instead of silently bypassing all protections. Previously, all Redis calls in the pre-authentication path used `.unwrap_or(None)` / `.unwrap_or(1)`, which meant Redis downtime completely disabled rate limiting and account lockout — allowing unlimited brute-force attempts. Post-authentication failure tracking (lockout counter increment) remains best-effort since the login is already rejected. (`backend/crates/api/src/routes/auth.rs`)
+
+### Data Integrity Fixes
+
+- **Policy template seed rule_type correction** — Corrective migration `20260414200007` fixes the Compliance template's `category_restriction` → `category_check` and `geographic_restriction` → `geographic` to match the 12 registered policy engine evaluator names in `VALID_RULE_TYPES`. Previously, applying the built-in Conservative or Compliance templates would fail validation and roll back the transaction, leaving the agent with no rules applied. (`backend/migrations/20260414200007_fix_template_seed_rule_types.up.sql`)
+
+### Tests
+
+3 new tests (total: 472):
+- `dummy_argon2_hash_is_valid_and_verifiable` — lazily-generated dummy hash is parseable Argon2id and verification completes (returns false)
+- `verify_password_always_runs_argon2` — confirms wrong-password verification runs Argon2 without short-circuiting
+- `all_seed_rule_types_are_valid` — validates every rule_type and action in all 3 built-in template seeds against `VALID_RULE_TYPES` and `VALID_ACTIONS`
 
 ---
 

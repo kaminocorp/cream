@@ -290,4 +290,51 @@ mod tests {
             assert!(rule.get("action").is_some());
         }
     }
+
+    /// Validates that every rule_type used in the built-in template seeds is
+    /// a recognized type in VALID_RULE_TYPES. Catches the category_restriction
+    /// / geographic_restriction mismatch that was found in v0.20.1 review.
+    #[test]
+    fn all_seed_rule_types_are_valid() {
+        let all_templates: Vec<serde_json::Value> = vec![
+            // Starter
+            serde_json::from_str(r#"[
+                {"rule_type": "amount_cap", "priority": 10, "action": "BLOCK"},
+                {"rule_type": "spend_rate", "priority": 20, "action": "BLOCK"},
+                {"rule_type": "velocity_limit", "priority": 30, "action": "BLOCK"}
+            ]"#).unwrap(),
+            // Conservative
+            serde_json::from_str(r#"[
+                {"rule_type": "amount_cap", "priority": 10, "action": "ESCALATE"},
+                {"rule_type": "amount_cap", "priority": 11, "action": "BLOCK"},
+                {"rule_type": "spend_rate", "priority": 20, "action": "BLOCK"},
+                {"rule_type": "velocity_limit", "priority": 30, "action": "BLOCK"},
+                {"rule_type": "first_time_merchant", "priority": 40, "action": "ESCALATE"}
+            ]"#).unwrap(),
+            // Compliance
+            serde_json::from_str(r#"[
+                {"rule_type": "amount_cap", "priority": 10, "action": "ESCALATE"},
+                {"rule_type": "amount_cap", "priority": 11, "action": "BLOCK"},
+                {"rule_type": "category_check", "priority": 20, "action": "BLOCK"},
+                {"rule_type": "rail_restriction", "priority": 30, "action": "BLOCK"},
+                {"rule_type": "geographic", "priority": 40, "action": "BLOCK"},
+                {"rule_type": "velocity_limit", "priority": 50, "action": "ESCALATE"}
+            ]"#).unwrap(),
+        ];
+
+        for (template_idx, rules) in all_templates.iter().enumerate() {
+            for (rule_idx, rule) in rules.as_array().unwrap().iter().enumerate() {
+                let rt = rule["rule_type"].as_str().unwrap();
+                assert!(
+                    VALID_RULE_TYPES.contains(&rt),
+                    "template[{template_idx}] rule[{rule_idx}]: unknown rule_type '{rt}'"
+                );
+                let action = rule["action"].as_str().unwrap();
+                assert!(
+                    VALID_ACTIONS.contains(&action),
+                    "template[{template_idx}] rule[{rule_idx}]: invalid action '{action}'"
+                );
+            }
+        }
+    }
 }

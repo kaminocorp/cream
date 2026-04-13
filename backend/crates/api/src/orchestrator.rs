@@ -590,6 +590,24 @@ impl PaymentOrchestrator {
         payment: &Payment,
         agent: &AuthenticatedAgent,
     ) {
+        // Read the actual escalation timeout from the DB (rule-specific → profile
+        // minimum → 60-minute default). The escalation_rule_id was already
+        // persisted by the caller before we get here.
+        let timeout_minutes = self
+            .state
+            .payment_repo
+            .get_escalation_timeout_minutes(&payment.id)
+            .await
+            .unwrap_or(60) as u32;
+
+        // Build dashboard deep link if DASHBOARD_BASE_URL is configured.
+        let dashboard_url = self
+            .state
+            .config
+            .dashboard_base_url
+            .as_ref()
+            .map(|base| format!("{}/escalations?payment_id={}", base.trim_end_matches('/'), payment.id));
+
         let notification = EscalationNotification {
             payment_id: payment.id,
             amount: payment.request.amount,
@@ -598,8 +616,8 @@ impl PaymentOrchestrator {
             agent_name: agent.agent.name.clone(),
             agent_id: agent.agent.id,
             justification_summary: payment.request.justification.summary.clone(),
-            timeout_minutes: 30, // TODO: read from escalation config on the matched rule
-            dashboard_url: None,
+            timeout_minutes,
+            dashboard_url,
         };
 
         if let Err(e) = self
@@ -776,12 +794,20 @@ async fn check_escalation_reminders(state: &AppState) -> Result<(), ApiError> {
                 .max(0);
             let remaining = ((timeout_minutes * 60 - elapsed_secs) / 60).max(0) as u32;
 
+            // Resolve real agent name for human-readable notifications.
+            let agent_name = crate::extractors::auth::lookup_agent_name(
+                &state.db,
+                &payment.request.agent_id,
+            )
+            .await
+            .unwrap_or_else(|| format!("agent:{}", payment.request.agent_id));
+
             let notification = crate::notifications::ReminderNotification {
                 payment_id: payment.id,
                 amount: payment.request.amount,
                 currency: payment.request.currency,
                 recipient: payment.request.recipient.identifier.clone(),
-                agent_name: format!("agent:{}", payment.request.agent_id),
+                agent_name,
                 minutes_remaining: remaining,
                 kind: crate::notifications::ReminderKind::Reminder,
             };
@@ -947,12 +973,19 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                     .await;
 
                     // Send timeout notification via configured channels.
+                    let timeout_agent_name = crate::extractors::auth::lookup_agent_name(
+                        &state.db,
+                        &payment.request.agent_id,
+                    )
+                    .await
+                    .unwrap_or_else(|| format!("agent:{}", payment.request.agent_id));
+
                     let timeout_notification = crate::notifications::ReminderNotification {
                         payment_id: payment.id,
                         amount: payment.request.amount,
                         currency: payment.request.currency,
                         recipient: payment.request.recipient.identifier.clone(),
-                        agent_name: format!("agent:{}", payment.request.agent_id),
+                        agent_name: timeout_agent_name,
                         minutes_remaining: 0,
                         kind: crate::notifications::ReminderKind::Timeout,
                     };

@@ -307,7 +307,16 @@ async fn load_matching_endpoints(
 fn event_matches(events: &serde_json::Value, event_type: &str) -> bool {
     let arr = match events.as_array() {
         Some(a) => a,
-        None => return true, // malformed → accept all
+        None => {
+            // Malformed events column (not a JSON array) — fail closed by
+            // rejecting all events. Silently accepting all would be a data
+            // leak if someone corrupts the column.
+            tracing::warn!(
+                events = %events,
+                "webhook endpoint has malformed events filter (not an array) — rejecting all events"
+            );
+            return false;
+        }
     };
     for v in arr {
         let s = match v.as_str() {
@@ -644,9 +653,11 @@ mod tests {
     }
 
     #[test]
-    fn event_matches_malformed_accepts_all() {
+    fn event_matches_malformed_rejects_all() {
         let events = serde_json::json!("not an array");
-        assert!(event_matches(&events, "anything"));
+        assert!(!event_matches(&events, "anything"), "malformed events filter must fail closed");
+        let events_null = serde_json::json!(null);
+        assert!(!event_matches(&events_null, "payment.settled"), "null events filter must fail closed");
     }
 
     // --- Retry backoff tests ---

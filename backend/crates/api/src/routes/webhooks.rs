@@ -65,11 +65,23 @@ pub async fn register(
             "webhook URL must start with https:// or http://".into(),
         ));
     }
+    // SECURITY: reject plaintext HTTP in production. Webhook payloads contain
+    // payment IDs, amounts, and agent identifiers — transmitting them
+    // unencrypted is a MITM risk. Allow HTTP only when explicitly opted in
+    // via ALLOW_INSECURE_WEBHOOKS (for local development / testing).
     if body.url.starts_with("http://") {
+        let allow_insecure = std::env::var("ALLOW_INSECURE_WEBHOOKS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if !allow_insecure {
+            return Err(ApiError::ValidationError(
+                "webhook URL must use HTTPS; set ALLOW_INSECURE_WEBHOOKS=true to allow HTTP in development".into(),
+            ));
+        }
         tracing::warn!(
             url = %body.url,
-            "webhook URL uses plaintext HTTP — HTTPS is required in production; \
-             event payloads (payment IDs, amounts, agent IDs) will be transmitted unencrypted"
+            "webhook URL uses plaintext HTTP (ALLOW_INSECURE_WEBHOOKS=true) — \
+             do NOT use this in production"
         );
     }
     if body.secret.is_empty() {

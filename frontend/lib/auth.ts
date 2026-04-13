@@ -149,12 +149,17 @@ export async function refreshSession(): Promise<Session | null> {
     const claims = decodeJwtPayload(data.access_token);
     if (!claims) return null;
 
-    return {
-      operatorId: claims.sub as string,
-      email: claims.email as string,
-      role: claims.role as string,
-      exp: claims.exp as number,
-    };
+    // Validate individual claims — same checks as getSession(). Without
+    // this, a malformed token would produce a Session with undefined fields
+    // that cause runtime errors downstream.
+    const sub = claims.sub as string | undefined;
+    const email = claims.email as string | undefined;
+    const role = claims.role as string | undefined;
+    const exp = claims.exp as number | undefined;
+
+    if (!sub || !email || !role || !exp) return null;
+
+    return { operatorId: sub, email, role, exp };
   } catch {
     return null;
   }

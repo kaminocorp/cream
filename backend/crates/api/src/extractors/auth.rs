@@ -2,7 +2,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use chrono::{DateTime, Utc};
 use cream_models::prelude::*;
-use jsonwebtoken::{DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -155,7 +155,10 @@ fn try_jwt_auth(state: &AppState, token: &str) -> Option<AuthenticatedOperator> 
     let secret = state.config.jwt_secret.as_deref()?;
 
     let decoding_key = DecodingKey::from_secret(secret.as_bytes());
-    let mut validation = Validation::default();
+    // SECURITY: explicitly whitelist HS256 to prevent algorithm confusion attacks.
+    // Validation::default() happens to use HS256, but relying on library defaults
+    // is fragile — a major version bump could change it.
+    let mut validation = Validation::new(Algorithm::HS256);
     validation.set_required_spec_claims(&["sub", "exp", "iat"]);
 
     let token_data = jsonwebtoken::decode::<OperatorClaims>(token, &decoding_key, &validation)
@@ -389,6 +392,22 @@ pub(crate) async fn lookup_agent_by_id(
     let profile_row = fetch_profile_row(pool, agent_row.profile_id, agent_row.id).await?;
 
     Ok(Some((agent_from_row(&agent_row)?, profile_from_row(&profile_row)?)))
+}
+
+/// Look up only the agent name. Used by the escalation timeout monitor to
+/// produce human-readable notification messages without loading the full
+/// agent + profile.
+pub(crate) async fn lookup_agent_name(
+    pool: &PgPool,
+    agent_id: &AgentId,
+) -> Option<String> {
+    sqlx::query_as::<_, (String,)>("SELECT name FROM agents WHERE id = $1")
+        .bind(agent_id.as_uuid())
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(name,)| name)
 }
 
 /// Look up only the AgentProfileId for a given agent. Lightweight alternative when
