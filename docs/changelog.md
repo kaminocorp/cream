@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.21.11](#02111--2026-04-13) — Post-Phase-17 hardening (round 4): 6 low fixes — JoinSet worker supervision, LOG_LEVEL validation, UTF-8 safe truncation, OpenAPI version from Cargo.toml, flatten_entry dedup, 1 test fix — 546 tests
 - [0.21.10](#02110--2026-04-13) — Post-Phase-17 hardening (round 3): 5 medium fixes — PII substring matching + access_token, resume_after_approval metrics, circuit breaker gauge reset, payment duration scope, alert update validation — 539 tests
 - [0.21.9](#0219--2026-04-13) — Post-Phase-17 hardening (round 2): 5 critical/high fixes — CSV numeric amount data loss, async export DoS + silent filter bypass, alert engine windowed evaluation, PII redaction body size cap — 538 tests
 - [0.21.8](#0218--2026-04-13) — Post-Phase-17 hardening: 7 fixes — 4 uninstrumented metrics wired, PII redaction middleware, write_audit tracing span, OpenAPI PATCH alert body — 533 tests
@@ -86,6 +87,43 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.11 — 2026-04-13
+
+**Post-Phase-17 Hardening (Round 4)**
+
+6 low-severity fixes from production-readiness review: 1 robustness, 1 config validation, 1 panic prevention, 1 spec hygiene, 1 code dedup, 1 supervision. 546 backend tests pass (up from 539). Zero clippy warnings.
+
+### Robustness Fixes
+
+- **Background worker supervision via `JoinSet`** — All 5 background tasks (escalation monitor, webhook delivery, webhook retry, credential age monitor, alert evaluator) were `tokio::spawn`ed with discarded `JoinHandle`s. If any worker panicked, the error was silently lost. Replaced with a `tokio::task::JoinSet` managed by a supervisor task that logs immediately when any worker panics or exits unexpectedly. Panic errors are logged at ERROR level with the message "background worker panicked — this is a bug." (`backend/crates/api/src/main.rs`)
+
+- **UTF-8 safe string truncation in webhook worker** — `&resp_body[..MAX_RESPONSE_BODY_LEN]` panics at runtime if byte 2048 falls mid-codepoint (e.g., CJK characters or emoji in webhook error responses). Replaced with `truncate_utf8()` helper that walks backwards from the byte limit to find the nearest char boundary. Applied to both `deliver_to_endpoint` and `retry_delivery` truncation sites. (`backend/crates/api/src/webhook_worker.rs`)
+
+### Config Validation Fixes
+
+- **`LOG_LEVEL` validated against known tracing levels** — Previously accepted any string (e.g., `LOG_LEVEL=banana`), silently producing unexpected filter behavior in the `EnvFilter`. Now rejects values other than `trace`, `debug`, `info`, `warn`, `error` with a descriptive `ConfigError::Invalid`. (`backend/crates/api/src/config.rs`)
+
+### Spec Hygiene Fixes
+
+- **OpenAPI spec version sourced from `Cargo.toml`** — Previously hardcoded to `"0.21.5"`, drifting from the actual version with every release. Now uses `env!("CARGO_PKG_VERSION")` which is resolved at compile time from the `cream-api` crate's `Cargo.toml`. Test updated accordingly. (`backend/crates/api/src/openapi.rs`)
+
+### Code Quality Fixes
+
+- **Deduplicated CSV flatten logic** — CSV flattening existed in two places: `FlatAuditRow::from_entry` in `routes/audit.rs` and `flatten_entry()` in `audit_export.rs`. The sync version previously had the numeric amount bug (fixed in 0.21.9). Removed the duplicate `FlatAuditRow` struct entirely; the sync CSV export path now calls the shared `audit_export::flatten_entry()`. Single source of truth for column ordering and value extraction. (`backend/crates/api/src/routes/audit.rs`)
+
+### Tests
+
+7 new tests (total: 546):
+- `log_level_invalid_rejected` — rejects `LOG_LEVEL=banana` with descriptive error
+- `truncate_utf8_ascii_within_limit` — passthrough when under limit
+- `truncate_utf8_ascii_exact_limit` — exact boundary preserved
+- `truncate_utf8_ascii_over_limit` — clean ASCII truncation
+- `truncate_utf8_multibyte_no_split` — 3-byte `€` preserved at char boundary
+- `truncate_utf8_multibyte_mid_codepoint` — backs up to previous boundary instead of panicking
+- `truncate_utf8_emoji_boundary` — 4-byte `🎉` emoji handled correctly at all offsets
 
 ---
 

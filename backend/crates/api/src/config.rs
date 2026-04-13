@@ -255,6 +255,15 @@ impl AppConfig {
             }
         };
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+        match log_level.as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" => {}
+            other => {
+                return Err(ConfigError::Invalid(
+                    "LOG_LEVEL",
+                    format!("must be one of trace/debug/info/warn/error, got '{other}'"),
+                ));
+            }
+        }
         let log_bodies = env::var("LOG_BODIES")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
@@ -543,6 +552,19 @@ mod tests {
 
             let config = AppConfig::from_env().expect("should load");
             assert_eq!(config.log_level, "debug");
+        });
+    }
+
+    #[test]
+    fn log_level_invalid_rejected() {
+        with_env(|| {
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("LOG_LEVEL", "banana");
+
+            let err = AppConfig::from_env().unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("LOG_LEVEL"), "error should mention LOG_LEVEL: {msg}");
         });
     }
 

@@ -36,6 +36,21 @@ const MAX_RESPONSE_BODY_LEN: usize = 2048;
 /// 5s, 30s, 2m, 15m, 1h.
 const RETRY_BACKOFF_SECS: [i64; 5] = [5, 30, 120, 900, 3600];
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a multi-byte
+/// UTF-8 character. Avoids the panic that `&s[..max_bytes]` causes when the byte
+/// offset falls mid-codepoint (e.g., CJK characters, emoji in error responses).
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk backwards from max_bytes to find a char boundary.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ---------------------------------------------------------------------------
 // Webhook event (serialized into Redis queue)
 // ---------------------------------------------------------------------------
@@ -404,11 +419,7 @@ async fn deliver_to_endpoint(
                 .text()
                 .await
                 .unwrap_or_default();
-            let truncated = if resp_body.len() > MAX_RESPONSE_BODY_LEN {
-                &resp_body[..MAX_RESPONSE_BODY_LEN]
-            } else {
-                &resp_body
-            };
+            let truncated = truncate_utf8(&resp_body, MAX_RESPONSE_BODY_LEN);
 
             if (200..300).contains(&(status as u16)) {
                 // Success.
@@ -463,11 +474,7 @@ async fn retry_delivery(
         Ok(resp) => {
             let status = resp.status().as_u16() as i16;
             let resp_body = resp.text().await.unwrap_or_default();
-            let truncated = if resp_body.len() > MAX_RESPONSE_BODY_LEN {
-                &resp_body[..MAX_RESPONSE_BODY_LEN]
-            } else {
-                &resp_body
-            };
+            let truncated = truncate_utf8(&resp_body, MAX_RESPONSE_BODY_LEN);
 
             if (200..300).contains(&(status as u16)) {
                 mark_delivered(db, row.id, status, truncated).await;
@@ -683,5 +690,50 @@ mod tests {
         assert_eq!(RETRY_BACKOFF_SECS[2], 120);
         assert_eq!(RETRY_BACKOFF_SECS[3], 900);
         assert_eq!(RETRY_BACKOFF_SECS[4], 3600);
+    }
+
+    // --- Truncation tests ---
+
+    #[test]
+    fn truncate_utf8_ascii_within_limit() {
+        let s = "hello world";
+        assert_eq!(truncate_utf8(s, 100), "hello world");
+    }
+
+    #[test]
+    fn truncate_utf8_ascii_exact_limit() {
+        let s = "hello";
+        assert_eq!(truncate_utf8(s, 5), "hello");
+    }
+
+    #[test]
+    fn truncate_utf8_ascii_over_limit() {
+        let s = "hello world";
+        assert_eq!(truncate_utf8(s, 5), "hello");
+    }
+
+    #[test]
+    fn truncate_utf8_multibyte_no_split() {
+        // '€' is 3 bytes (E2 82 AC). Truncating at byte 3 = char boundary.
+        let s = "€abc";
+        assert_eq!(truncate_utf8(s, 3), "€");
+    }
+
+    #[test]
+    fn truncate_utf8_multibyte_mid_codepoint() {
+        // '€' is 3 bytes. Truncating at byte 1 or 2 should back up to 0.
+        let s = "€abc";
+        assert_eq!(truncate_utf8(s, 1), "");
+        assert_eq!(truncate_utf8(s, 2), "");
+    }
+
+    #[test]
+    fn truncate_utf8_emoji_boundary() {
+        // '🎉' is 4 bytes. "a🎉b" = 1 + 4 + 1 = 6 bytes.
+        let s = "a🎉b";
+        assert_eq!(truncate_utf8(s, 5), "a🎉"); // exactly at end of emoji
+        assert_eq!(truncate_utf8(s, 4), "a");   // mid-emoji, backs up to 'a'
+        assert_eq!(truncate_utf8(s, 3), "a");   // mid-emoji, backs up to 'a'
+        assert_eq!(truncate_utf8(s, 2), "a");   // mid-emoji, backs up to 'a'
     }
 }

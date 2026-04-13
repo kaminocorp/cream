@@ -7,6 +7,7 @@ use cream_audit::AuditQuery;
 use cream_models::prelude::*;
 use serde::Deserialize;
 
+use crate::audit_export::flatten_entry;
 use crate::error::ApiError;
 use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
@@ -34,75 +35,8 @@ pub struct AuditQueryParams {
     pub offset: Option<u32>,
 }
 
-/// Flattened representation of an audit entry for CSV export.
-/// Nested JSON fields (request, justification, policy) are projected to
-/// scalar columns. Complex sub-structures (routing, human_review) are
-/// omitted for brevity — operators can access the full record via the
-/// JSON endpoint or the NDJSON export.
-struct FlatAuditRow {
-    entry_id: String,
-    timestamp: String,
-    agent_id: String,
-    payment_id: String,
-    amount: String,
-    currency: String,
-    status: String,
-    decision: String,
-    provider: String,
-    justification_summary: String,
-}
-
-impl FlatAuditRow {
-    fn from_entry(entry: &AuditEntry) -> Self {
-        let amount = entry
-            .request
-            .get("amount")
-            .map(|v| {
-                if let Some(s) = v.as_str() {
-                    s.to_string()
-                } else {
-                    v.to_string()
-                }
-            })
-            .unwrap_or_default();
-
-        let currency = entry
-            .request
-            .get("currency")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let provider = entry
-            .provider_response
-            .as_ref()
-            .map(|p| p.provider.to_string())
-            .unwrap_or_default();
-
-        let justification_summary = entry
-            .justification
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        FlatAuditRow {
-            entry_id: entry.id.to_string(),
-            timestamp: entry.timestamp.to_rfc3339(),
-            agent_id: entry.agent_id.to_string(),
-            payment_id: entry
-                .payment_id
-                .map(|p| p.to_string())
-                .unwrap_or_default(),
-            amount,
-            currency,
-            status: format!("{:?}", entry.final_status),
-            decision: format!("{:?}", entry.policy_evaluation.final_decision),
-            provider,
-            justification_summary,
-        }
-    }
-}
+// CSV flattening uses the shared `flatten_entry()` from `audit_export.rs`
+// to avoid logic duplication between sync and async export paths.
 
 /// Determines the requested export format from the `Accept` header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,20 +262,9 @@ fn entries_to_csv(entries: &[AuditEntry]) -> Result<String, ApiError> {
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("CSV header write: {e}")))?;
 
     for entry in entries {
-        let row = FlatAuditRow::from_entry(entry);
+        let row = flatten_entry(entry);
         writer
-            .write_record([
-                &row.entry_id,
-                &row.timestamp,
-                &row.agent_id,
-                &row.payment_id,
-                &row.amount,
-                &row.currency,
-                &row.status,
-                &row.decision,
-                &row.provider,
-                &row.justification_summary,
-            ])
+            .write_record(&row)
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("CSV row write: {e}")))?;
     }
 
@@ -510,8 +433,9 @@ mod tests {
             on_chain_tx_hash: None,
         };
 
-        let row = FlatAuditRow::from_entry(&entry);
-        assert_eq!(row.amount, "149.99", "numeric JSON amounts must not be empty");
+        let row = flatten_entry(&entry);
+        // amount is at index 4 in the flattened row
+        assert_eq!(row[4], "149.99", "numeric JSON amounts must not be empty");
 
         let csv = entries_to_csv(&[entry]).expect("CSV should succeed");
         assert!(csv.contains("149.99"), "CSV body must contain the numeric amount");

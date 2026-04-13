@@ -251,32 +251,56 @@ async fn main() -> anyhow::Result<()> {
     // Build router.
     let router = cream_api::build_router(state.clone());
 
-    // Spawn the escalation timeout monitor.
+    // Spawn background workers with panic supervision. Each task is named
+    // and wrapped so that a panic surfaces immediately in logs rather than
+    // being silently swallowed by a discarded JoinHandle.
+    let mut worker_handles = tokio::task::JoinSet::new();
+
     let monitor_state = state.clone();
-    tokio::spawn(async move {
+    worker_handles.spawn(async move {
         escalation_timeout_monitor(monitor_state).await;
     });
 
-    // Spawn webhook delivery workers (Phase 16-A).
     let delivery_state = state.clone();
-    tokio::spawn(async move {
+    worker_handles.spawn(async move {
         webhook_delivery_worker(delivery_state).await;
     });
+
     let retry_state = state.clone();
-    tokio::spawn(async move {
+    worker_handles.spawn(async move {
         webhook_retry_worker(retry_state).await;
     });
 
-    // Spawn credential age monitor (Phase 17-D).
     let credential_state = state.clone();
-    tokio::spawn(async move {
+    worker_handles.spawn(async move {
         credential_age_monitor(credential_state).await;
     });
 
-    // Spawn alert evaluation worker (Phase 17-G).
     let alert_state = state.clone();
-    tokio::spawn(async move {
+    worker_handles.spawn(async move {
         alert_evaluation_worker(alert_state).await;
+    });
+
+    // Supervisor: if any background worker panics or exits unexpectedly,
+    // log the error immediately. Runs in its own task so it doesn't block
+    // the main server loop.
+    tokio::spawn(async move {
+        while let Some(result) = worker_handles.join_next().await {
+            match result {
+                Ok(()) => {
+                    tracing::warn!("background worker exited unexpectedly (returned Ok)");
+                }
+                Err(e) if e.is_panic() => {
+                    tracing::error!(
+                        error = %e,
+                        "background worker panicked — this is a bug"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "background worker task error");
+                }
+            }
+        }
     });
 
     // Start serving with graceful shutdown.

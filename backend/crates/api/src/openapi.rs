@@ -78,7 +78,7 @@ fn dual_path(
 pub fn build_openapi_spec() -> utoipa::openapi::OpenApi {
     let info: Info = InfoBuilder::new()
         .title("Cream Payment Control Plane API")
-        .version("0.21.5")
+        .version(env!("CARGO_PKG_VERSION"))
         .description(Some(
             "Universal payment control plane for AI agents. \
              Abstracts payment providers, enforces operator-defined policies, \
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn spec_has_correct_version() {
         let spec = build_openapi_spec();
-        assert_eq!(spec.info.version, "0.21.5");
+        assert_eq!(spec.info.version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
