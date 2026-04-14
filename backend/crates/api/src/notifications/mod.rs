@@ -74,8 +74,15 @@ pub trait NotificationSender: Send + Sync + 'static {
     async fn send_escalation(&self, notification: &EscalationNotification) -> Result<(), String>;
 
     /// Send an alert notification when a metric threshold is breached.
+    /// The `channels` slice names which channels are enabled for this rule
+    /// (e.g., `["slack", "email"]`). Implementations should check whether
+    /// their channel name is in the list; an empty list means "all channels".
     /// Default implementation logs and returns Ok.
-    async fn send_alert(&self, notification: &AlertNotification) -> Result<(), String> {
+    async fn send_alert(
+        &self,
+        notification: &AlertNotification,
+        _channels: &[String],
+    ) -> Result<(), String> {
         tracing::info!(
             rule = %notification.rule_name,
             metric = %notification.metric,
@@ -117,7 +124,11 @@ impl NotificationSender for NoopNotifier {
         Ok(())
     }
 
-    async fn send_alert(&self, _notification: &AlertNotification) -> Result<(), String> {
+    async fn send_alert(
+        &self,
+        _notification: &AlertNotification,
+        _channels: &[String],
+    ) -> Result<(), String> {
         tracing::debug!("no notification channel configured, skipping alert");
         Ok(())
     }
@@ -159,9 +170,13 @@ impl NotificationSender for CompositeNotifier {
         Ok(())
     }
 
-    async fn send_alert(&self, notification: &AlertNotification) -> Result<(), String> {
+    async fn send_alert(
+        &self,
+        notification: &AlertNotification,
+        channels: &[String],
+    ) -> Result<(), String> {
         for sender in &self.senders {
-            if let Err(e) = sender.send_alert(notification).await {
+            if let Err(e) = sender.send_alert(notification, channels).await {
                 tracing::warn!(error = %e, "alert channel failed (non-blocking)");
             }
         }

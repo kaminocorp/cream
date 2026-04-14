@@ -164,6 +164,7 @@ pub async fn enqueue_webhook(
 ///
 /// For each event, it looks up all matching webhook endpoints, creates a
 /// delivery log entry, signs the payload, and POSTs to the endpoint URL.
+#[tracing::instrument(skip_all, fields(worker = "webhook_delivery"))]
 pub async fn webhook_delivery_worker(state: AppState) {
     tracing::info!("webhook delivery worker started");
 
@@ -223,6 +224,7 @@ pub async fn webhook_delivery_worker(state: AppState) {
 // ---------------------------------------------------------------------------
 
 /// Periodically scans the delivery log for failed deliveries eligible for retry.
+#[tracing::instrument(skip_all, fields(worker = "webhook_retry"))]
 pub async fn webhook_retry_worker(state: AppState) {
     tracing::info!("webhook retry worker started");
 

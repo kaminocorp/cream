@@ -412,10 +412,10 @@ async fn run_export_inner(
         ExportFormat::Ndjson => {
             let mut buf = Vec::new();
             for entry in &all_rows {
-                if let Ok(line) = serde_json::to_vec(entry) {
-                    buf.extend_from_slice(&line);
-                    buf.push(b'\n');
-                }
+                let line = serde_json::to_vec(entry)
+                    .map_err(|e| anyhow::anyhow!("NDJSON serialize: {e}"))?;
+                buf.extend_from_slice(&line);
+                buf.push(b'\n');
             }
             buf
         }

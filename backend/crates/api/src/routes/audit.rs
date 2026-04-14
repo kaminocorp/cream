@@ -160,12 +160,14 @@ pub async fn query(
         query = query.q(q);
     }
 
-    // For CSV/NDJSON, enforce the sync row cap.
+    // For CSV/NDJSON, enforce the sync row cap. Use export_mode() to bypass
+    // the standard 1K pagination clamp so we can fetch up to 10,001 rows for
+    // overflow detection.
     match format {
         ExportFormat::Csv | ExportFormat::Ndjson => {
             // Request one more than the cap to detect overflow.
             let effective_limit = params.limit.unwrap_or(SYNC_EXPORT_ROW_CAP).min(SYNC_EXPORT_ROW_CAP + 1);
-            query = query.limit(effective_limit);
+            query = query.limit(effective_limit).export_mode();
         }
         ExportFormat::Json => {
             if let Some(limit) = params.limit {
@@ -230,7 +232,7 @@ pub async fn query(
                 )
                     .into_response());
             }
-            let ndjson_body = entries_to_ndjson(&entries);
+            let ndjson_body = entries_to_ndjson(&entries)?;
             Ok((
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/x-ndjson")],
@@ -277,15 +279,17 @@ fn entries_to_csv(entries: &[AuditEntry]) -> Result<String, ApiError> {
 }
 
 /// Serialize audit entries to NDJSON (one JSON object per line).
-fn entries_to_ndjson(entries: &[AuditEntry]) -> String {
+/// Returns an error if any entry fails to serialize, rather than silently
+/// dropping it — data integrity is critical for audit exports.
+fn entries_to_ndjson(entries: &[AuditEntry]) -> Result<String, ApiError> {
     let mut buf = String::new();
     for entry in entries {
-        if let Ok(line) = serde_json::to_string(entry) {
-            buf.push_str(&line);
-            buf.push('\n');
-        }
+        let line = serde_json::to_string(entry)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("NDJSON serialize: {e}")))?;
+        buf.push_str(&line);
+        buf.push('\n');
     }
-    buf
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -382,7 +386,7 @@ mod tests {
             on_chain_tx_hash: None,
         };
 
-        let ndjson = entries_to_ndjson(&[entry.clone(), entry]);
+        let ndjson = entries_to_ndjson(&[entry.clone(), entry]).expect("NDJSON should succeed");
         let lines: Vec<&str> = ndjson.trim().split('\n').collect();
         assert_eq!(lines.len(), 2);
         // Each line is valid JSON.

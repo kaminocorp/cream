@@ -49,6 +49,10 @@ pub struct AuditQuery {
     q: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
+    /// When true, the limit is clamped to 10,001 instead of 1,000 to
+    /// support sync export overflow detection. Standard API queries must
+    /// not set this flag.
+    export_mode: bool,
 }
 
 impl AuditQuery {
@@ -123,9 +127,18 @@ impl AuditQuery {
         self
     }
 
-    /// Effective limit, defaulting to 50 and clamped to 1000.
+    /// Mark this query as an export query. Export queries use a higher limit
+    /// cap (10,001) to support sync export overflow detection.
+    pub fn export_mode(mut self) -> Self {
+        self.export_mode = true;
+        self
+    }
+
+    /// Effective limit, respecting export mode. Standard queries clamp to
+    /// 1,000; export queries clamp to 10,001 (one above the sync cap).
     fn effective_limit(&self) -> i64 {
-        self.limit.unwrap_or(50).min(1000) as i64
+        let cap = if self.export_mode { 10_001 } else { 1_000 };
+        self.limit.unwrap_or(50).min(cap) as i64
     }
 
     /// Effective offset, defaulting to 0 and clamped to 100_000 to prevent

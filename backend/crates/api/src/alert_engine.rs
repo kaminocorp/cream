@@ -76,7 +76,14 @@ impl AlertCondition {
             Self::Lt => value < threshold,
             Self::Gte => value >= threshold,
             Self::Lte => value <= threshold,
-            Self::Eq => (value - threshold).abs() < f64::EPSILON,
+            Self::Eq => {
+                // Use a relative tolerance for practical float comparison.
+                // f64::EPSILON (~2.22e-16) is too strict for real-world metrics.
+                let abs_tol = 1e-9;
+                let rel_tol = 1e-6;
+                let diff = (value - threshold).abs();
+                diff <= abs_tol || diff <= rel_tol * threshold.abs().max(value.abs())
+            }
         }
     }
 }
@@ -168,6 +175,26 @@ async fn evaluate_alerts(
         let snapshot_key = format!("{}:{}", rule.id, rule.metric);
         let effective_value = match snapshots.get(&snapshot_key) {
             Some(prev) => {
+                // Counter reset detection: if the current value is less than
+                // the previous snapshot, the counter was reset (e.g., service
+                // restart). Reset the snapshot and skip this evaluation cycle.
+                if current_value < prev.value {
+                    tracing::debug!(
+                        rule_id = %rule.id,
+                        prev = prev.value,
+                        current = current_value,
+                        "counter reset detected, resetting snapshot"
+                    );
+                    snapshots.insert(
+                        snapshot_key,
+                        MetricSnapshot {
+                            value: current_value,
+                            timestamp: now,
+                        },
+                    );
+                    continue;
+                }
+
                 let elapsed_secs = now.duration_since(prev.timestamp).as_secs_f64();
                 let window = rule.window_seconds.max(1) as f64;
 
@@ -267,16 +294,33 @@ async fn evaluate_alerts(
             message: alert_msg,
         };
 
-        if let Err(e) = state
-            .notification_sender
-            .send_alert(&notification)
-            .await
-        {
-            tracing::warn!(
-                rule_id = %rule.id,
-                error = %e,
-                "alert notification failed (non-blocking)"
-            );
+        // Dispatch notifications filtered by the rule's configured channels.
+        // If channels is an array, only send to matching channels; if empty
+        // or not an array, fall back to all registered channels.
+        let channels: Vec<String> = rule
+            .channels
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if channels.is_empty() || channels.iter().any(|c| c != "dashboard") {
+            // Send to external channels (Slack/email) — skip if only "dashboard"
+            // is configured, since dashboard alerts are visible via GET /v1/alerts/history.
+            if let Err(e) = state
+                .notification_sender
+                .send_alert(&notification, &channels)
+                .await
+            {
+                tracing::warn!(
+                    rule_id = %rule.id,
+                    error = %e,
+                    "alert notification failed (non-blocking)"
+                );
+            }
         }
     }
 

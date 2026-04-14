@@ -318,9 +318,9 @@ async fn main() -> anyhow::Result<()> {
         // `.with_graceful_shutdown()`.
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
-        let otel = config.otel_enabled;
+        let tp = tracer_provider.clone();
         tokio::spawn(async move {
-            shutdown_signal(otel).await;
+            shutdown_signal(tp).await;
             shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
         });
 
@@ -334,15 +334,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%addr, "cream-api listening (HTTP)");
 
         axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal(config.otel_enabled))
+            .with_graceful_shutdown(shutdown_signal(tracer_provider))
             .await?;
     }
 
     Ok(())
 }
 
-/// Wait for SIGINT (Ctrl+C) or SIGTERM, then flush OTEL traces before exit.
-async fn shutdown_signal(otel_enabled: bool) {
+/// Wait for SIGINT (Ctrl+C) or SIGTERM, then explicitly flush OTEL traces.
+async fn shutdown_signal(tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>) {
     let ctrl_c = tokio::signal::ctrl_c();
 
     #[cfg(unix)]
@@ -361,10 +361,11 @@ async fn shutdown_signal(otel_enabled: bool) {
         _ = terminate => { tracing::info!("received SIGTERM, shutting down"); }
     }
 
-    if otel_enabled {
-        // SdkTracerProvider flushes pending spans on drop. Logging here confirms
-        // the shutdown path was reached; the actual flush happens when the global
-        // provider is dropped at process exit.
-        tracing::info!("OpenTelemetry tracer provider will flush on shutdown");
+    if let Some(provider) = tracer_provider {
+        tracing::info!("flushing OpenTelemetry tracer provider");
+        if let Err(e) = provider.force_flush() {
+            tracing::warn!(error = %e, "OTEL tracer flush failed during shutdown");
+        }
+        tracing::info!("OpenTelemetry tracer provider flushed");
     }
 }

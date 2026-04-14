@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.21.12](#02112--2026-04-14) — Post-Phase-17 hardening (round 5): 9 fixes — sync export truncation, OpenAPI typed schemas, alert channels, NDJSON error handling, OTEL flush, auth metrics — 549 tests
 - [0.21.11](#02111--2026-04-13) — Post-Phase-17 hardening (round 4): 6 low fixes — JoinSet worker supervision, LOG_LEVEL validation, UTF-8 safe truncation, OpenAPI version from Cargo.toml, flatten_entry dedup, 1 test fix — 546 tests
 - [0.21.10](#02110--2026-04-13) — Post-Phase-17 hardening (round 3): 5 medium fixes — PII substring matching + access_token, resume_after_approval metrics, circuit breaker gauge reset, payment duration scope, alert update validation — 539 tests
 - [0.21.9](#0219--2026-04-13) — Post-Phase-17 hardening (round 2): 5 critical/high fixes — CSV numeric amount data loss, async export DoS + silent filter bypass, alert engine windowed evaluation, PII redaction body size cap — 538 tests
@@ -87,6 +88,53 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.12 — 2026-04-14
+
+**Post-Phase-17 Hardening (Round 5)**
+
+9 fixes from comprehensive Phase 17 review: 3 P0 (data integrity, API spec, feature correctness), 3 P1 (error propagation, alert logic), 3 P2 (observability gaps). 549 backend tests pass (up from 546). Zero clippy warnings.
+
+### P0 — Data Integrity
+
+- **Sync audit export silent truncation fixed** — `GET /v1/audit` with `Accept: text/csv` requested up to 10,001 rows for overflow detection, but `AuditQuery::effective_limit()` silently clamped all queries to 1,000. Operators exporting 5,000 audit rows received only 1,000 with **no warning**. The overflow detection (`entries.len() > 10,000`) never triggered because the query itself was capped. Added `export_mode` flag to `AuditQuery` that raises the internal limit cap to 10,001 for export-context queries while keeping standard API pagination safe at 1,000. Sync export path now calls `.export_mode()` before querying. (`backend/crates/audit/src/reader.rs`, `backend/crates/api/src/routes/audit.rs`)
+
+### P0 — OpenAPI Specification
+
+- **OpenAPI schemas: generic `object` → real typed definitions** — All 39 endpoints previously described their request/response bodies as generic `type: object` with no properties. Swagger UI showed correct paths but zero type information for clients. Added 11 component schemas (`PaymentRequest`, `PaymentResponse`, `Justification`, `Recipient`, `Agent`, `AgentProfile`, `VirtualCard`, `CardControls`, `PaymentMetadata`, `AlertRule`, `ErrorResponse`) with property names, types, enum values, format hints (datetime), and `$ref` cross-references. Key endpoints (`POST /v1/payments`, `GET /v1/payments/{id}`, `POST /v1/cards`, agent CRUD, alert CRUD) now use `$ref` to reference these schemas in request bodies and responses. (`backend/crates/api/src/openapi.rs`)
+
+- **Security schemes applied to endpoints** — `agent_api_key` and `operator_jwt` security schemes were defined in components but **never applied** to any operation. Added `agent_secured_op()` and `operator_secured_op()` helpers that attach the appropriate `SecurityRequirement` to each endpoint. All payment/card/agent/audit/webhook/alert endpoints now declare their required auth scheme, and unauthorized endpoints (auth status, login, register) remain unsecured. 401 responses added to secured endpoints. (`backend/crates/api/src/openapi.rs`)
+
+### P0 — Feature Correctness
+
+- **Alert `channels` field now filters notification dispatch** — Alert rules store a `channels` JSONB field (e.g., `["slack", "dashboard"]`), but the alert engine unconditionally routed to **all registered channels** regardless of the field value. An operator setting `channels: ["dashboard"]` on a non-critical rule would still receive Slack notifications. The engine now parses the channels array and skips external dispatch when only `"dashboard"` is configured. The `NotificationSender::send_alert()` trait method now accepts a `&[String]` channels parameter, allowing implementations to filter by channel name. All trait implementations (`NoopNotifier`, `CompositeNotifier`, default) updated accordingly. (`backend/crates/api/src/alert_engine.rs`, `backend/crates/api/src/notifications/mod.rs`)
+
+### P1 — Error Propagation
+
+- **NDJSON export: silent data loss → error propagation** — Both sync (`entries_to_ndjson` in `routes/audit.rs`) and async (`run_export_inner` in `audit_export.rs`) NDJSON export paths used `if let Ok(line) = serde_json::to_vec(entry)`, silently skipping entries that failed serialization. The reported `rows_exported` count could exceed the actual lines in the file. Both paths now propagate serialization errors: sync returns `ApiError::Internal`, async fails the export job with a descriptive error message. (`backend/crates/api/src/routes/audit.rs`, `backend/crates/api/src/audit_export.rs`)
+
+### P1 — Alert Engine
+
+- **Alert equality operator: `f64::EPSILON` → relative tolerance** — `AlertCondition::Eq` used `(value - threshold).abs() < f64::EPSILON` (~2.22e-16), making equality matches nearly impossible for real-world metric values. Replaced with a combined absolute tolerance (`1e-9`) and relative tolerance (`1e-6 × max(|value|, |threshold|)`). A threshold of `10.0` now matches values within `±0.00001` rather than requiring sub-attosecond precision. (`backend/crates/api/src/alert_engine.rs`)
+
+- **Counter reset detection in alert engine** — When a Prometheus counter resets (e.g., service restart), the current value drops below the previous snapshot, producing a negative delta. This could suppress `gt` alerts or falsely trigger `lt` alerts. The engine now detects negative deltas (`current_value < prev.value`), logs a debug message, resets the snapshot to the current value, and skips evaluation for that tick. Normal evaluation resumes on the next cycle with a clean baseline. (`backend/crates/api/src/alert_engine.rs`)
+
+### P2 — Observability
+
+- **Explicit OTEL tracer flush on shutdown** — The tracer provider previously relied on implicit `Drop` for span flushing, with no guarantee that in-flight spans would export before process termination. The `shutdown_signal()` function now receives the `SdkTracerProvider` directly (not a boolean flag) and calls `provider.force_flush()` explicitly before the server exits. Flush errors are logged at WARN level rather than silently lost. (`backend/crates/api/src/main.rs`)
+
+- **Auth extractor metrics for agent API key authentication** — Agent API key authentication (the primary auth path for every `POST /v1/payments` call) recorded zero Prometheus metrics. Only operator login had `cream_auth_attempts_total`. Added three new label values to `AUTH_ATTEMPTS_TOTAL`: `agent_success` (valid key, active agent), `agent_failure` (invalid/revoked key), and `agent_rejected_operator_key` (operator key used on agent-only endpoint). Agent auth failures are now visible in dashboards and alerting. (`backend/crates/api/src/extractors/auth.rs`)
+
+- **Webhook workers instrumented with `#[tracing::instrument]`** — `webhook_delivery_worker()` and `webhook_retry_worker()` are long-running background loops that were missing parent tracing spans. Their child spans (`deliver_to_endpoint`) were instrumented, but the parent context was lost in distributed traces. Added `#[tracing::instrument(skip_all, fields(worker = "webhook_delivery"))]` and `#[tracing::instrument(skip_all, fields(worker = "webhook_retry"))]` to create named parent spans for all webhook operations. (`backend/crates/api/src/webhook_worker.rs`)
+
+### Tests
+
+3 new tests (total: 549):
+- `spec_has_component_schemas` — verifies all 10 named schemas exist in the OpenAPI components
+- `payment_endpoint_uses_typed_schema` — verifies `POST /v1/payments` request body uses a `$ref` schema, not generic object
+- `endpoints_have_security_requirements` — verifies `POST /v1/payments` declares a security requirement
 
 ---
 

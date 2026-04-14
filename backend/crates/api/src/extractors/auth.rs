@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::error::ApiError;
+use crate::metrics as m;
 use crate::state::AppState;
 
 /// Resolved agent identity, injected by the extractor into handlers that
@@ -201,13 +202,22 @@ impl FromRequestParts<AppState> for AuthenticatedAgent {
         // rather than falling through to a DB lookup that would return
         // Unauthorized anyway.
         if token_is_operator(state, token) {
+            ::metrics::counter!(m::AUTH_ATTEMPTS_TOTAL, "result" => "agent_rejected_operator_key").increment(1);
             return Err(ApiError::Unauthorized);
         }
 
         let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
 
-        let (agent, profile) = lookup_agent_by_key_hash(&state.db, &key_hash).await?;
-        Ok(AuthenticatedAgent { agent, profile })
+        match lookup_agent_by_key_hash(&state.db, &key_hash).await {
+            Ok((agent, profile)) => {
+                ::metrics::counter!(m::AUTH_ATTEMPTS_TOTAL, "result" => "agent_success").increment(1);
+                Ok(AuthenticatedAgent { agent, profile })
+            }
+            Err(e) => {
+                ::metrics::counter!(m::AUTH_ATTEMPTS_TOTAL, "result" => "agent_failure").increment(1);
+                Err(e)
+            }
+        }
     }
 }
 
