@@ -133,9 +133,21 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(host = %config.host, port = config.port, "loading configuration");
 
-    // Database pool.
-    let db = sqlx::PgPool::connect(&config.database_url).await?;
-    tracing::info!("connected to PostgreSQL");
+    // Database pool — explicit limits for production stability. The defaults
+    // (no max, no idle timeout) can exhaust connections under load.
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .idle_timeout(std::time::Duration::from_secs(600))
+        .max_lifetime(std::time::Duration::from_secs(1800))
+        .connect(&config.database_url)
+        .await?;
+    tracing::info!(
+        max_connections = 20,
+        min_connections = 2,
+        "connected to PostgreSQL"
+    );
 
     // Redis connection.
     let redis_client = redis::Client::open(config.redis_url.as_str())?;
@@ -363,9 +375,26 @@ async fn shutdown_signal(tracer_provider: Option<opentelemetry_sdk::trace::SdkTr
 
     if let Some(provider) = tracer_provider {
         tracing::info!("flushing OpenTelemetry tracer provider");
-        if let Err(e) = provider.force_flush() {
-            tracing::warn!(error = %e, "OTEL tracer flush failed during shutdown");
+        // Wrap force_flush in a timeout to prevent indefinite hang if the
+        // OTLP backend is unreachable during shutdown.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || provider.force_flush()),
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => {
+                tracing::info!("OpenTelemetry tracer provider flushed");
+            }
+            Ok(Ok(Err(e))) => {
+                tracing::warn!(error = %e, "OTEL tracer flush failed during shutdown");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "OTEL tracer flush task panicked");
+            }
+            Err(_) => {
+                tracing::warn!("OTEL tracer flush timed out after 5s — skipping");
+            }
         }
-        tracing::info!("OpenTelemetry tracer provider flushed");
     }
 }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::{EscalationNotification, NotificationSender, ReminderKind, ReminderNotification};
+use super::{AlertNotification, EscalationNotification, NotificationSender, ReminderKind, ReminderNotification};
 
 /// Produce a text/plain approximation of an HTML body by stripping tags.
 /// Used to build the plaintext alternative in multipart emails so clients
@@ -357,6 +357,79 @@ impl NotificationSender for EmailNotifier {
                     payment_id = %notification.payment_id,
                     error = %e,
                     "email notification failed (non-blocking)"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    async fn send_alert(
+        &self,
+        notification: &AlertNotification,
+        channels: &[String],
+    ) -> Result<(), String> {
+        // Only send if "email" is in the channels list, or list is empty (all).
+        if !channels.is_empty() && !channels.iter().any(|c| c == "email") {
+            return Ok(());
+        }
+
+        let subject = format!(
+            "Metric Alert: {} — {} is {:.2}",
+            notification.rule_name, notification.metric, notification.value
+        );
+
+        let rule_name = html_escape(&notification.rule_name);
+        let metric = html_escape(&notification.metric);
+        let condition = html_escape(&notification.condition);
+        let message = html_escape(&notification.message);
+
+        let html_body = format!(
+            r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#18181b;">
+  <h2 style="margin-top:0;color:#dc2626;">Metric Alert: {rule_name}</h2>
+  <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+    <tr><td style="padding:8px 0;color:#71717a;width:140px;">Metric</td><td style="padding:8px 0;font-family:monospace;">{metric}</td></tr>
+    <tr><td style="padding:8px 0;color:#71717a;">Condition</td><td style="padding:8px 0;">{condition} {threshold}</td></tr>
+    <tr><td style="padding:8px 0;color:#71717a;">Current Value</td><td style="padding:8px 0;font-weight:600;color:#dc2626;">{value:.2}</td></tr>
+    <tr><td style="padding:8px 0;color:#71717a;">Threshold</td><td style="padding:8px 0;">{threshold}</td></tr>
+  </table>
+  <div style="background:#fef2f2;border-left:3px solid #dc2626;padding:12px 16px;margin:16px 0;">
+    {message}
+  </div>
+  <p style="color:#a1a1aa;font-size:12px;margin-top:24px;">This alert was sent by Cream — the payment control plane for AI agents.</p>
+</body></html>"#,
+            rule_name = rule_name,
+            metric = metric,
+            condition = condition,
+            threshold = notification.threshold,
+            value = notification.value,
+            message = message,
+        );
+
+        let result = match &self.config.mode {
+            EmailMode::Smtp { host, port, username, password } => {
+                self.send_smtp(host, *port, username, password, &subject, &html_body).await
+            }
+            EmailMode::Resend { api_key } => {
+                self.send_resend(api_key, &subject, &html_body).await
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    rule = %notification.rule_name,
+                    metric = %notification.metric,
+                    "email alert notification sent"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    rule = %notification.rule_name,
+                    error = %e,
+                    "email alert notification failed (non-blocking)"
                 );
                 Ok(())
             }

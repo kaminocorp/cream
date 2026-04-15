@@ -1,5 +1,6 @@
 # Changelog
 
+- [0.21.16](#02116--2026-04-15) — Post-Phase-17 hardening (round 9): 6 production-readiness fixes — auth rate limiting, send_alert() dispatch, OTEL flush timeout, histogram buckets, error-recovery metrics, PgPool config — 525 unit tests
 - [0.21.15](#02115--2026-04-15) — Post-Phase-17 hardening (round 8): 4 P2 fixes — request ID UUID validation, OpenAPI schema gaps, alert rule bounds, card expiry validation — 551 tests
 - [0.21.14](#02114--2026-04-15) — Post-Phase-17 hardening (round 7): 5 P1 fixes — rate limiter atomicity, PII redaction expansion, S3 retry, alert window timing, Validating→Failed transition — 551 tests
 - [0.21.13](#02113--2026-04-15) — Post-Phase-17 hardening (round 6): 3 P0 fixes — unbounded escalation queries, silent error-recovery paths, audit serialization data loss — 549 tests
@@ -91,6 +92,47 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.16 — 2026-04-15
+
+**Post-Phase-17 Hardening (Round 9)**
+
+6 production-readiness fixes identified during comprehensive Phase 17 code quality review. Addresses 2 security gaps, 1 operational reliability issue, 1 missing feature, and 2 production stability improvements. 525 unit tests pass. Zero compiler warnings.
+
+### P1 — Security: Auth route brute-force protection
+
+- **Auth routes now rate-limited (IP-based, 20 req/60s)** — All five `/v1/auth/*` endpoints (login, register, refresh, logout, status) were explicitly excluded from the per-agent rate limiter with a comment reading "stricter rate limiting in the future; for now, open." This left login and registration endpoints unprotected against brute-force credential stuffing attacks. Added a dedicated `auth_rate_limit` middleware using IP-based identity (SHA256 hash of `X-Forwarded-For` first hop, falling back to `ConnectInfo` socket address). Fixed at 20 requests per 60-second window — generous for normal usage (login retries, token refreshes) but tight enough to block automated attacks. Uses the same atomic Lua script as the API rate limiter. The shared `check_rate_limit` helper was extracted from the existing `rate_limit()` function to DRY the Redis increment + fail-open logic. (`backend/crates/api/src/middleware/rate_limit.rs`, `backend/crates/api/src/lib.rs`)
+
+### P1 — Feature: Alert dispatch to Slack/Email
+
+- **`send_alert()` implemented in SlackNotifier and EmailNotifier** — The alert engine (Phase 17-G) correctly evaluates rules and fires `notification_sender.send_alert()`, but neither `SlackNotifier` nor `EmailNotifier` overrode the default trait implementation — which only logs at INFO level and returns `Ok(())`. When alerts fired, external notification channels were silently a no-op; only the "dashboard" channel (viewable via `GET /v1/alerts/history`) worked. Implemented `send_alert()` in both notifiers following the existing `send_escalation()` patterns:
+  - **Slack**: Block Kit message with header, metric/condition/value/threshold fields, and details section. Channel filtering respects the alert rule's `channels` array — only sends if `"slack"` is listed (or list is empty = all).
+  - **Email**: HTML template with red accent styling for alert severity, metric details table, and message body. All user-controlled fields HTML-escaped via existing `html_escape()` helper. Supports both SMTP (lettre) and Resend API modes.
+  Both implementations are non-blocking (errors logged at WARN, swallowed) per the `NotificationSender` trait contract.
+  (`backend/crates/api/src/notifications/slack.rs`, `backend/crates/api/src/notifications/email.rs`)
+
+### P1 — Reliability: OTEL flush timeout prevents shutdown hang
+
+- **`force_flush()` wrapped in 5-second timeout** — The shutdown signal handler called `provider.force_flush()` synchronously with no timeout. If the OTLP backend (Jaeger, Grafana Tempo, etc.) was unreachable during shutdown (network partition, collector down, DNS failure), the server would hang indefinitely instead of completing its graceful shutdown sequence — preventing process managers (systemd, Kubernetes) from detecting the stall until their own kill timeout fired. Wrapped the flush in `tokio::time::timeout(5s, spawn_blocking(force_flush))` with explicit handling for all three failure modes: flush error (logged WARN), task panic (logged WARN), and timeout exceeded (logged WARN, skip). (`backend/crates/api/src/main.rs`)
+
+### P2 — Observability: Custom histogram buckets
+
+- **Payment-appropriate histogram buckets replace Prometheus defaults** — All four histogram metrics (`cream_payment_duration_seconds`, `cream_policy_evaluation_duration_seconds`, `cream_provider_request_duration_seconds`, `cream_webhook_delivery_duration_seconds`) used default Prometheus buckets (5ms to 10s). For a payment system where policy evaluation completes in sub-millisecond to single-digit milliseconds and provider calls take 200ms–5s, the default buckets provide no useful granularity in the ranges that matter. Configured per-histogram bucket sets via `PrometheusBuilder::set_buckets_for_metric()`:
+  - Policy evaluation: 0.1ms → 100ms (8 buckets, fine-grained for in-memory rule evaluation)
+  - Provider requests: 50ms → 10s (8 buckets, network call latency profile)
+  - Full payment lifecycle: 50ms → 30s (9 buckets, end-to-end)
+  - Webhook delivery: 50ms → 30s (9 buckets, external HTTP delivery)
+  (`backend/crates/api/src/metrics.rs`)
+
+### P2 — Observability: Error-recovery failure metric
+
+- **New `cream_error_recovery_failures_total` counter (16th metric)** — When the orchestrator's error-recovery path itself fails (e.g., `transition(Failed)` errors because the payment state machine is corrupted, or `update_payment()` fails because the database is unreachable during the very error it's trying to recover from), the payment may be left in an inconsistent state requiring manual operator review. These failures were logged at ERROR level (since v0.21.13) but had no metric — operators relying on Prometheus/Grafana alerting had no automated way to detect them. Added `cream_error_recovery_failures_total` counter with a `step` label distinguishing `transition`, `update_payment`, and `write_audit` failures. All 10 error-recovery `if let Err(...)` blocks across `process()` and `resume_after_approval()` now increment the counter. Log messages updated to include "payment may need manual review" or "audit gap" suffixes. Metric count test updated from 15 → 16. (`backend/crates/api/src/orchestrator.rs`, `backend/crates/api/src/metrics.rs`)
+
+### P2 — Stability: PgPool connection limits
+
+- **Database pool configured with explicit limits** — `PgPool::connect()` was called with default settings: no max connections, no idle timeout, no max lifetime, no acquire timeout. Under production load, this can exhaust PostgreSQL's connection limit (default 100) with stale or leaked connections, cause unbounded queue growth when connections are slow to acquire, or hold connections open indefinitely — preventing planned failovers. Replaced with `PgPoolOptions::new()` with: `max_connections(20)` (bounded ceiling, ~1 connection per concurrent payment lifecycle), `min_connections(2)` (warm pool on startup), `acquire_timeout(5s)` (fail fast instead of queueing indefinitely), `idle_timeout(600s)` (reclaim idle connections after 10 min), `max_lifetime(1800s)` (force reconnect every 30 min to pick up DNS changes / connection-level state drift). Connection parameters logged at startup. (`backend/crates/api/src/main.rs`)
 
 ---
 

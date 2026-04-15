@@ -4,7 +4,28 @@
 //! [`metrics`] crate macros (`counter!`, `histogram!`, `gauge!`) which are
 //! no-ops when no recorder is installed — zero overhead when metrics are disabled.
 
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+
+// ---------------------------------------------------------------------------
+// Histogram bucket definitions — tuned for payment system latency profiles.
+//
+// Policy evaluation is pure in-memory rule evaluation: sub-millisecond to
+// single-digit milliseconds. Provider calls go over the network to Stripe /
+// Airwallex / etc.: typically 200ms–5s. The full payment lifecycle spans
+// both: policy + routing + provider + audit write.
+// ---------------------------------------------------------------------------
+
+/// Policy engine evaluation: expected 0.1ms–50ms.
+const POLICY_BUCKETS: &[f64] = &[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1];
+
+/// Provider request latency: expected 100ms–5s.
+const PROVIDER_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0];
+
+/// Full payment lifecycle: expected 50ms–10s (target <300ms for autonomous).
+const PAYMENT_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0];
+
+/// Webhook delivery latency: expected 100ms–10s.
+const WEBHOOK_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0];
 
 // ---------------------------------------------------------------------------
 // Metric name constants
@@ -42,6 +63,11 @@ pub const CREDENTIAL_AGE_WARNING: &str = "cream_credential_age_warning";
 // Circuit breaker
 pub const CIRCUIT_BREAKER_STATE: &str = "cream_circuit_breaker_state";
 
+// Error recovery — counts payments where the error-recovery path itself
+// failed (transition, update_payment, or write_audit errored). These
+// payments may need manual review — operators should alert on this metric.
+pub const ERROR_RECOVERY_FAILURES_TOTAL: &str = "cream_error_recovery_failures_total";
+
 // Infrastructure
 pub const REDIS_CONNECTION_ERRORS_TOTAL: &str = "cream_redis_connection_errors_total";
 
@@ -63,7 +89,29 @@ pub const REDIS_CONNECTION_ERRORS_TOTAL: &str = "cream_redis_connection_errors_t
 /// evaluate alerting rules against current metric values.
 pub fn init_metrics(port: u16) -> PrometheusHandle {
     let builder = PrometheusBuilder::new()
-        .with_http_listener(([0, 0, 0, 0], port));
+        .with_http_listener(([0, 0, 0, 0], port))
+        // Per-histogram bucket overrides — each histogram gets buckets tuned
+        // for its expected latency profile instead of Prometheus defaults.
+        .set_buckets_for_metric(
+            Matcher::Full(POLICY_EVALUATION_DURATION_SECONDS.to_string()),
+            POLICY_BUCKETS,
+        )
+        .expect("valid policy buckets")
+        .set_buckets_for_metric(
+            Matcher::Full(PROVIDER_REQUEST_DURATION_SECONDS.to_string()),
+            PROVIDER_BUCKETS,
+        )
+        .expect("valid provider buckets")
+        .set_buckets_for_metric(
+            Matcher::Full(PAYMENT_DURATION_SECONDS.to_string()),
+            PAYMENT_BUCKETS,
+        )
+        .expect("valid payment buckets")
+        .set_buckets_for_metric(
+            Matcher::Full(WEBHOOK_DELIVERY_DURATION_SECONDS.to_string()),
+            WEBHOOK_BUCKETS,
+        )
+        .expect("valid webhook buckets");
 
     builder
         .install_recorder()
@@ -119,6 +167,7 @@ mod tests {
             ESCALATION_PENDING_COUNT,
             CREDENTIAL_AGE_WARNING,
             CIRCUIT_BREAKER_STATE,
+            ERROR_RECOVERY_FAILURES_TOTAL,
             REDIS_CONNECTION_ERRORS_TOTAL,
         ];
         for name in &all_names {
@@ -146,6 +195,7 @@ mod tests {
             ESCALATION_PENDING_COUNT,
             CREDENTIAL_AGE_WARNING,
             CIRCUIT_BREAKER_STATE,
+            ERROR_RECOVERY_FAILURES_TOTAL,
             REDIS_CONNECTION_ERRORS_TOTAL,
         ];
         let mut seen = std::collections::HashSet::new();
@@ -155,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn metric_count_is_15() {
+    fn metric_count_is_16() {
         // Guard: if someone adds a metric constant, this test reminds them
         // to add it to the all_names arrays above and in the docs.
         assert_eq!(
@@ -174,10 +224,11 @@ mod tests {
                 ESCALATION_PENDING_COUNT,
                 CREDENTIAL_AGE_WARNING,
                 CIRCUIT_BREAKER_STATE,
+                ERROR_RECOVERY_FAILURES_TOTAL,
                 REDIS_CONNECTION_ERRORS_TOTAL,
             ]
             .len(),
-            15
+            16
         );
     }
 }

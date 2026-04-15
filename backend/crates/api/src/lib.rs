@@ -136,14 +136,19 @@ pub fn build_router(state: AppState) -> Router {
         api_routes
     };
 
-    // Auth routes — NOT behind the main rate limiter (they have their own
-    // stricter rate limiting in the future; for now, open).
+    // Auth routes — behind a stricter IP-based rate limiter (20 req/60s)
+    // to prevent brute-force attacks on login/register. Separate from the
+    // main per-agent rate limiter since auth callers don't yet have a token.
     let auth_routes = Router::new()
         .route("/v1/auth/status", get(routes::auth::status))
         .route("/v1/auth/register", post(routes::auth::register))
         .route("/v1/auth/login", post(routes::auth::login))
         .route("/v1/auth/refresh", post(routes::auth::refresh))
-        .route("/v1/auth/logout", post(routes::auth::logout));
+        .route("/v1/auth/logout", post(routes::auth::logout))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::rate_limit::auth_rate_limit,
+        ));
 
     // Integration callback routes — verified by their own signing secrets.
     let integration_routes = Router::new().route(
@@ -172,7 +177,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(SwaggerUi::new("/docs").url("/v1/openapi.json", openapi_spec))
         // Merge in API routes (rate-limited).
         .merge(api_routes)
-        // Merge in auth routes (not rate-limited — separate from API).
+        // Merge in auth routes (IP-based rate-limited, separate from API).
         .merge(auth_routes)
         // Merge in integration callback routes.
         .merge(integration_routes)

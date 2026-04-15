@@ -243,13 +243,16 @@ impl PaymentOrchestrator {
             Ok(r) => r,
             Err(e) => {
                 if let Err(te) = payment.transition(PaymentStatus::Failed) {
-                    tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed");
+                    tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "transition").increment(1);
                 }
                 if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
-                    tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after routing failure");
+                    tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after routing failure — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "update_payment").increment(1);
                 }
                 if let Err(ae) = self.write_audit(&payment, agent, &decision, None, None, 0).await {
-                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after routing failure");
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after routing failure — audit gap");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "write_audit").increment(1);
                 }
                 if let Err(rel_err) = self
                     .state
@@ -275,14 +278,17 @@ impl PaymentOrchestrator {
             Err(e) => {
                 if !payment.status().is_terminal() {
                     if let Err(te) = payment.transition(PaymentStatus::Failed) {
-                        tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed");
+                        tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "transition").increment(1);
                     }
                     if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
-                        tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after provider failure");
+                        tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after provider failure — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "update_payment").increment(1);
                     }
                 }
                 if let Err(ae) = self.write_audit(&payment, agent, &decision, Some(&routing), None, 0).await {
-                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after provider failure");
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after provider failure — audit gap");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "write_audit").increment(1);
                 }
                 if let Err(rel_err) = self
                     .state
@@ -421,13 +427,16 @@ impl PaymentOrchestrator {
             Ok(r) => r,
             Err(e) => {
                 if let Err(te) = payment.transition(PaymentStatus::Failed) {
-                    tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed in resume_after_approval");
+                    tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed in resume_after_approval — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "transition").increment(1);
                 }
                 if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
-                    tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after routing failure in resume_after_approval");
+                    tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after routing failure in resume_after_approval — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "update_payment").increment(1);
                 }
                 if let Err(ae) = self.write_audit(&payment, agent, &decision, None, None, 0).await {
-                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after routing failure in resume_after_approval");
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after routing failure in resume_after_approval — audit gap");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "write_audit").increment(1);
                 }
                 // Release idempotency key so the agent can retry.
                 if let Err(rel_err) = self
@@ -454,14 +463,17 @@ impl PaymentOrchestrator {
             Err(e) => {
                 if !payment.status().is_terminal() {
                     if let Err(te) = payment.transition(PaymentStatus::Failed) {
-                        tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed in resume_after_approval");
+                        tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed in resume_after_approval — payment may need manual review");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "transition").increment(1);
                     }
                     if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
-                        tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after provider failure in resume_after_approval");
+                        tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after provider failure in resume_after_approval — payment may need manual review");
+                        ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "update_payment").increment(1);
                     }
                 }
                 if let Err(ae) = self.write_audit(&payment, agent, &decision, Some(&routing), None, 0).await {
-                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after provider failure in resume_after_approval");
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after provider failure in resume_after_approval — audit gap");
+                    ::metrics::counter!(crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL, "step" => "write_audit").increment(1);
                 }
                 // Release idempotency key so the agent can retry.
                 if let Err(rel_err) = self

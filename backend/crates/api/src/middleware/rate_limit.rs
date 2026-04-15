@@ -27,29 +27,66 @@ pub async fn rate_limit(
         let window_secs = state.config.rate_limit_window_secs;
         let max_requests = state.config.rate_limit_requests;
 
-        let now = chrono::Utc::now().timestamp() as u64;
-        let window_epoch = now / window_secs;
-        let key = format!("cream:rate:{key_hash}:{window_epoch}");
-
-        match increment_counter(&state.redis, &key, window_secs).await {
-            Ok(count) => {
-                if count > max_requests {
-                    ::metrics::counter!(crate::metrics::RATE_LIMIT_HITS_TOTAL).increment(1);
-                    let retry_after = window_secs - (now % window_secs);
-                    return Err(ApiError::RateLimited {
-                        retry_after_secs: retry_after,
-                    });
-                }
-            }
-            Err(e) => {
-                // Fail-open: Redis unavailable should not block requests.
-                ::metrics::counter!(crate::metrics::REDIS_CONNECTION_ERRORS_TOTAL).increment(1);
-                tracing::warn!(error = %e, "rate limiter: redis unavailable, allowing request");
-            }
-        }
+        check_rate_limit(&state, &key_hash, "cream:rate", window_secs, max_requests).await?;
     }
 
     Ok(next.run(request).await)
+}
+
+/// Stricter rate limiting for auth routes (login, register, refresh).
+///
+/// Uses the source IP (or forwarded IP) instead of bearer token, since auth
+/// callers don't yet have a token. Limit: 20 requests per 60-second window
+/// — generous enough for normal usage, tight enough to block brute-force.
+///
+/// Redis key: `cream:auth_rate:{ip_hash}:{window_epoch}`
+pub async fn auth_rate_limit(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let ip_key = extract_ip_hash(&request);
+
+    // 20 attempts per 60s window — prevents brute-force while allowing
+    // legitimate login retries and token refreshes.
+    const AUTH_WINDOW_SECS: u64 = 60;
+    const AUTH_MAX_REQUESTS: u64 = 20;
+
+    check_rate_limit(&state, &ip_key, "cream:auth_rate", AUTH_WINDOW_SECS, AUTH_MAX_REQUESTS).await?;
+
+    Ok(next.run(request).await)
+}
+
+/// Shared rate-limit check used by both API and auth rate limiters.
+async fn check_rate_limit(
+    state: &AppState,
+    identity_hash: &str,
+    key_prefix: &str,
+    window_secs: u64,
+    max_requests: u64,
+) -> Result<(), ApiError> {
+    let now = chrono::Utc::now().timestamp() as u64;
+    let window_epoch = now / window_secs;
+    let key = format!("{key_prefix}:{identity_hash}:{window_epoch}");
+
+    match increment_counter(&state.redis, &key, window_secs).await {
+        Ok(count) => {
+            if count > max_requests {
+                ::metrics::counter!(crate::metrics::RATE_LIMIT_HITS_TOTAL).increment(1);
+                let retry_after = window_secs - (now % window_secs);
+                return Err(ApiError::RateLimited {
+                    retry_after_secs: retry_after,
+                });
+            }
+        }
+        Err(e) => {
+            // Fail-open: Redis unavailable should not block requests.
+            ::metrics::counter!(crate::metrics::REDIS_CONNECTION_ERRORS_TOTAL).increment(1);
+            tracing::warn!(error = %e, "rate limiter: redis unavailable, allowing request");
+        }
+    }
+
+    Ok(())
 }
 
 /// Extract the bearer token and hash it for rate-limit identity.
@@ -63,6 +100,30 @@ fn extract_key_hash_from_header(request: &Request<Body>) -> Option<String> {
     use sha2::{Digest, Sha256};
     let hash = hex::encode(Sha256::digest(token.as_bytes()));
     Some(hash)
+}
+
+/// Extract the client IP and hash it for auth rate-limit identity.
+///
+/// Checks `X-Forwarded-For` first (reverse proxy scenario), then falls back
+/// to a static key. The IP is hashed to avoid storing raw IPs in Redis.
+fn extract_ip_hash(request: &Request<Body>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    hex::encode(Sha256::digest(ip.as_bytes()))
 }
 
 /// Lua script for truly atomic INCR + conditional EXPIRE.

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::{EscalationNotification, NotificationSender, ReminderKind, ReminderNotification};
+use super::{AlertNotification, EscalationNotification, NotificationSender, ReminderKind, ReminderNotification};
 
 // ---------------------------------------------------------------------------
 // Slack notifier — sends Block Kit messages via chat.postMessage
@@ -207,6 +207,122 @@ impl NotificationSender for SlackNotifier {
                 Ok(())
             }
         }
+    }
+
+    async fn send_alert(
+        &self,
+        notification: &AlertNotification,
+        channels: &[String],
+    ) -> Result<(), String> {
+        // Only send if "slack" is in the channels list, or list is empty (all).
+        if !channels.is_empty() && !channels.iter().any(|c| c == "slack") {
+            return Ok(());
+        }
+
+        let emoji = if notification.value > notification.threshold {
+            ":rotating_light:"
+        } else {
+            ":warning:"
+        };
+
+        let payload = serde_json::json!({
+            "channel": self.config.channel_id,
+            "text": format!(
+                "{} Alert: {} — {} is {} (threshold: {})",
+                emoji, notification.rule_name, notification.metric,
+                notification.value, notification.threshold
+            ),
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": format!("{} Metric Alert: {}", emoji, notification.rule_name)
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": format!("*Metric:*\n`{}`", notification.metric)
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": format!("*Condition:*\n{} {}", notification.condition, notification.threshold)
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": format!("*Current Value:*\n*{:.2}*", notification.value)
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": format!("*Threshold:*\n{}", notification.threshold)
+                        }
+                    ]
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": format!("*Details:*\n{}", notification.message)
+                    }
+                }
+            ]
+        });
+
+        match self.client
+            .post("https://slack.com/api/chat.postMessage")
+            .bearer_auth(&self.config.bot_token)
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                tracing::info!(
+                                    rule = %notification.rule_name,
+                                    metric = %notification.metric,
+                                    "slack alert notification sent"
+                                );
+                            } else {
+                                let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                tracing::warn!(
+                                    rule = %notification.rule_name,
+                                    slack_error = %error,
+                                    "slack alert API returned error (non-blocking)"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                rule = %notification.rule_name,
+                                error = %e,
+                                "failed to parse slack alert response (non-blocking)"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        rule = %notification.rule_name,
+                        status = %resp.status(),
+                        "slack alert HTTP error (non-blocking)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    rule = %notification.rule_name,
+                    error = %e,
+                    "slack alert request failed (non-blocking)"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     async fn send_reminder(&self, notification: &ReminderNotification) -> Result<(), String> {
