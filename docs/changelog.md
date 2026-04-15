@@ -1,5 +1,7 @@
 # Changelog
 
+- [0.21.18](#02118--2026-04-15) — Post-Phase-17 hardening (round 11): 3 fixes — alert RBAC (admin-only mutations), empty channels dispatch fix, Slack reminder response validation — 526 unit tests
+- [0.21.17](#02117--2026-04-15) — Post-Phase-17 hardening (round 10): 7 fixes — S3 export memory + timeout, alert validation (metric names, channels), OpenAPI AlertRule schema, request body size limit, snapshot GC — 525 unit tests
 - [0.21.16](#02116--2026-04-15) — Post-Phase-17 hardening (round 9): 6 production-readiness fixes — auth rate limiting, send_alert() dispatch, OTEL flush timeout, histogram buckets, error-recovery metrics, PgPool config — 525 unit tests
 - [0.21.15](#02115--2026-04-15) — Post-Phase-17 hardening (round 8): 4 P2 fixes — request ID UUID validation, OpenAPI schema gaps, alert rule bounds, card expiry validation — 551 tests
 - [0.21.14](#02114--2026-04-15) — Post-Phase-17 hardening (round 7): 5 P1 fixes — rate limiter atomicity, PII redaction expansion, S3 retry, alert window timing, Validating→Failed transition — 551 tests
@@ -92,6 +94,58 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.18 — 2026-04-15
+
+**Post-Phase-17 Hardening (Round 11)**
+
+3 fixes from comprehensive code quality review. Addresses 1 authorization gap, 1 incorrect dispatch behavior, and 1 silent notification failure. 526 unit tests pass. Zero compiler warnings. Zero clippy warnings.
+
+### P1 — Security: Alert rule mutations require admin role
+
+- **`POST /v1/alerts`, `PATCH /v1/alerts/{id}`, and `DELETE /v1/alerts/{id}` now enforce `admin` role** — All alert rule endpoints accepted any authenticated operator regardless of their JWT role claim (`admin` or `viewer`). A viewer-role operator could create, update, or delete alert rules — modifying monitoring coverage without authorization. Added a `require_admin()` gate to the three mutating handlers. Read-only endpoints (`GET /v1/alerts`, `GET /v1/alerts/history`) remain accessible to all authenticated operators. Returns 403 Forbidden with error code `FORBIDDEN` and descriptive message. Also added a new `ApiError::Forbidden(String)` variant to the error enum to distinguish "authenticated but not authorized" (403) from "not authenticated" (401). OpenAPI descriptions updated to read "admin-only" on mutating endpoints. (`backend/crates/api/src/routes/alerts.rs`, `backend/crates/api/src/error.rs`, `backend/crates/api/src/openapi.rs`)
+
+### P1 — Correctness: Empty channels array no longer triggers external notifications
+
+- **Alert engine no longer dispatches Slack/email for rules with empty channels** — The notification dispatch condition was `channels.is_empty() || channels.iter().any(|c| c != "dashboard")`. This treated an empty channels array as "send to all external channels" — the opposite of operator intent (the default is `["dashboard"]`, so an empty override should mean "no external notifications"). Changed to `!channels.is_empty() && channels.iter().any(|c| c != "dashboard")`, which means: only send external notifications when at least one non-dashboard channel is explicitly configured. Dashboard visibility via `GET /v1/alerts/history` is unaffected — all fired alerts are always recorded in the database regardless of channel configuration. (`backend/crates/api/src/alert_engine.rs`)
+
+### P2 — Reliability: Slack `send_reminder()` validates API response
+
+- **Slack reminder notifications now check the `ok` field in Slack's response** — `send_escalation()` and `send_alert()` both correctly parsed Slack's JSON response body to check the `ok` boolean (Slack returns HTTP 200 even for API errors like `channel_not_found` or `invalid_auth`). `send_reminder()` was the outlier — it discarded the response body entirely and logged success on any non-error `Ok(_)` result. This meant reminders and timeout notifications could silently fail if the Slack bot token was revoked or the channel was deleted, with INFO-level "slack reminder sent" in the logs masking the actual failure. Now follows the same validation pattern: checks HTTP status, parses the response body, validates `ok == true`, and logs the Slack error string at WARN level if not. (`backend/crates/api/src/notifications/slack.rs`)
+
+---
+
+## 0.21.17 — 2026-04-15
+
+**Post-Phase-17 Hardening (Round 10)**
+
+7 fixes from comprehensive Phase 17 code quality review. Addresses 1 high-severity memory issue, 4 validation gaps, 1 DoS vector, and 1 memory leak. 525 unit tests pass. Zero compiler warnings. Zero clippy warnings.
+
+### P1 — Memory: S3 export body converted to Bytes (O(1) clone)
+
+- **S3 retry loop no longer deep-copies the entire export payload** — The async audit export pipeline (`POST /v1/audit/export`) assembled the full CSV/NDJSON body as a `Vec<u8>` and then called `body.clone().into()` inside a 3-attempt retry loop. For a 500K-row export (worst case ~100MB+ of formatted text), each retry allocated a full copy of the payload — tripling peak memory usage under transient S3 failures. Converted the `Vec<u8>` to `bytes::Bytes` before entering the retry loop. `Bytes::clone()` is O(1) — it increments an Arc reference counter instead of copying data. The same fix also wraps each `put_object().send()` call in a 60-second `tokio::time::timeout` to prevent indefinite hangs if S3 is unreachable after the TCP connection was established. Timeout is treated as a retryable error and counted toward the backoff schedule. (`backend/crates/api/src/audit_export.rs`)
+
+### P1 — Validation: Alert rules require known metric names
+
+- **Alert metric names validated against the 16 known `cream_*` metrics** — `POST /v1/alerts` and `PATCH /v1/alerts/{id}` accepted any non-empty string as a metric name. Creating a rule for a typo'd metric (e.g., `cream_payment_total` instead of `cream_payments_total`) or a completely fabricated name would silently evaluate to 0.0 every tick and never fire — operators would believe they had monitoring coverage when they had none. Added a `KNOWN_METRICS` allowlist in `routes/alerts.rs` referencing the constants from `metrics.rs`. Both create and update endpoints now reject unrecognized metrics with a descriptive error listing available names. (`backend/crates/api/src/routes/alerts.rs`)
+
+### P1 — Validation: Alert channels restricted to known implementations
+
+- **Alert `channels` JSON validated against implemented notification channels** — `POST /v1/alerts` and `PATCH /v1/alerts/{id}` accepted arbitrary strings in the `channels` array (e.g., `["telegram", "pagerduty"]`). Unknown channels were silently ignored by the notification dispatcher — the alert would fire but no notification would actually be sent to the intended destination. Added a `VALID_CHANNELS` allowlist (`"dashboard"`, `"slack"`, `"email"`) and a `validate_channels()` helper that rejects unknown channel names, non-string array elements, and non-array values. Applied consistently to both create and update endpoints. (`backend/crates/api/src/routes/alerts.rs`)
+
+### P2 — Schema: AlertRule OpenAPI required fields + channels type
+
+- **AlertRule schema now marks required fields and uses correct type for channels** — The OpenAPI 3.1 `AlertRule` component schema defined all properties but never called `.required()` on mandatory fields (`name`, `metric`, `condition`, `threshold`). Code generators for TypeScript, Python, Go, etc. would produce nullable types for these fields, causing runtime errors when clients omitted them and the API returned 400. Additionally, `channels` was typed as `object` when it's actually an array of strings. Fixed both: added `.required()` calls for the 4 mandatory fields and changed `channels` from `object_schema()` to `string_array_schema()`. (`backend/crates/api/src/openapi.rs`)
+
+### P2 — Security: Global request body size limit (2 MiB)
+
+- **All API endpoints now enforce a 2 MiB request body limit** — The PII redaction middleware already capped its body buffering at 64 KiB, but this only affected logging — the actual Axum request handler received the full unbuffered body. With `LOG_BODIES=false` (the default), there was no body size enforcement at all. A malicious or misconfigured client could send arbitrarily large payloads, consuming unbounded memory before the request reached any handler. Added `DefaultBodyLimit::max(2 * 1024 * 1024)` as a layer on all `/v1/*` routes. Payment JSON payloads are typically <10 KB; 2 MiB is generous for any legitimate use case. Requests exceeding the limit receive 413 Payload Too Large. (`backend/crates/api/src/lib.rs`)
+
+### P2 — Memory: Alert snapshot map garbage collection
+
+- **Alert engine prunes snapshot entries for deleted/disabled rules** — The `evaluate_alerts()` background worker maintains an in-memory `HashMap<String, MetricSnapshot>` keyed by `{rule_id}:{metric_name}`. When an operator deleted or disabled an alert rule, its snapshot entry remained in the map indefinitely — a slow memory leak in long-running instances, amplified by operators who frequently iterate on alert configurations. Added a `retain()` call at the end of each evaluation cycle that removes entries whose key doesn't match any currently-enabled rule. Uses a `HashSet` lookup for O(1) per-entry checking. (`backend/crates/api/src/alert_engine.rs`)
 
 ---
 

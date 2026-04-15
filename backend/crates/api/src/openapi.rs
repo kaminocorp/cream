@@ -355,15 +355,19 @@ fn build_component_schemas(components: ComponentsBuilder) -> ComponentsBuilder {
                 .schema_type(Type::Object)
                 .property("id", string_schema())
                 .property("name", string_schema())
+                .required("name")
                 .property("description", string_schema())
                 .property("metric", string_schema())
+                .required("metric")
                 .property("condition", ObjectBuilder::new()
                     .schema_type(Type::String)
                     .enum_values(Some(["gt", "lt", "gte", "lte", "eq"])))
+                .required("condition")
                 .property("threshold", number_schema())
+                .required("threshold")
                 .property("window_seconds", integer_schema())
                 .property("cooldown_seconds", integer_schema())
-                .property("channels", object_schema())
+                .property("channels", string_array_schema())
                 .property("enabled", boolean_schema())
                 .property("last_fired_at", ObjectBuilder::new()
                     .schema_type(Type::String)
@@ -693,7 +697,7 @@ pub fn build_openapi_spec() -> utoipa::openapi::OpenApi {
                 HttpMethod::Get,
                 operator_secured_op("List all alert rules (operator-only)", "Alerts"),
                 HttpMethod::Post,
-                operator_secured_op("Create a new alert rule (operator-only)", "Alerts")
+                operator_secured_op("Create a new alert rule (admin-only)", "Alerts")
                     .request_body(Some(typed_json_body("Alert rule configuration", schema_ref("AlertRule")))),
             ),
         )
@@ -701,11 +705,11 @@ pub fn build_openapi_spec() -> utoipa::openapi::OpenApi {
             "/v1/alerts/{id}",
             dual_path(
                 HttpMethod::Patch,
-                operator_secured_op("Update an alert rule (operator-only)", "Alerts")
+                operator_secured_op("Update an alert rule (admin-only)", "Alerts")
                     .parameter(path_param("id", "Alert rule ID (UUID)"))
                     .request_body(Some(typed_json_body("Updated alert rule fields", schema_ref("AlertRule")))),
                 HttpMethod::Delete,
-                operator_secured_op("Disable an alert rule (operator-only)", "Alerts")
+                operator_secured_op("Disable an alert rule (admin-only)", "Alerts")
                     .parameter(path_param("id", "Alert rule ID")),
             ),
         )

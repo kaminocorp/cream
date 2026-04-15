@@ -370,12 +370,41 @@ impl NotificationSender for SlackNotifier {
             .send()
             .await
         {
-            Ok(_) => {
-                tracing::info!(
-                    payment_id = %notification.payment_id,
-                    kind = ?notification.kind,
-                    "slack reminder sent"
-                );
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    // Slack returns 200 even for API errors — check the `ok` field.
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                tracing::info!(
+                                    payment_id = %notification.payment_id,
+                                    kind = ?notification.kind,
+                                    "slack reminder sent"
+                                );
+                            } else {
+                                let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                tracing::warn!(
+                                    payment_id = %notification.payment_id,
+                                    slack_error = %error,
+                                    "slack reminder API returned error (non-blocking)"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                payment_id = %notification.payment_id,
+                                error = %e,
+                                "failed to parse slack reminder response (non-blocking)"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        payment_id = %notification.payment_id,
+                        status = %resp.status(),
+                        "slack reminder HTTP error (non-blocking)"
+                    );
+                }
                 Ok(())
             }
             Err(e) => {

@@ -94,6 +94,72 @@ impl From<alert_engine::AlertRule> for AlertRuleResponse {
 
 const VALID_CONDITIONS: &[&str] = &["gt", "lt", "gte", "lte", "eq"];
 
+/// Reject the request if the operator is not an admin. Read-only endpoints
+/// (list, history) are available to all authenticated operators; mutating
+/// endpoints (create, update, delete) require the `admin` role.
+fn require_admin(op: &AuthenticatedOperator) -> Result<(), ApiError> {
+    if op.role != "admin" {
+        return Err(ApiError::Forbidden(
+            "admin role required to modify alert rules".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Notification channels that have implementations in the notifications module.
+const VALID_CHANNELS: &[&str] = &["dashboard", "slack", "email"];
+
+/// Metrics that the alert engine can evaluate. Must stay in sync with the
+/// constants in `crate::metrics`. Alerting on a nonexistent metric silently
+/// evaluates to 0.0 and never fires — this validation prevents that.
+const KNOWN_METRICS: &[&str] = &[
+    crate::metrics::PAYMENTS_TOTAL,
+    crate::metrics::PAYMENT_DURATION_SECONDS,
+    crate::metrics::POLICY_EVALUATION_DURATION_SECONDS,
+    crate::metrics::POLICY_DECISION_TOTAL,
+    crate::metrics::PROVIDER_REQUEST_DURATION_SECONDS,
+    crate::metrics::PROVIDER_ERRORS_TOTAL,
+    crate::metrics::WEBHOOK_DELIVERIES_TOTAL,
+    crate::metrics::WEBHOOK_DELIVERY_DURATION_SECONDS,
+    crate::metrics::WEBHOOK_RETRIES_TOTAL,
+    crate::metrics::RATE_LIMIT_HITS_TOTAL,
+    crate::metrics::AUTH_ATTEMPTS_TOTAL,
+    crate::metrics::ESCALATION_PENDING_COUNT,
+    crate::metrics::CREDENTIAL_AGE_WARNING,
+    crate::metrics::CIRCUIT_BREAKER_STATE,
+    crate::metrics::ERROR_RECOVERY_FAILURES_TOTAL,
+    crate::metrics::REDIS_CONNECTION_ERRORS_TOTAL,
+];
+
+/// Validate that `channels` JSON is an array of known channel strings.
+fn validate_channels(channels: &serde_json::Value) -> Result<(), ApiError> {
+    if let Some(arr) = channels.as_array() {
+        for item in arr {
+            match item.as_str() {
+                Some(ch) => {
+                    let lower = ch.to_lowercase();
+                    if !VALID_CHANNELS.contains(&lower.as_str()) {
+                        return Err(ApiError::ValidationError(format!(
+                            "unknown channel '{ch}'; valid channels: {}",
+                            VALID_CHANNELS.join(", ")
+                        )));
+                    }
+                }
+                None => {
+                    return Err(ApiError::ValidationError(
+                        "channels array must contain only strings".into(),
+                    ));
+                }
+            }
+        }
+    } else if !channels.is_null() {
+        return Err(ApiError::ValidationError(
+            "channels must be a JSON array of strings".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// `GET /v1/alerts` — list all alert rules.
 pub async fn list_alerts(
     State(state): State<AppState>,
@@ -103,18 +169,26 @@ pub async fn list_alerts(
     Ok(Json(rules.into_iter().map(AlertRuleResponse::from).collect()))
 }
 
-/// `POST /v1/alerts` — create a new alert rule.
+/// `POST /v1/alerts` — create a new alert rule (admin only).
 pub async fn create_alert(
     State(state): State<AppState>,
-    _op: AuthenticatedOperator,
+    op: AuthenticatedOperator,
     Json(body): Json<CreateAlertRequest>,
 ) -> Result<(StatusCode, Json<AlertRuleResponse>), ApiError> {
+    require_admin(&op)?;
+
     // Validate.
     if body.name.trim().is_empty() {
         return Err(ApiError::ValidationError("name must not be empty".into()));
     }
     if body.metric.trim().is_empty() {
         return Err(ApiError::ValidationError("metric must not be empty".into()));
+    }
+    if !KNOWN_METRICS.contains(&body.metric.trim()) {
+        return Err(ApiError::ValidationError(format!(
+            "unknown metric '{}'; use GET /metrics or check docs for available metric names",
+            body.metric.trim()
+        )));
     }
     if !VALID_CONDITIONS.contains(&body.condition.as_str()) {
         return Err(ApiError::ValidationError(format!(
@@ -137,6 +211,7 @@ pub async fn create_alert(
             "threshold must be non-negative".into(),
         ));
     }
+    validate_channels(&body.channels)?;
 
     let id = uuid::Uuid::now_v7();
     sqlx::query(
@@ -163,13 +238,15 @@ pub async fn create_alert(
     Ok((StatusCode::CREATED, Json(AlertRuleResponse::from(rule))))
 }
 
-/// `PATCH /v1/alerts/{id}` — update an alert rule.
+/// `PATCH /v1/alerts/{id}` — update an alert rule (admin only).
 pub async fn update_alert(
     State(state): State<AppState>,
-    _op: AuthenticatedOperator,
+    op: AuthenticatedOperator,
     Path(id): Path<String>,
     Json(body): Json<UpdateAlertRequest>,
 ) -> Result<Json<AlertRuleResponse>, ApiError> {
+    require_admin(&op)?;
+
     let rule_id = id
         .parse::<uuid::Uuid>()
         .map_err(|e| ApiError::ValidationError(format!("invalid alert ID: {e}")))?;
@@ -183,6 +260,12 @@ pub async fn update_alert(
     if let Some(ref metric) = body.metric {
         if metric.trim().is_empty() {
             return Err(ApiError::ValidationError("metric must not be empty".into()));
+        }
+        if !KNOWN_METRICS.contains(&metric.trim()) {
+            return Err(ApiError::ValidationError(format!(
+                "unknown metric '{}'; use GET /metrics or check docs for available metric names",
+                metric.trim()
+            )));
         }
     }
     if let Some(ref cond) = body.condition {
@@ -213,6 +296,9 @@ pub async fn update_alert(
                 "threshold must be non-negative".into(),
             ));
         }
+    }
+    if let Some(ref channels) = body.channels {
+        validate_channels(channels)?;
     }
 
     let rows = sqlx::query(
@@ -254,12 +340,14 @@ pub async fn update_alert(
     Ok(Json(AlertRuleResponse::from(rule)))
 }
 
-/// `DELETE /v1/alerts/{id}` — disable an alert rule (soft delete).
+/// `DELETE /v1/alerts/{id}` — disable an alert rule (admin only, soft delete).
 pub async fn delete_alert(
     State(state): State<AppState>,
-    _op: AuthenticatedOperator,
+    op: AuthenticatedOperator,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&op)?;
+
     let rule_id = id
         .parse::<uuid::Uuid>()
         .map_err(|e| ApiError::ValidationError(format!("invalid alert ID: {e}")))?;

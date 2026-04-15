@@ -20,6 +20,7 @@ pub use config::AppConfig;
 pub use error::ApiError;
 pub use state::AppState;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -124,7 +125,11 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit::rate_limit,
-        ));
+        ))
+        // Global request body size limit — 2 MiB. Prevents OOM from oversized
+        // payloads regardless of whether body logging is enabled. Payment JSON
+        // payloads are typically <10 KB; 2 MiB is generous for any legitimate use.
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
 
     // PII-redacted body logging — only active when LOG_BODIES=true.
     // Placed after rate limiting so rejected requests don't incur body buffering.

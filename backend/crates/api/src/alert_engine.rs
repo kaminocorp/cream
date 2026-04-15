@@ -5,7 +5,7 @@
 //! the cooldown period has elapsed, a notification is dispatched via the
 //! existing `NotificationSender` infrastructure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -306,8 +306,8 @@ async fn evaluate_alerts(
         };
 
         // Dispatch notifications filtered by the rule's configured channels.
-        // If channels is an array, only send to matching channels; if empty
-        // or not an array, fall back to all registered channels.
+        // Empty or dashboard-only channels = no external notification (the
+        // alert is always visible via GET /v1/alerts/history regardless).
         let channels: Vec<String> = rule
             .channels
             .as_array()
@@ -318,9 +318,9 @@ async fn evaluate_alerts(
             })
             .unwrap_or_default();
 
-        if channels.is_empty() || channels.iter().any(|c| c != "dashboard") {
-            // Send to external channels (Slack/email) — skip if only "dashboard"
-            // is configured, since dashboard alerts are visible via GET /v1/alerts/history.
+        if !channels.is_empty() && channels.iter().any(|c| c != "dashboard") {
+            // At least one non-dashboard channel is configured — dispatch to
+            // external channels (Slack/email).
             if let Err(e) = state
                 .notification_sender
                 .send_alert(&notification, &channels)
@@ -334,6 +334,15 @@ async fn evaluate_alerts(
             }
         }
     }
+
+    // Prune snapshot entries for rules that no longer exist (deleted or
+    // disabled). Without this, the HashMap grows unboundedly if operators
+    // frequently create and delete alert rules.
+    let active_keys: HashSet<String> = rules
+        .iter()
+        .map(|r| format!("{}:{}", r.id, r.metric))
+        .collect();
+    snapshots.retain(|key, _| active_keys.contains(key));
 
     Ok(())
 }

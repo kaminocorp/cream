@@ -15,6 +15,8 @@ pub enum ApiError {
     ValidationError(String),
     /// 401 — missing or invalid credentials.
     Unauthorized,
+    /// 403 — authenticated but insufficient permissions (e.g., viewer role).
+    Forbidden(String),
     /// 403 — policy engine blocked the payment.
     PolicyBlocked {
         rule_ids: Vec<PolicyRuleId>,
@@ -41,6 +43,7 @@ impl ApiError {
         match self {
             Self::ValidationError(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::PolicyBlocked { .. } => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::IdempotencyConflict(_) => StatusCode::CONFLICT,
@@ -56,6 +59,7 @@ impl ApiError {
         match self {
             Self::ValidationError(_) => "VALIDATION_ERROR",
             Self::Unauthorized => "UNAUTHORIZED",
+            Self::Forbidden(_) => "FORBIDDEN",
             Self::PolicyBlocked { .. } => "POLICY_BLOCKED",
             Self::NotFound(_) => "NOT_FOUND",
             Self::IdempotencyConflict(_) => "IDEMPOTENCY_CONFLICT",
@@ -71,6 +75,7 @@ impl ApiError {
         match self {
             Self::ValidationError(msg) => msg.clone(),
             Self::Unauthorized => "invalid or missing credentials".to_string(),
+            Self::Forbidden(msg) => msg.clone(),
             Self::PolicyBlocked { reason, .. } => reason.clone(),
             Self::NotFound(resource) => format!("{resource} not found"),
             Self::IdempotencyConflict(id) => {
@@ -106,6 +111,9 @@ impl IntoResponse for ApiError {
         // Log server errors at error level; client errors at debug.
         match &self {
             Self::Internal(e) => tracing::error!(error = %e, error_code, "internal server error"),
+            Self::Forbidden(msg) => {
+                tracing::warn!(error_code, %msg, "forbidden")
+            }
             Self::ProviderFailure(e) => {
                 tracing::warn!(error = %e, error_code, "provider error")
             }
@@ -239,6 +247,13 @@ mod tests {
         };
         assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
         assert_eq!(err.error_code(), "POLICY_BLOCKED");
+    }
+
+    #[test]
+    fn forbidden_is_403() {
+        let err = ApiError::Forbidden("admin role required".into());
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(err.error_code(), "FORBIDDEN");
     }
 
     #[test]

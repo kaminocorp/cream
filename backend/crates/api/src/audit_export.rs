@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use chrono::Utc;
 use cream_audit::{AuditQuery, AuditReader};
 use cream_models::prelude::*;
@@ -441,32 +442,44 @@ async fn run_export_inner(
         ExportFormat::Ndjson => "application/x-ndjson",
     };
 
+    // Convert to Bytes (reference-counted) so retries clone an Arc pointer,
+    // not the entire payload. A 500K-row CSV can be 100MB+; cloning the Vec
+    // on each retry would triple peak memory usage.
+    let body: Bytes = body.into();
+
+    /// Per-upload timeout — prevents indefinite hangs if S3 is unreachable
+    /// after the TCP connection was established.
+    const S3_UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
     const S3_RETRY_BACKOFFS: &[u64] = &[2, 5, 15];
     let mut last_err = String::new();
     for (attempt, backoff) in S3_RETRY_BACKOFFS.iter().enumerate() {
-        match s3_client
+        let upload_fut = s3_client
             .put_object()
             .bucket(&bucket)
             .key(&s3_key)
             .body(body.clone().into())
             .content_type(content_type)
-            .send()
-            .await
-        {
-            Ok(_) => return Ok((total_rows, s3_key)),
-            Err(e) => {
+            .send();
+
+        match tokio::time::timeout(S3_UPLOAD_TIMEOUT, upload_fut).await {
+            Ok(Ok(_)) => return Ok((total_rows, s3_key)),
+            Ok(Err(e)) => {
                 last_err = format!("{e}");
-                tracing::warn!(
-                    job_id = %job_id,
-                    attempt = attempt + 1,
-                    max_attempts = S3_RETRY_BACKOFFS.len(),
-                    backoff_secs = backoff,
-                    error = %last_err,
-                    "S3 upload failed, retrying"
-                );
-                tokio::time::sleep(Duration::from_secs(*backoff)).await;
+            }
+            Err(_) => {
+                last_err = format!("upload timed out after {}s", S3_UPLOAD_TIMEOUT.as_secs());
             }
         }
+
+        tracing::warn!(
+            job_id = %job_id,
+            attempt = attempt + 1,
+            max_attempts = S3_RETRY_BACKOFFS.len(),
+            backoff_secs = backoff,
+            error = %last_err,
+            "S3 upload failed, retrying"
+        );
+        tokio::time::sleep(Duration::from_secs(*backoff)).await;
     }
 
     Err(anyhow::anyhow!("S3 upload failed after {} attempts: {last_err}", S3_RETRY_BACKOFFS.len()))
