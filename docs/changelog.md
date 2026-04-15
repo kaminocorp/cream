@@ -1,5 +1,8 @@
 # Changelog
 
+- [0.21.15](#02115--2026-04-15) — Post-Phase-17 hardening (round 8): 4 P2 fixes — request ID UUID validation, OpenAPI schema gaps, alert rule bounds, card expiry validation — 551 tests
+- [0.21.14](#02114--2026-04-15) — Post-Phase-17 hardening (round 7): 5 P1 fixes — rate limiter atomicity, PII redaction expansion, S3 retry, alert window timing, Validating→Failed transition — 551 tests
+- [0.21.13](#02113--2026-04-15) — Post-Phase-17 hardening (round 6): 3 P0 fixes — unbounded escalation queries, silent error-recovery paths, audit serialization data loss — 549 tests
 - [0.21.12](#02112--2026-04-14) — Post-Phase-17 hardening (round 5): 9 fixes — sync export truncation, OpenAPI typed schemas, alert channels, NDJSON error handling, OTEL flush, auth metrics — 549 tests
 - [0.21.11](#02111--2026-04-13) — Post-Phase-17 hardening (round 4): 6 low fixes — JoinSet worker supervision, LOG_LEVEL validation, UTF-8 safe truncation, OpenAPI version from Cargo.toml, flatten_entry dedup, 1 test fix — 546 tests
 - [0.21.10](#02110--2026-04-13) — Post-Phase-17 hardening (round 3): 5 medium fixes — PII substring matching + access_token, resume_after_approval metrics, circuit breaker gauge reset, payment duration scope, alert update validation — 539 tests
@@ -88,6 +91,86 @@
 - [0.2.1](#021--2026-03-31) — Formatting fixes for CI compliance
 - [0.2.0](#020--2026-03-31) — Core domain models crate
 - [0.1.0](#010--2026-03-31) — Monorepo skeleton, tooling & infrastructure
+
+---
+
+## 0.21.15 — 2026-04-15
+
+**Post-Phase-17 Hardening (Round 8)**
+
+4 P2 fixes targeting developer experience, input validation, and audit trail integrity. 551 backend tests pass (unchanged). Zero clippy warnings.
+
+### P2 — Audit Trail Integrity
+
+- **X-Request-Id validated as UUID** — The `inject_request_id` middleware accepted arbitrary strings as request IDs (e.g., `X-Request-Id: DROP TABLE payments`), recording them directly into tracing spans and audit-correlated log entries. An attacker could inject misleading trace IDs to pollute log searches, create false correlation chains across unrelated requests, or spoof audit trails in structured log aggregators. The middleware now validates the header value via `Uuid::parse_str()`. Valid UUIDs are accepted as-is (preserving legitimate distributed tracing propagation); non-UUID values are replaced with a fresh UUIDv7, and the original value is logged at WARN level for forensic review. (`backend/crates/api/src/middleware/request_id.rs`)
+
+### P2 — Developer Experience
+
+- **OpenAPI schema gaps closed** — Three issues in the API specification impacted client code generation and Swagger UI usability:
+  1. **AlertRule missing timestamps**: `last_fired_at`, `created_at`, and `updated_at` fields were absent from the schema despite being present in every API response. Clients had no way to know when a rule last fired or was modified. Added all three with `format: date-time`.
+  2. **PaymentResponse and Agent missing required `status`**: The `status` field was defined with enum values but not marked as `required`. OpenAPI code generators would treat it as optional, producing nullable types in client SDKs. Added `.required("status")` to both schemas.
+  3. **Agent list returned generic Object array**: `GET /v1/agents` declared its response as `Array<Object>` instead of `Array<$ref Agent>`. Swagger UI showed no type information for list responses. Replaced with `$ref: #/components/schemas/Agent`.
+  (`backend/crates/api/src/openapi.rs`)
+
+### P2 — Input Validation
+
+- **Alert rule bounds validation** — `window_seconds` and `cooldown_seconds` accepted any positive integer with no upper bound. Setting `window_seconds: 2147483647` (~68 years) would cause the alert engine to never complete a window evaluation; setting `cooldown_seconds: 2147483647` would permanently suppress an alert after its first fire. Added upper bounds: `window_seconds` capped at 86,400 (24 hours), `cooldown_seconds` capped at 604,800 (7 days). `threshold` now validated as non-negative (negative thresholds are semantically invalid for all supported conditions). All bounds enforced consistently in both `POST /v1/alerts` (create) and `PATCH /v1/alerts/{id}` (update). (`backend/crates/api/src/routes/alerts.rs`)
+
+- **Card `expires_at` validated as future date** — `POST /v1/cards` accepted `expires_at` timestamps in the past, creating cards that were expired at issuance. Also accepted unreasonably distant dates (year 9999), which could cause integer overflow in downstream expiry-check logic. Added validation: `expires_at` must be after `now()` and within 10 years. (`backend/crates/api/src/routes/cards.rs`)
+
+---
+
+## 0.21.14 — 2026-04-15
+
+**Post-Phase-17 Hardening (Round 7)**
+
+5 P1 fixes addressing security, data protection, reliability, correctness, and state machine completeness. 551 backend tests pass (up from 549). Zero clippy warnings.
+
+### P1 — Security
+
+- **Rate limiter: Redis pipeline → atomic Lua script** — The fixed-window rate limiter used a Redis pipeline (`INCR` + `EXPIRE`) that is NOT atomic at the execution level — other clients can interleave commands between the two, potentially losing the `EXPIRE` and leaving a key without TTL (permanently rate-limiting an agent) or allowing brief rate limit bypass under high concurrency. Replaced with a Lua script that executes `INCR` + conditional `EXPIRE` (only on `count == 1`) inside Redis's single-threaded event loop, making the operation indivisible. The key format (`cream:rate:{hash}:{window_epoch}`) already provides natural expiry via window rotation, but the Lua script ensures the TTL is always set correctly on the first request of each window. (`backend/crates/api/src/middleware/rate_limit.rs`)
+
+### P1 — Data Protection
+
+- **PII redaction: 10 additional sensitive field patterns** — The body logging middleware's sensitive substring list only covered auth-related fields (`password`, `api_key`, `secret`, `token`, `credential`, `authorization`, `card_number`, `cvv`, `pan`). Missing were payment-specific identifiers that appear in provider request/response payloads: `card_data`, `card_detail` (catches `card_details`), `cvc`, `account_number`, `bank_account`, `routing_number`, `sort_code`, `iban`, `swift` (catches `swift_code`, `swift_bic`), `ssn`, `social_security`, `tax_id`. An agent integrating with a bank payout provider could have had raw account numbers logged at DEBUG level. All 10 patterns use the existing case-insensitive substring matching. (`backend/crates/api/src/middleware/logging.rs`)
+
+### P1 — Reliability
+
+- **S3 audit export: retry with exponential backoff** — The async audit export pipeline (`POST /v1/audit/export`) made a single `put_object` call to S3. If the upload failed due to a transient error (network timeout, S3 503 SlowDown, temporary credential refresh failure), the entire export job was permanently marked as `failed` — after potentially minutes of query streaming and CSV/NDJSON formatting. Added 3-attempt retry with backoff schedule (2s, 5s, 15s) and per-attempt warning logs. Also added a 30-second timeout on `aws_config::load()` to prevent credential provider hangs from blocking the export thread indefinitely. (`backend/crates/api/src/audit_export.rs`)
+
+### P1 — Alert Correctness
+
+- **Alert engine: snapshot reset moved after condition evaluation** — The sliding window snapshot was reset *before* checking `cond.evaluate()`. For counter-based rules (e.g., "provider errors > 10 in 5min"), if the delta within a partial window didn't breach the threshold, the snapshot was reset anyway — so the next tick started from a fresh baseline instead of accumulating. This meant gradual error buildups that stayed just below threshold each tick would never trigger the alert, even when the total across two ticks clearly exceeded it. The snapshot is now only reset when (a) the window has fully elapsed, or (b) the alert actually fires (consuming the delta to prevent re-firing). Sub-threshold deltas within an incomplete window are correctly preserved for the next evaluation cycle. (`backend/crates/api/src/alert_engine.rs`)
+
+### P1 — State Machine Completeness
+
+- **Payment state machine: added `Validating → Failed` transition** — If a system error occurred during policy evaluation (database timeout, Redis connection loss — not a policy denial), the only available transitions from `Validating` were `Approved`, `PendingApproval`, and `Blocked`. The orchestrator's error recovery path needed to transition to `Failed`, but this was not a valid state machine move, so `transition()` would return `Err` (which was then silently discarded via the `.ok()` pattern — fixed in v0.21.13). `Blocked` is semantically a policy decision ("this payment is not allowed"); `Failed` is a system error ("we couldn't process this payment"). The distinction matters for operator dashboards, alerting rules, and retry logic — a `Failed` payment can be retried, while a `Blocked` one should not. (`backend/crates/models/src/payment.rs`)
+
+### Tests
+
+2 new tests (total: 551):
+- `redacts_payment_sensitive_fields` — verifies all 10 new PII patterns are redacted (account_number, bank_account, routing_number, iban, swift_code, card_data, cvc, ssn, tax_id, sort_code) while preserving non-sensitive fields
+- `validating_can_transition_to_failed` — verifies the new `Validating → Failed` state machine transition is valid
+
+---
+
+## 0.21.13 — 2026-04-15
+
+**Post-Phase-17 Hardening (Round 6)**
+
+3 P0 fixes from deep production-readiness review targeting silent failure modes in error recovery, unbounded query result sets, and audit data loss. 549 backend tests pass (unchanged). Zero clippy warnings.
+
+### P0 — Memory Safety
+
+- **Unbounded escalation queries capped at 1,000 rows** — `find_expired_escalations()` and `find_reminder_due_escalations()` ran `SELECT DISTINCT p.id FROM payments ... WHERE status = 'pending_approval'` with **no LIMIT clause**. If a large backlog accumulated (e.g., webhook/notification failures preventing human review, or a mass policy change escalating many in-flight payments), these queries returned unbounded result sets, loading all matching `PaymentId`s into a `Vec` in the escalation timeout monitor — a background task that runs every 60 seconds. With 100K stuck payments at ~16 bytes per UUID, each tick would allocate ~1.6 MB and then iterate/query each one serially, but the real danger is the downstream fan-out: each ID triggers a `load_payment` + `update_payment_if_status` + `write_audit` sequence, creating sustained database pressure. Added `ORDER BY p.updated_at ASC LIMIT 1000` to both queries, ensuring oldest-first processing with bounded memory and database load. Operators with backlogs exceeding 1,000 will see them drain across successive monitor ticks (one batch per 60-second cycle). (`backend/crates/api/src/db.rs`)
+
+### P0 — Error Recovery Observability
+
+- **Silent `.ok()` in error-recovery paths replaced with logged errors** — Four error-recovery blocks in the payment orchestrator (two in `process()`, two in `resume_after_approval()`) used `.ok()` to discard errors from `payment.transition(Failed)`, `update_payment()`, and `write_audit()` during failure handling. If the database was unreachable during error recovery (the exact scenario that triggers these paths), the payment would be left in an inconsistent state (`Approved` or `Submitted` in the DB, but the API returning an error) with **zero log evidence**. Replaced all 12 `.ok()` calls across the 4 blocks with `if let Err(e) = ...` patterns that log at ERROR level with the `payment_id` field, the specific operation that failed, and which orchestrator method was running. The error recovery still proceeds best-effort (the original error is still returned to the caller), but failures in the recovery path itself are now visible in structured logs, dashboards, and alerting. (`backend/crates/api/src/orchestrator.rs`)
+
+### P0 — Audit Data Integrity
+
+- **Audit serialization fallback: silent `{}` → diagnostic marker** — The escalation timeout monitor serializes `payment.request` and `payment.request.justification` to JSON before writing the timeout audit entry. Both calls used `.unwrap_or_else(|_| serde_json::json!({}))`, silently replacing the actual payment data with an empty object on serialization failure. Since the audit ledger is append-only (no UPDATE/DELETE permitted by database triggers), this would create a **permanent, irrecoverable gap** in the audit trail — a timeout event with no record of what payment was timed out or why the agent requested it. Replaced with `.unwrap_or_else(|e| ...)` that: (1) logs at ERROR level with `payment_id` and the serialization error, tagged as `"BUG:"` since domain model serialization should never fail; (2) writes a diagnostic JSON object `{"_serialization_error": "...", "payment_id": "..."}` instead of `{}`, so the entry is identifiable in audit queries. The `_serialization_error` key prefix convention allows operators to search for affected entries via `GET /v1/audit?q=_serialization_error`. (`backend/crates/api/src/orchestrator.rs`)
 
 ---
 

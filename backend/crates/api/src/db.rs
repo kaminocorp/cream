@@ -450,7 +450,9 @@ impl PaymentRepository for PgPaymentRepository {
                             AND pr2.enabled = true),
                          60
                      )
-                 ) < now()"#,
+                 ) < now()
+               ORDER BY p.updated_at ASC
+               LIMIT 1000"#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -483,7 +485,9 @@ impl PaymentRepository for PgPaymentRepository {
                             AND pr2.enabled = true),
                          60
                      ) / 2
-                 ) < now()"#,
+                 ) < now()
+               ORDER BY p.updated_at ASC
+               LIMIT 1000"#,
         )
         .fetch_all(&self.pool)
         .await?;

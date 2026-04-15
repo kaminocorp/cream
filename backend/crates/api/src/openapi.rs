@@ -255,6 +255,7 @@ fn build_component_schemas(components: ComponentsBuilder) -> ComponentsBuilder {
                         "pending", "validating", "pending_approval", "approved",
                         "submitted", "settled", "failed", "blocked", "rejected", "timed_out",
                     ])))
+                .required("status")
                 .property("amount", number_schema())
                 .property("currency", string_schema())
                 .property("provider_id", string_schema())
@@ -278,6 +279,7 @@ fn build_component_schemas(components: ComponentsBuilder) -> ComponentsBuilder {
                 .property("status", ObjectBuilder::new()
                     .schema_type(Type::String)
                     .enum_values(Some(["active", "suspended", "revoked"])))
+                .required("status")
                 .property("created_at", ObjectBuilder::new()
                     .schema_type(Type::String)
                     .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(utoipa::openapi::KnownFormat::DateTime))))
@@ -363,6 +365,16 @@ fn build_component_schemas(components: ComponentsBuilder) -> ComponentsBuilder {
                 .property("cooldown_seconds", integer_schema())
                 .property("channels", object_schema())
                 .property("enabled", boolean_schema())
+                .property("last_fired_at", ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(utoipa::openapi::KnownFormat::DateTime)))
+                    .description(Some("When this rule last fired (nullable)")))
+                .property("created_at", ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(utoipa::openapi::KnownFormat::DateTime))))
+                .property("updated_at", ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(utoipa::openapi::KnownFormat::DateTime))))
                 .build(),
         )
         // -- Error response --
@@ -489,9 +501,7 @@ pub fn build_openapi_spec() -> utoipa::openapi::OpenApi {
                     .response("200", typed_ok_resp(
                         "List of agents",
                         ArrayBuilder::new().items(
-                            utoipa::openapi::ObjectBuilder::new()
-                                .schema_type(Type::Object)
-                                .build(),
+                            utoipa::openapi::Ref::new("#/components/schemas/Agent"),
                         ).build().into(),
                     )),
                 HttpMethod::Post,

@@ -226,9 +226,20 @@ async fn evaluate_alerts(
             }
         };
 
-        // Update snapshot if window has elapsed (sliding window reset).
-        let prev = snapshots.get(&snapshot_key).unwrap();
-        if now.duration_since(prev.timestamp).as_secs_f64() >= rule.window_seconds.max(1) as f64 {
+        // Evaluate the condition BEFORE resetting the snapshot, so that
+        // accumulated deltas within an incomplete window are not lost when
+        // the condition is not yet breached.
+        let window_elapsed = {
+            let prev = snapshots.get(&snapshot_key).unwrap();
+            now.duration_since(prev.timestamp).as_secs_f64() >= rule.window_seconds.max(1) as f64
+        };
+
+        let triggered = cond.evaluate(effective_value, threshold);
+
+        // Reset the sliding window snapshot if either:
+        // - the window has fully elapsed (start fresh for next window), or
+        // - the alert fired (consume the delta so we don't re-fire immediately).
+        if window_elapsed || triggered {
             snapshots.insert(
                 snapshot_key.clone(),
                 MetricSnapshot {
@@ -238,7 +249,7 @@ async fn evaluate_alerts(
             );
         }
 
-        if !cond.evaluate(effective_value, threshold) {
+        if !triggered {
             continue;
         }
 

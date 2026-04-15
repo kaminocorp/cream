@@ -5,8 +5,10 @@
 //! set (the default), this layer is a no-op pass-through.
 //!
 //! Sensitive field names (case-insensitive, **substring** match): `password`,
-//! `api_key`, `secret`, `refresh_token`, `api_key_hash`, `token`,
-//! `access_token`, `authorization`, `credential`, `card_number`, `cvv`, `pan`.
+//! `api_key`, `secret`, `token`, `credential`, `authorization`, `card_number`,
+//! `card_data`, `card_detail`, `cvv`, `cvc`, `pan`, `account_number`,
+//! `bank_account`, `routing_number`, `sort_code`, `iban`, `swift`, `ssn`,
+//! `social_security`, `tax_id`.
 //! Substring matching ensures compound names like `provider_api_key` or
 //! `new_password` are also caught.
 
@@ -26,16 +28,31 @@ const MAX_LOG_BODY_SIZE: usize = 64 * 1024; // 64 KiB
 /// Substrings whose presence in a field name (case-insensitive) triggers
 /// redaction. Using `contains` instead of exact-match so compound names
 /// like `provider_api_key`, `new_password`, `stripe_secret_key` are caught.
+///
+/// Covers: auth credentials, payment card data, bank account identifiers,
+/// and personal identifiers that appear in payment request payloads.
 const SENSITIVE_SUBSTRINGS: &[&str] = &[
     "password",
     "api_key",
     "secret",
-    "token",        // catches refresh_token, access_token, token
+    "token",         // catches refresh_token, access_token, token
     "credential",
     "authorization",
     "card_number",
+    "card_data",
+    "card_detail",   // catches card_details
     "cvv",
+    "cvc",
     "pan",
+    "account_number",
+    "bank_account",
+    "routing_number",
+    "sort_code",
+    "iban",
+    "swift",         // catches swift_code, swift_bic
+    "ssn",
+    "social_security",
+    "tax_id",
 ];
 
 /// Axum middleware that logs request and response bodies with PII redacted.
@@ -227,6 +244,38 @@ mod tests {
         assert_eq!(val["card_number"], "[REDACTED]");
         // agent_name does NOT contain any sensitive substring.
         assert_eq!(val["agent_name"], "my-agent");
+    }
+
+    #[test]
+    fn redacts_payment_sensitive_fields() {
+        let mut val = json!({
+            "account_number": "1234567890",
+            "bank_account": "NL91ABNA0417164300",
+            "routing_number": "021000021",
+            "iban": "DE89370400440532013000",
+            "swift_code": "COBADEFFXXX",
+            "card_data": {"pan": "4111111111111111"},
+            "cvc": "123",
+            "ssn": "123-45-6789",
+            "tax_id": "12-3456789",
+            "sort_code": "12-34-56",
+            "agent_id": "agt_123",
+            "amount": 99.99
+        });
+        redact_value(&mut val);
+        assert_eq!(val["account_number"], "[REDACTED]");
+        assert_eq!(val["bank_account"], "[REDACTED]");
+        assert_eq!(val["routing_number"], "[REDACTED]");
+        assert_eq!(val["iban"], "[REDACTED]");
+        assert_eq!(val["swift_code"], "[REDACTED]");
+        assert_eq!(val["card_data"], "[REDACTED]");
+        assert_eq!(val["cvc"], "[REDACTED]");
+        assert_eq!(val["ssn"], "[REDACTED]");
+        assert_eq!(val["tax_id"], "[REDACTED]");
+        assert_eq!(val["sort_code"], "[REDACTED]");
+        // Non-sensitive fields preserved.
+        assert_eq!(val["agent_id"], "agt_123");
+        assert_eq!(val["amount"], 99.99);
     }
 
     #[test]

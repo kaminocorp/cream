@@ -39,6 +39,22 @@ pub async fn create(
     agent: AuthenticatedAgent,
     ValidatedJson(body): ValidatedJson<CreateCardRequest>,
 ) -> Result<(StatusCode, Json<VirtualCard>), ApiError> {
+    // Validate expires_at is in the future (if provided).
+    if let Some(exp) = body.expires_at {
+        if exp <= chrono::Utc::now() {
+            return Err(ApiError::ValidationError(
+                "expires_at must be in the future".into(),
+            ));
+        }
+        // Cap at 10 years to prevent unreasonably distant expiry dates.
+        let max_expiry = chrono::Utc::now() + chrono::Duration::days(3650);
+        if exp > max_expiry {
+            return Err(ApiError::ValidationError(
+                "expires_at must be within 10 years".into(),
+            ));
+        }
+    }
+
     let provider_id = body
         .provider_id
         .map(|id| ProviderId::try_new(id).map_err(|e| ApiError::ValidationError(e.to_string())))

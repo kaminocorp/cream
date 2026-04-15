@@ -65,6 +65,25 @@ fn extract_key_hash_from_header(request: &Request<Body>) -> Option<String> {
     Some(hash)
 }
 
+/// Lua script for truly atomic INCR + conditional EXPIRE.
+///
+/// Redis pipelines batch commands over the network but do NOT execute them
+/// atomically — other clients can interleave commands between INCR and EXPIRE.
+/// A Lua script runs inside Redis's single-threaded event loop, making the
+/// increment-and-set-TTL operation indivisible.
+///
+/// Only the first request in a window (count == 1) sets the TTL, avoiding
+/// redundant EXPIRE calls. If a key somehow loses its TTL (Redis bug, AOF
+/// corruption), it will eventually be replaced by a new window key since the
+/// key includes the window epoch.
+const RATE_LIMIT_SCRIPT: &str = r#"
+    local count = redis.call('INCR', KEYS[1])
+    if count == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+    end
+    return count
+"#;
+
 async fn increment_counter(
     redis: &redis::aio::ConnectionManager,
     key: &str,
@@ -72,20 +91,10 @@ async fn increment_counter(
 ) -> Result<u64, redis::RedisError> {
     let mut conn = redis.clone();
 
-    // Use a pipeline to make INCR + EXPIRE atomic at the network level.
-    // EXPIRE is sent on every request (not just count==1) to be self-healing:
-    // if a prior EXPIRE was lost due to a crash between INCR and EXPIRE,
-    // the next request will set the TTL correctly. The slight overhead of
-    // a redundant EXPIRE is negligible compared to the risk of a key
-    // leaking without TTL and permanently rate-limiting an agent.
-    let (count,): (u64,) = redis::pipe()
-        .cmd("INCR")
-        .arg(key)
-        .cmd("EXPIRE")
-        .arg(key)
+    let count: u64 = redis::Script::new(RATE_LIMIT_SCRIPT)
+        .key(key)
         .arg(window_secs)
-        .ignore()
-        .query_async(&mut conn)
+        .invoke_async(&mut conn)
         .await?;
 
     Ok(count)

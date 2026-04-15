@@ -242,11 +242,15 @@ impl PaymentOrchestrator {
         {
             Ok(r) => r,
             Err(e) => {
-                payment.transition(PaymentStatus::Failed).ok();
-                self.state.payment_repo.update_payment(&payment).await.ok();
-                self.write_audit(&payment, agent, &decision, None, None, 0)
-                    .await
-                    .ok();
+                if let Err(te) = payment.transition(PaymentStatus::Failed) {
+                    tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed");
+                }
+                if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
+                    tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after routing failure");
+                }
+                if let Err(ae) = self.write_audit(&payment, agent, &decision, None, None, 0).await {
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after routing failure");
+                }
                 if let Err(rel_err) = self
                     .state
                     .idempotency_guard
@@ -270,12 +274,16 @@ impl PaymentOrchestrator {
             Ok(r) => r,
             Err(e) => {
                 if !payment.status().is_terminal() {
-                    payment.transition(PaymentStatus::Failed).ok();
-                    self.state.payment_repo.update_payment(&payment).await.ok();
+                    if let Err(te) = payment.transition(PaymentStatus::Failed) {
+                        tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed");
+                    }
+                    if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
+                        tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after provider failure");
+                    }
                 }
-                self.write_audit(&payment, agent, &decision, Some(&routing), None, 0)
-                    .await
-                    .ok();
+                if let Err(ae) = self.write_audit(&payment, agent, &decision, Some(&routing), None, 0).await {
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after provider failure");
+                }
                 if let Err(rel_err) = self
                     .state
                     .idempotency_guard
@@ -412,11 +420,15 @@ impl PaymentOrchestrator {
         {
             Ok(r) => r,
             Err(e) => {
-                payment.transition(PaymentStatus::Failed).ok();
-                self.state.payment_repo.update_payment(&payment).await.ok();
-                self.write_audit(&payment, agent, &decision, None, None, 0)
-                    .await
-                    .ok();
+                if let Err(te) = payment.transition(PaymentStatus::Failed) {
+                    tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed in resume_after_approval");
+                }
+                if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
+                    tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after routing failure in resume_after_approval");
+                }
+                if let Err(ae) = self.write_audit(&payment, agent, &decision, None, None, 0).await {
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after routing failure in resume_after_approval");
+                }
                 // Release idempotency key so the agent can retry.
                 if let Err(rel_err) = self
                     .state
@@ -441,12 +453,16 @@ impl PaymentOrchestrator {
             Ok(r) => r,
             Err(e) => {
                 if !payment.status().is_terminal() {
-                    payment.transition(PaymentStatus::Failed).ok();
-                    self.state.payment_repo.update_payment(&payment).await.ok();
+                    if let Err(te) = payment.transition(PaymentStatus::Failed) {
+                        tracing::error!(payment_id = %payment.id, error = %te, "error-recovery: transition to Failed failed in resume_after_approval");
+                    }
+                    if let Err(ue) = self.state.payment_repo.update_payment(&payment).await {
+                        tracing::error!(payment_id = %payment.id, error = %ue, "error-recovery: update_payment failed after provider failure in resume_after_approval");
+                    }
                 }
-                self.write_audit(&payment, agent, &decision, Some(&routing), None, 0)
-                    .await
-                    .ok();
+                if let Err(ae) = self.write_audit(&payment, agent, &decision, Some(&routing), None, 0).await {
+                    tracing::error!(payment_id = %payment.id, error = %ae, "error-recovery: write_audit failed after provider failure in resume_after_approval");
+                }
                 // Release idempotency key so the agent can retry.
                 if let Err(rel_err) = self
                     .state
@@ -1068,10 +1084,28 @@ async fn check_escalation_timeouts(state: &AppState) -> Result<(), ApiError> {
                     };
 
                     // Write audit entry for the timeout/block transition.
+                    // Serialization of domain models should never fail, but if
+                    // it does we must not silently write {} to the immutable
+                    // ledger — log at error level and include a diagnostic
+                    // marker so the entry is identifiable.
                     let request_json = serde_json::to_value(&payment.request)
-                        .unwrap_or_else(|_| serde_json::json!({}));
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                payment_id = %payment.id,
+                                error = %e,
+                                "BUG: failed to serialize payment request for audit entry"
+                            );
+                            serde_json::json!({"_serialization_error": e.to_string(), "payment_id": payment.id.to_string()})
+                        });
                     let justification_json = serde_json::to_value(&payment.request.justification)
-                        .unwrap_or_else(|_| serde_json::json!({}));
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                payment_id = %payment.id,
+                                error = %e,
+                                "BUG: failed to serialize justification for audit entry"
+                            );
+                            serde_json::json!({"_serialization_error": e.to_string(), "payment_id": payment.id.to_string()})
+                        });
 
                     let audit_entry = AuditEntry {
                         id: AuditEntryId::new(),

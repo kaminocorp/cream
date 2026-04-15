@@ -5,6 +5,7 @@
 //! status via `GET /v1/audit/exports/{id}`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use cream_audit::{AuditQuery, AuditReader};
@@ -421,11 +422,18 @@ async fn run_export_inner(
         }
     };
 
-    // Upload to S3.
-    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_s3::config::Region::new(region.to_string()))
-        .load()
-        .await;
+    // Upload to S3 with retry (3 attempts, exponential backoff).
+    // Transient S3 errors (network hiccups, 503 SlowDown) should not
+    // permanently fail an export that took minutes to assemble.
+    let aws_config = tokio::time::timeout(
+        Duration::from_secs(30),
+        aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(region.to_string()))
+            .load(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("S3 config load timed out after 30s"))?;
+
     let s3_client = aws_sdk_s3::Client::new(&aws_config);
 
     let content_type = match format {
@@ -433,17 +441,35 @@ async fn run_export_inner(
         ExportFormat::Ndjson => "application/x-ndjson",
     };
 
-    s3_client
-        .put_object()
-        .bucket(&bucket)
-        .key(&s3_key)
-        .body(body.into())
-        .content_type(content_type)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("S3 upload failed: {e}"))?;
+    const S3_RETRY_BACKOFFS: &[u64] = &[2, 5, 15];
+    let mut last_err = String::new();
+    for (attempt, backoff) in S3_RETRY_BACKOFFS.iter().enumerate() {
+        match s3_client
+            .put_object()
+            .bucket(&bucket)
+            .key(&s3_key)
+            .body(body.clone().into())
+            .content_type(content_type)
+            .send()
+            .await
+        {
+            Ok(_) => return Ok((total_rows, s3_key)),
+            Err(e) => {
+                last_err = format!("{e}");
+                tracing::warn!(
+                    job_id = %job_id,
+                    attempt = attempt + 1,
+                    max_attempts = S3_RETRY_BACKOFFS.len(),
+                    backoff_secs = backoff,
+                    error = %last_err,
+                    "S3 upload failed, retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(*backoff)).await;
+            }
+        }
+    }
 
-    Ok((total_rows, s3_key))
+    Err(anyhow::anyhow!("S3 upload failed after {} attempts: {last_err}", S3_RETRY_BACKOFFS.len()))
 }
 
 #[cfg(test)]

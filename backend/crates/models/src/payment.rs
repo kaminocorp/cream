@@ -26,7 +26,8 @@ pub const MAX_CATEGORY_OTHER_LEN: usize = 500;
 ///                      → PendingApproval → Approved
 ///                                        → Rejected
 ///                                        → TimedOut → Blocked
-///                      → Blocked
+///                      → Blocked (policy deny)
+///                      → Failed  (system error during validation)
 /// Submitted → Failed (post-provider)
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -64,6 +65,7 @@ impl PaymentStatus {
                 | (PaymentStatus::Validating, PaymentStatus::Approved)
                 | (PaymentStatus::Validating, PaymentStatus::PendingApproval)
                 | (PaymentStatus::Validating, PaymentStatus::Blocked)
+                | (PaymentStatus::Validating, PaymentStatus::Failed)
                 | (PaymentStatus::PendingApproval, PaymentStatus::Approved)
                 | (PaymentStatus::PendingApproval, PaymentStatus::Rejected)
                 | (PaymentStatus::PendingApproval, PaymentStatus::TimedOut)
@@ -709,6 +711,13 @@ mod tests {
         assert!(!PaymentStatus::Approved.is_terminal());
         assert!(!PaymentStatus::Submitted.is_terminal());
         assert!(!PaymentStatus::TimedOut.is_terminal());
+    }
+
+    #[test]
+    fn validating_can_transition_to_failed() {
+        // System errors during policy evaluation (e.g., DB timeout) should
+        // transition to Failed, not Blocked. Blocked is a policy deny.
+        assert!(PaymentStatus::Validating.can_transition_to(PaymentStatus::Failed));
     }
 
     #[test]

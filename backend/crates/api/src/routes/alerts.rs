@@ -122,14 +122,19 @@ pub async fn create_alert(
             VALID_CONDITIONS.join(", ")
         )));
     }
-    if body.window_seconds <= 0 {
+    if body.window_seconds <= 0 || body.window_seconds > 86_400 {
         return Err(ApiError::ValidationError(
-            "window_seconds must be positive".into(),
+            "window_seconds must be between 1 and 86400 (24 hours)".into(),
         ));
     }
-    if body.cooldown_seconds <= 0 {
+    if body.cooldown_seconds <= 0 || body.cooldown_seconds > 604_800 {
         return Err(ApiError::ValidationError(
-            "cooldown_seconds must be positive".into(),
+            "cooldown_seconds must be between 1 and 604800 (7 days)".into(),
+        ));
+    }
+    if body.threshold < Decimal::ZERO {
+        return Err(ApiError::ValidationError(
+            "threshold must be non-negative".into(),
         ));
     }
 
@@ -189,16 +194,23 @@ pub async fn update_alert(
         }
     }
     if let Some(ws) = body.window_seconds {
-        if ws <= 0 {
+        if ws <= 0 || ws > 86_400 {
             return Err(ApiError::ValidationError(
-                "window_seconds must be positive".into(),
+                "window_seconds must be between 1 and 86400 (24 hours)".into(),
             ));
         }
     }
     if let Some(cs) = body.cooldown_seconds {
-        if cs <= 0 {
+        if cs <= 0 || cs > 604_800 {
             return Err(ApiError::ValidationError(
-                "cooldown_seconds must be positive".into(),
+                "cooldown_seconds must be between 1 and 604800 (7 days)".into(),
+            ));
+        }
+    }
+    if let Some(t) = body.threshold {
+        if t < Decimal::ZERO {
+            return Err(ApiError::ValidationError(
+                "threshold must be non-negative".into(),
             ));
         }
     }

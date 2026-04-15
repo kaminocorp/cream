@@ -35,16 +35,37 @@ pub fn propagate_request_id_layer() -> PropagateRequestIdLayer {
 /// and records it as a field on the current tracing span. This causes every
 /// log line emitted during the request to include `request_id=<uuid>` in
 /// structured output, enabling correlation across the full request lifecycle.
+///
+/// The header value is validated as a UUID. If the client supplies a
+/// non-UUID value (potential log injection / audit trail spoofing), it is
+/// replaced with a fresh UUIDv7 and the original value is logged at WARN.
 pub async fn inject_request_id(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let request_id = request
+    let raw = request
         .headers()
         .get(&X_REQUEST_ID)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+
+    // Validate as UUID — reject arbitrary strings that could pollute traces.
+    let request_id = if raw.is_empty() {
+        // SetRequestIdLayer already generates one; this branch handles the
+        // edge case where the layer is disabled or the header was stripped.
+        Uuid::now_v7().to_string()
+    } else if Uuid::parse_str(&raw).is_ok() {
+        raw
+    } else {
+        let fresh = Uuid::now_v7().to_string();
+        tracing::warn!(
+            original_request_id = %raw,
+            replacement_request_id = %fresh,
+            "X-Request-Id is not a valid UUID, replacing"
+        );
+        fresh
+    };
 
     // Record into the current span so all child spans and log events inherit it.
     tracing::Span::current().record("request_id", request_id.as_str());
